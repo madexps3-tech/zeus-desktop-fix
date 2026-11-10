@@ -83,15 +83,38 @@ if (-not (Test-Path -LiteralPath $terminal)) {
 }
 Write-Host "Using MetaTrader:"
 Write-Host $terminal
+
+$log = Join-Path $root "ZEUS_ENGINE_LOG.txt"
+if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
 $env:PYTHONPATH = Join-Path $root "src"
 $env:ZEUS3_MT5_TERMINAL_PATH = $terminal
-Write-Host "Connecting. This should take under a minute. The engine window will show Mapped markets when it is ready."
-$proc = Start-Process -FilePath $py -ArgumentList @("-u","-m","zeus3.v19.web","--terminal-path",$terminal) -WorkingDirectory $root -WindowStyle Normal -PassThru
+$inner = ' "' + $py + '" -u -m zeus3.v19.web --terminal-path "' + $terminal + '" 1> "' + $log + '" 2>&1 '
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = "cmd.exe"
+$psi.Arguments = '/s /c "' + $inner + '"'
+$psi.WorkingDirectory = $root
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.EnvironmentVariables["PYTHONPATH"] = $env:PYTHONPATH
+$psi.EnvironmentVariables["ZEUS3_MT5_TERMINAL_PATH"] = $terminal
+Write-Host "Connecting. This should take under a minute."
+$proc = [Diagnostics.Process]::Start($psi)
+
+function Show-EngineLog {
+  if (Test-Path -LiteralPath $log) {
+    Write-Host ""
+    Write-Host "Engine error:"
+    Get-Content -LiteralPath $log -Tail 40
+  } else {
+    Write-Host "No engine log was written."
+  }
+}
 
 $up = $false
 for ($i = 1; $i -le 75; $i++) {
   if ($proc.HasExited) {
-    Write-Host "The chart engine stopped. Read the engine window."
+    Write-Host "The chart engine stopped."
+    Show-EngineLog
     exit 1
   }
   try {
@@ -102,7 +125,8 @@ for ($i = 1; $i -le 75; $i++) {
   Start-Sleep -Seconds 1
 }
 if (-not $up) {
-  Write-Host "MetaTrader did not answer within a minute. The engine window has the reason."
+  Write-Host "MetaTrader did not answer within a minute."
+  Show-EngineLog
   exit 1
 }
 Write-Host "Chart engine is running. Opening the ZEUS window."
@@ -115,8 +139,9 @@ if ($LASTEXITCODE -ne 0) {
   & $py -u (Join-Path $root "zeus_desktop.py")
   if ($LASTEXITCODE -ne 0) {
     Write-Host "The ZEUS window still did not open."
+    Show-EngineLog
     exit 1
   }
 }
-Write-Host "ZEUS is open. You can close this window. Leave the engine window open."
+Write-Host "ZEUS is open. You can close this window. Leave the engine running."
 exit 0
