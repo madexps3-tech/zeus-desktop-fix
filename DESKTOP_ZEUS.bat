@@ -10,8 +10,10 @@ if not exist "%PY%" (
   exit /b 2
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
-powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/766e2b914a3d7024981ae33ba3f8e110fc489a17/unlock_shadow.py' -OutFile '%CD%\unlock_shadow.py'"
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/766e2b914a3d7024981ae33ba3f8e110fc489a17/unlock_shadow.py' -OutFile '%CD%\unlock_shadow.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/main/hunt.py' -OutFile '%CD%\src\gold_shadow\hunt.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/main/apply_rules.py' -OutFile '%CD%\apply_rules.py'"
 "%PY%" "%CD%\unlock_shadow.py" "%CD%"
+if errorlevel 1 goto fail
+"%PY%" "%CD%\apply_rules.py" "%CD%"
 if errorlevel 1 goto fail
 echo Leave MetaTrader logged in.
 echo Closing any stuck ZEUS loader.
