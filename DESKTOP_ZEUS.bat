@@ -8,6 +8,11 @@ if not exist "%PY%" (
   pause
   exit /b 2
 )
+if not exist "%CD%\zeus_desktop.py" (
+  echo zeus_desktop.py is missing from this folder.
+  pause
+  exit /b 2
+)
 echo This does not open Chrome or Edge.
 "%PY%" -c "import webview" >nul 2>&1
 if errorlevel 1 (
@@ -31,29 +36,6 @@ if errorlevel 1 (
     exit /b 2
   )
 )
-powershell -NoProfile -Command "$p=Join-Path (Get-Location).Path 'zeus_desktop.py'; @'
-import sys, time, urllib.request
-URL = "http://127.0.0.1:8783/"
-def wait_until_up(timeout=90):
-    end = time.time() + timeout
-    while time.time() < end:
-        try:
-            urllib.request.urlopen(URL, timeout=2).close()
-            return True
-        except Exception:
-            time.sleep(0.4)
-    return False
-def main():
-    if not wait_until_up():
-        print("ZEUS did not start. Read ZEUS_SERVER_LOG.txt")
-        return 1
-    import webview
-    webview.create_window("ZEUS", URL, width=1440, height=900)
-    webview.start()
-    return 0
-if __name__ == "__main__":
-    raise SystemExit(main())
-'@ | Set-Content -LiteralPath $p -Encoding UTF8"
 echo Closing any old ZEUS server...
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":8783" ^| findstr "LISTENING"') do taskkill /PID %%P /F >nul 2>&1
 set "PYTHONPATH=%CD%\src"
