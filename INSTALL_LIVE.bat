@@ -1,11 +1,8 @@
 @echo off
 setlocal EnableExtensions
-set "ROOT="
-if exist "%~dp0src\zeus3\v19\shadow_book_page.py" set "ROOT=%~dp0"
-if not defined ROOT if exist "C:\Zeus V3 world brian\ZEUS_RC11_WINDOWS_RETRY\src\zeus3\v19\shadow_book_page.py" set "ROOT=C:\Zeus V3 world brian\ZEUS_RC11_WINDOWS_RETRY"
-if not defined ROOT (
-  echo Could not find the ZEUS folder.
-  echo Copy this bat into C:\Zeus V3 world brian\ZEUS_RC11_WINDOWS_RETRY and run it there.
+set "ROOT=C:\Zeus V3 world brian\ZEUS_RC11_WINDOWS_RETRY"
+if not exist "%ROOT%\src\zeus3\v19\shadow_book_page.py" (
+  echo Could not find %ROOT%
   pause
   exit /b 1
 )
@@ -15,7 +12,7 @@ curl -fsSL "%BASE%/mbo_book.py" -o "%ROOT%\src\gold_shadow\mbo_book.py"
 if errorlevel 1 goto fail
 curl -fsSL "%BASE%/shadow_book_page.py" -o "%ROOT%\src\zeus3\v19\shadow_book_page.py"
 if errorlevel 1 goto fail
-curl -fsSL "https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/ffa4a1b9753b1f2507e73a64a5eebda77e71c802/apply_clock.py" -o "%TEMP%\apply_clock.py"
+curl -fsSL "https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/14e1af1db553607f55534189c69246e5a3e65b60/apply_clock.py" -o "%TEMP%\apply_clock.py"
 if errorlevel 1 goto fail
 python "%TEMP%\apply_clock.py" "%ROOT%"
 if errorlevel 1 goto fail
