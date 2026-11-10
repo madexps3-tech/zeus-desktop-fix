@@ -56,7 +56,10 @@ if __name__ == "__main__":
 $utf8 = New-Object System.Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Join-Path $root "zeus_desktop.py"), $desktopPy, $utf8)
 
-Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*zeus3.v19.web*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
+  $_.CommandLine -like "*zeus3.v19.web*" -or $_.ExecutablePath -like "*ZEUS_RC11_WINDOWS_RETRY\runtime\python*"
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 1
 
 & $py -c "import webview" | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -71,50 +74,27 @@ if ($LASTEXITCODE -ne 0) {
 
 $terminal = "C:\Users\madex\OneDrive\Desktop\MetaTrader 5 - Copy\terminal64.exe"
 if (-not (Test-Path -LiteralPath $terminal)) {
-  $found = @(Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'" | Where-Object { $_.ExecutablePath } | Select-Object -ExpandProperty ExecutablePath)
-  $copy = $found | Where-Object { $_ -like "*MetaTrader 5 - Copy*" } | Select-Object -First 1
-  if ($copy) { $terminal = $copy }
-  elseif ($found.Count -eq 1) { $terminal = $found[0] }
-  else {
-    Write-Host "Log into the MetaTrader 5 Copy on your desktop, then run this again."
-    $found | ForEach-Object { Write-Host $_ }
-    exit 1
-  }
+  Write-Host "MetaTrader 5 Copy was not found at:"
+  Write-Host $terminal
+  exit 1
 }
 Write-Host "Using MetaTrader:"
 Write-Host $terminal
-
-$log = Join-Path $root "ZEUS_ENGINE_LOG.txt"
-if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
 $env:PYTHONPATH = Join-Path $root "src"
 $env:ZEUS3_MT5_TERMINAL_PATH = $terminal
-$inner = ' "' + $py + '" -u -m zeus3.v19.web --terminal-path "' + $terminal + '" 1> "' + $log + '" 2>&1 '
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = "cmd.exe"
-$psi.Arguments = '/s /c "' + $inner + '"'
+$psi.FileName = $py
+$psi.Arguments = "-u -m zeus3.v19.web --terminal-path `"$terminal`""
 $psi.WorkingDirectory = $root
-$psi.UseShellExecute = $false
-$psi.CreateNoWindow = $true
-$psi.EnvironmentVariables["PYTHONPATH"] = $env:PYTHONPATH
-$psi.EnvironmentVariables["ZEUS3_MT5_TERMINAL_PATH"] = $terminal
-Write-Host "Connecting. This should take under a minute."
+$psi.UseShellExecute = $true
+$psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+Write-Host "A ZEUS engine window will open. Leave it open. It should show Mapped markets."
 $proc = [Diagnostics.Process]::Start($psi)
 
-function Show-EngineLog {
-  if (Test-Path -LiteralPath $log) {
-    Write-Host ""
-    Write-Host "Engine error:"
-    Get-Content -LiteralPath $log -Tail 40
-  } else {
-    Write-Host "No engine log was written."
-  }
-}
-
 $up = $false
-for ($i = 1; $i -le 75; $i++) {
+for ($i = 1; $i -le 90; $i++) {
   if ($proc.HasExited) {
-    Write-Host "The chart engine stopped."
-    Show-EngineLog
+    Write-Host "The engine window closed. Send me the text that was in it."
     exit 1
   }
   try {
@@ -125,8 +105,7 @@ for ($i = 1; $i -le 75; $i++) {
   Start-Sleep -Seconds 1
 }
 if (-not $up) {
-  Write-Host "MetaTrader did not answer within a minute."
-  Show-EngineLog
+  Write-Host "The chart did not open. Read the other window titled python and send me its text."
   exit 1
 }
 Write-Host "Chart engine is running. Opening the ZEUS window."
@@ -139,9 +118,8 @@ if ($LASTEXITCODE -ne 0) {
   & $py -u (Join-Path $root "zeus_desktop.py")
   if ($LASTEXITCODE -ne 0) {
     Write-Host "The ZEUS window still did not open."
-    Show-EngineLog
     exit 1
   }
 }
-Write-Host "ZEUS is open. You can close this window. Leave the engine running."
+Write-Host "ZEUS is open. You can close this window. Leave the engine window open."
 exit 0
