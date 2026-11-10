@@ -3,38 +3,38 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 set "PY=%CD%\runtime\python\python.exe"
 set "PYTHONPATH=%CD%\src"
+set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/034814b90628020c926824b3e76c525bdadb292b"
 if not exist "%PY%" (
   echo Put DESKTOP_ZEUS.bat in the ZEUS folder, next to START_ZEUS3_V19_RC.bat
   pause
   exit /b 2
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
-echo Leave MetaTrader logged in. The test result stays in this window.
-powershell -NoProfile -Command "$dir=(Get-Location).Path; [IO.File]::WriteAllBytes((Join-Path $dir 'zeus_probe.py'), [Convert]::FromBase64String('aW1wb3J0IG9zLCBzeXMsIHN1YnByb2Nlc3MKZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgprbm93biA9IHIiQzpcVXNlcnNcbWFkZXhcT25lRHJpdmVcRGVza3RvcFxNZXRhVHJhZGVyIDUgLSBDb3B5XHRlcm1pbmFsNjQuZXhlIgpwcmludCgiTWV0YVRyYWRlciBmaWxlIGV4aXN0czoiLCBQYXRoKGtub3duKS5leGlzdHMoKSwgZmx1c2g9VHJ1ZSkKcHJpbnQoIkxvb2tpbmcgZm9yIHRoZSBydW5uaW5nIHRlcm1pbmFsLiIsIGZsdXNoPVRydWUpCnBhdGhzID0gW10KdHJ5OgogICAgcHMgPSBzdWJwcm9jZXNzLnJ1bigKICAgICAgICBbInBvd2Vyc2hlbGwiLCAiLU5vUHJvZmlsZSIsICItTm9uSW50ZXJhY3RpdmUiLCAiLUNvbW1hbmQiLAogICAgICAgICAiR2V0LUNpbUluc3RhbmNlIFdpbjMyX1Byb2Nlc3MgLUZpbHRlciBcIk5hbWU9J3Rlcm1pbmFsNjQuZXhlJ1wiIHwgU2VsZWN0LU9iamVjdCAtRXhwYW5kUHJvcGVydHkgRXhlY3V0YWJsZVBhdGgiXSwKICAgICAgICBjYXB0dXJlX291dHB1dD1UcnVlLCB0ZXh0PVRydWUsIHRpbWVvdXQ9MTIsCiAgICApCiAgICBwYXRocyA9IFtsaW5lLnN0cmlwKCkgZm9yIGxpbmUgaW4gKHBzLnN0ZG91dCBvciAiIikuc3BsaXRsaW5lcygpIGlmIGxpbmUuc3RyaXAoKS5sb3dlcigpLmVuZHN3aXRoKCJ0ZXJtaW5hbDY0LmV4ZSIpXQpleGNlcHQgRXhjZXB0aW9uIGFzIGV4YzoKICAgIHByaW50KCJDb3VsZCBub3QgbGlzdCB0ZXJtaW5hbHM6IiwgdHlwZShleGMpLl9fbmFtZV9fLCBmbHVzaD1UcnVlKQppZiBub3QgcGF0aHM6CiAgICBwcmludCgiTm8gcnVubmluZyB0ZXJtaW5hbDY0LmV4ZSB3YXMgZm91bmQuIiwgZmx1c2g9VHJ1ZSkKICAgIHRlcm1pbmFsID0ga25vd24KZWxzZToKICAgIGZvciBwYXRoIGluIHBhdGhzOgogICAgICAgIHByaW50KCJSdW5uaW5nOiIsIHBhdGgsIGZsdXNoPVRydWUpCiAgICBjb3B5ID0gW3BhdGggZm9yIHBhdGggaW4gcGF0aHMgaWYgIk1ldGFUcmFkZXIgNSAtIENvcHkiIGluIHBhdGhdCiAgICB0ZXJtaW5hbCA9IGNvcHlbMF0gaWYgY29weSBlbHNlIHBhdGhzWzBdCnByaW50KCJUZXN0aW5nOiIsIHRlcm1pbmFsLCBmbHVzaD1UcnVlKQpjb2RlID0gKAogICAgImltcG9ydCBzeXNcbiIKICAgICJpbXBvcnQgTWV0YVRyYWRlcjUgYXMgbXQ1XG4iCiAgICAib2sgPSBtdDUuaW5pdGlhbGl6ZShzeXMuYXJndlsxXSwgdGltZW91dD04MDAwKVxuIgogICAgInByaW50KCdSRVNVTFQnLCBib29sKG9rKSwgbXQ1Lmxhc3RfZXJyb3IoKSwgZmx1c2g9VHJ1ZSlcbiIKICAgICJpZiBvazpcbiIKICAgICIgICAgaW5mbyA9IG10NS5hY2NvdW50X2luZm8oKVxuIgogICAgIiAgICBwcmludCgnQUNDT1VOVCcsIGdldGF0dHIoaW5mbywgJ2xvZ2luJywgTm9uZSksIGdldGF0dHIoaW5mbywgJ3NlcnZlcicsIE5vbmUpLCBmbHVzaD1UcnVlKVxuIgogICAgIiAgICBtdDUuc2h1dGRvd24oKVxuIgogICAgInJhaXNlIFN5c3RlbUV4aXQoMCBpZiBvayBlbHNlIDEpXG4iCikKcHJvYyA9IHN1YnByb2Nlc3MuUG9wZW4oW3N5cy5leGVjdXRhYmxlLCAiLWMiLCBjb2RlLCB0ZXJtaW5hbF0sIHN0ZG91dD1zdWJwcm9jZXNzLlBJUEUsIHN0ZGVycj1zdWJwcm9jZXNzLlNURE9VVCwgdGV4dD1UcnVlKQp0cnk6CiAgICBvdXQsIF8gPSBwcm9jLmNvbW11bmljYXRlKHRpbWVvdXQ9MTUpCmV4Y2VwdCBzdWJwcm9jZXNzLlRpbWVvdXRFeHBpcmVkOgogICAgcHJvYy5raWxsKCkKICAgIHByaW50KCJNZXRhVHJhZGVyIGRpZCBub3QgYW5zd2VyIHRoZSA4IHNlY29uZCB0ZXN0LiIsIGZsdXNoPVRydWUpCiAgICBwcmludCgiVGhlIGNoYXJ0IGNhbm5vdCBvcGVuIHVudGlsIE1ldGFUcmFkZXIgYWNjZXB0cyB0aGlzIGNvbm5lY3Rpb24uIiwgZmx1c2g9VHJ1ZSkKICAgIHJhaXNlIFN5c3RlbUV4aXQoMSkKcHJpbnQob3V0IG9yICIiLCBmbHVzaD1UcnVlKQppZiBwcm9jLnJldHVybmNvZGUgIT0gMDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoMSkKUGF0aCgiWkVVU19URVJNSU5BTF9QQVRILnR4dCIpLndyaXRlX3RleHQodGVybWluYWwsIGVuY29kaW5nPSJ1dGYtOCIpCnByaW50KCJNZXRhVHJhZGVyIGFuc3dlcmVkLiBTdGFydGluZyB0aGUgY2hhcnQuIiwgZmx1c2g9VHJ1ZSkK'))"
+echo Leave MetaTrader logged in. Close any old ZEUS Server window first.
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_probe.py' -OutFile '%CD%\zeus_probe.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'"
+if exist "%CD%\ZEUS_PROGRESS.txt" del "%CD%\ZEUS_PROGRESS.txt"
 "%PY%" "%CD%\zeus_probe.py"
-if errorlevel 1 (
-  echo.
-  echo Send me this window. It now has the MetaTrader result.
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto fail
 set /p ZEUS3_MT5_TERMINAL_PATH=<"%CD%\ZEUS_TERMINAL_PATH.txt"
-powershell -NoProfile -Command "$dir=(Get-Location).Path; [IO.File]::WriteAllBytes((Join-Path $dir 'zeus_wait.py'), [Convert]::FromBase64String('aW1wb3J0IHRpbWUsIHVybGxpYi5yZXF1ZXN0CnVybCA9ICJodHRwOi8vMTI3LjAuMC4xOjg3ODMvIgpmb3IgaSBpbiByYW5nZSg3MCk6CiAgICB0cnk6CiAgICAgICAgdXJsbGliLnJlcXVlc3QudXJsb3Blbih1cmwsIHRpbWVvdXQ9MikuY2xvc2UoKQogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoMCkKICAgIGV4Y2VwdCBTeXN0ZW1FeGl0OgogICAgICAgIHJhaXNlCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIGlmIGkgJSAxMCA9PSA5OgogICAgICAgICAgICBwcmludCgiU3RpbGwgY29ubmVjdGluZy4uLiIsIGkgKyAxLCBmbHVzaD1UcnVlKQogICAgICAgIHRpbWUuc2xlZXAoMSkKcHJpbnQoIlRoZSBlbmdpbmUgZGlkIG5vdCBhbnN3ZXIuIFJlYWQgdGhlIFpFVVMgU2VydmVyIHdpbmRvdy4iKQpyYWlzZSBTeXN0ZW1FeGl0KDEpCg==')); [IO.File]::WriteAllBytes((Join-Path $dir 'zeus_desktop.py'), [Convert]::FromBase64String('aW1wb3J0IHRpbWUsIHVybGxpYi5yZXF1ZXN0ClVSTCA9ICJodHRwOi8vMTI3LjAuMC4xOjg3ODMvIgpvayA9IEZhbHNlCmVuZCA9IHRpbWUudGltZSgpICsgMzAKd2hpbGUgdGltZS50aW1lKCkgPCBlbmQ6CiAgICB0cnk6CiAgICAgICAgdXJsbGliLnJlcXVlc3QudXJsb3BlbihVUkwsIHRpbWVvdXQ9MikuY2xvc2UoKQogICAgICAgIG9rID0gVHJ1ZQogICAgICAgIGJyZWFrCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIHRpbWUuc2xlZXAoMC40KQppZiBub3Qgb2s6CiAgICByYWlzZSBTeXN0ZW1FeGl0KDEpCnByaW50KCJPcGVuaW5nIHRoZSBaRVVTIHdpbmRvdy4iKQppbXBvcnQgd2Vidmlldwp3ZWJ2aWV3LmNyZWF0ZV93aW5kb3coIlpFVVMiLCBVUkwsIHdpZHRoPTE0NDAsIGhlaWdodD05MDApCndlYnZpZXcuc3RhcnQoKQo='))"
+"%PY%" "%CD%\zeus_patch.py"
+if errorlevel 1 goto fail
+echo Starting the dashboard loader.
+start "ZEUS Server" /D "%CD%" "%PY%" -u -m zeus3.v19.web
+"%PY%" "%CD%\zeus_wait.py"
+if errorlevel 1 goto fail
 "%PY%" -c "import webview" >nul 2>&1
 if errorlevel 1 (
-  echo Installing the window toolkit. Internet is required this once.
+  echo Installing the window toolkit.
   powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '%CD%\get-pip.py'"
   "%PY%" "%CD%\get-pip.py" --no-warn-script-location
   "%PY%" -m pip install pywebview
 )
-echo A window titled ZEUS Server will open. Leave it open.
-start "ZEUS Server" /D "%CD%" "%PY%" -u -m zeus3.v19.web
-"%PY%" "%CD%\zeus_wait.py"
-if errorlevel 1 (
-  echo The test passed but the chart server did not open. Send me the ZEUS Server window.
-  pause
-  exit /b 1
-)
-echo Opening the ZEUS window.
 "%PY%" "%CD%\zeus_desktop.py"
+echo You can close this window. Leave ZEUS Server open while the dashboard is open.
 pause
+exit /b 0
+:fail
+echo.
+echo Send me this window.
+pause
+exit /b 1
