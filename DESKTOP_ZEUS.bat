@@ -5,16 +5,18 @@ set "PY=%CD%\runtime\python\python.exe"
 set "PYTHONPATH=%CD%\src"
 set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09"
 if not exist "%PY%" (
-  echo Put DESKTOP_ZEUS.bat in the ZEUS folder, next to START_ZEUS3_V19_RC.bat
+  echo This file must stay in the ZEUS folder.
   pause
   exit /b 2
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'"
+powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8783/' -TimeoutSec 3 | Out-Null; exit 0 } catch { exit 1 }"
+if not errorlevel 1 goto openwindow
 echo Leave MetaTrader logged in.
 echo Closing any stuck ZEUS loader.
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -like '*zeus3.v19.web*' -or $_.ExecutablePath -like '*ZEUS_RC11_WINDOWS_RETRY\runtime\python*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 timeout /t 2 /nobreak >nul
-powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'"
 if exist "%CD%\ZEUS_PROGRESS.txt" del "%CD%\ZEUS_PROGRESS.txt"
 "%PY%" "%CD%\zeus_probe.py"
 if errorlevel 1 goto fail
@@ -28,6 +30,8 @@ echo Starting one dashboard loader.
 start "ZEUS Server" /D "%CD%" "%PY%" -u -m zeus3.v19.web
 "%PY%" "%CD%\zeus_wait.py"
 if errorlevel 1 goto fail
+:openwindow
+echo Opening the ZEUS window.
 "%PY%" -c "import webview" >nul 2>&1
 if errorlevel 1 (
   echo Installing the window toolkit.
