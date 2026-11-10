@@ -78,7 +78,7 @@ if "def latch(" not in mbo:
     mbo_path.write_text(mbo, encoding="utf-8")
 
 page = page_path.read_text(encoding="utf-8")
-if "def latch(" in mbo or "latch(" not in page:
+if "latch(read_mbo" not in page:
     page = page.replace("lot_from_ticks, read_mbo", "latch, lot_from_ticks, read_mbo")
     page = page.replace("def _mbo_view(mt5, symbol, resolved, preview):", "def _mbo_view(mt5, symbol, resolved, preview, bar_time=None):")
     page = page.replace("mbo = read_mbo(symbol)", "mbo = latch(read_mbo(symbol), bar_time)")
@@ -96,6 +96,15 @@ if "start_shadow_hunt" not in web:
         "        await super().on_startup(app)\n",
         "        await super().on_startup(app)\n        try:\n            from gold_shadow.hunt import start as start_shadow_hunt\n            start_shadow_hunt()\n        except Exception:\n            pass\n",
         1,
+    )
+if "from gold_shadow.hunt import latest" not in web:
+    web = web.replace(
+        "from zeus3.v19.shadow_book_page import snapshot\n        try:\n            payload = await asyncio.get_running_loop().run_in_executor(None, snapshot)",
+        "from gold_shadow.hunt import latest\n        try:\n            payload = latest()",
+    )
+    web = web.replace(
+        "from zeus3.v19.shadow_book_page import snapshot\n        try:\n            payload = snapshot()",
+        "from gold_shadow.hunt import latest\n        try:\n            payload = latest()",
     )
 web_path.write_text(web, encoding="utf-8")
 print("RULES_PATCHED")
