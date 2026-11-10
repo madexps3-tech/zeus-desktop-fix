@@ -1,23 +1,22 @@
 from pathlib import Path
 
-path = Path("src") / "zeus2" / "integration" / "legacy_intelligence_bridge.py"
-if not path.exists():
-    print("Sierra bridge file was not found. The clock fix does not need it.")
-    raise SystemExit(0)
-text = path.read_text(encoding="utf-8")
-if "mbo_imbalance" in text:
-    print("MBO fields are already kept.")
-    raise SystemExit(0)
-needle = '"market_data_lag_seconds",'
-if needle not in text:
-    print("Could not find the Sierra metric list.")
-    raise SystemExit(1)
-extra = (
-    '"market_data_lag_seconds",\n'
-    '    "mbo_imbalance",\n'
-    '    "mbo_pull_stack",\n'
-    '    "bid_order_count",\n'
-    '    "ask_order_count",'
-)
-path.write_bytes(text.replace(needle, extra, 1).encode("utf-8"))
-print("Sierra will now keep MBO fields.")
+NEEDLE = '"market_data_lag_seconds",'
+EXTRA = '"market_data_lag_seconds",' + chr(10) + '    "mbo_imbalance",' + chr(10) + '    "mbo_pull_stack",'
+
+def patch(path: Path) -> None:
+    if not path.exists():
+        print("Missing", path)
+        return
+    text = path.read_text(encoding="utf-8")
+    if "mbo_imbalance" in text:
+        print("Already patched", path.name)
+        return
+    if NEEDLE not in text:
+        print("Metric list not found in", path.name)
+        return
+    path.write_bytes(text.replace(NEEDLE, EXTRA, 1).encode("utf-8"))
+    print("Patched", path.name)
+
+root = Path("src") / "zeus2" / "integration"
+patch(root / "legacy_intelligence_bridge.py")
+patch(root / "legacy_intelligence_pr737.py")
