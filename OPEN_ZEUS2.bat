@@ -37,12 +37,12 @@ if errorlevel 1 (
 set "EDGE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
 if not exist "%EDGE%" set "EDGE=%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
 if not exist "%EDGE%" (
-  echo Microsoft Edge was not found. ZEUS is running at http://127.0.0.1:8783/v19/shadow
+  echo Microsoft Edge was not found. ZEUS chart is at http://127.0.0.1:8783/
   pause
   exit /b 2
 )
-start "" "%EDGE%" --app=http://127.0.0.1:8783/v19/shadow
-echo ZEUS is open.
+start "" "%EDGE%" --app=http://127.0.0.1:8783/
+echo ZEUS chart is open. SHADOW is a tab inside that window.
 echo Leave the ZEUS Server window open while you use it.
 pause
 exit /b 0
