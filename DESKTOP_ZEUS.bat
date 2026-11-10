@@ -24,8 +24,8 @@ if errorlevel 1 goto fail
 echo Checking the loader.
 "%PY%" -c "import zeus3.v19.web; print('Loader import ok')"
 if errorlevel 1 goto fail
-echo Starting one dashboard loader.
-start "ZEUS Server" /B /D "%CD%" "%PY%" -u -m zeus3.v19.web
+echo Starting the loader in its own window. Leave that window open.
+start "ZEUS Server" /D "%CD%" "%PY%" -u -m zeus3.v19.web
 "%PY%" "%CD%\zeus_wait.py"
 if errorlevel 1 goto fail
 "%PY%" -c "import webview" >nul 2>&1
@@ -36,11 +36,11 @@ if errorlevel 1 (
   "%PY%" -m pip install pywebview
 )
 "%PY%" "%CD%\zeus_desktop.py"
-echo You can close this window. Leave it open while the dashboard is open.
+echo Dashboard is open. Leave the ZEUS Server window open.
 pause
 exit /b 0
 :fail
 echo.
-echo Send me this window.
+echo Send me this window and the ZEUS Server window.
 pause
 exit /b 1
