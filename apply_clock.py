@@ -1,9 +1,12 @@
 from pathlib import Path
 import sys
 
-root = Path(sys.argv[1])
+raw = sys.argv[1].strip().strip('"').rstrip("\\/")
+root = Path(raw)
 sweep_path = root / "src" / "gold_shadow" / "sweep_shadow.py"
 book_path = root / "src" / "gold_shadow" / "shadow_book.py"
+if not sweep_path.is_file():
+    raise SystemExit("Missing " + str(sweep_path))
 sweep = sweep_path.read_text(encoding="utf-8")
 if "def broker_sessions" not in sweep:
     fn = (
