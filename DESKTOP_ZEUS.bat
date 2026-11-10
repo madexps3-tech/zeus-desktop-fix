@@ -10,38 +10,7 @@ if not exist "%PY%" (
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
 powershell -NoProfile -Command "$p=Join-Path (Get-Location).Path 'src\gold_shadow\shadow_book.py'; if(Test-Path -LiteralPath $p){$t=[IO.File]::ReadAllText($p); $n=$t.Replace('from sweep_shadow import','from gold_shadow.sweep_shadow import'); if($t -ne $n){$enc=New-Object System.Text.UTF8Encoding $false; [IO.File]::WriteAllText($p,$n,$enc)}}"
-powershell -NoProfile -Command "$enc=New-Object System.Text.UTF8Encoding $false; $dir=(Get-Location).Path; [IO.File]::WriteAllText((Join-Path $dir 'zeus_wait.py'), 'import time, urllib.request
-url="http://127.0.0.1:8783/"
-for i in range(70):
-    try:
-        urllib.request.urlopen(url, timeout=2).close()
-        raise SystemExit(0)
-    except SystemExit:
-        raise
-    except Exception:
-        if i %% 10 == 9:
-            print("Still connecting...", i+1, flush=True)
-        time.sleep(1)
-print("The engine did not answer. Read the ZEUS Server window.")
-raise SystemExit(1)
-', $enc); [IO.File]::WriteAllText((Join-Path $dir 'zeus_desktop.py'), 'import time, urllib.request
-URL="http://127.0.0.1:8783/"
-ok=False
-end=time.time()+30
-while time.time()<end:
-    try:
-        urllib.request.urlopen(URL, timeout=2).close()
-        ok=True
-        break
-    except Exception:
-        time.sleep(0.4)
-if not ok:
-    raise SystemExit(1)
-print("Opening the ZEUS window.")
-import webview
-webview.create_window("ZEUS", URL, width=1440, height=900)
-webview.start()
-', $enc)"
+powershell -NoProfile -Command "$dir=(Get-Location).Path; [IO.File]::WriteAllBytes((Join-Path $dir 'zeus_wait.py'), [Convert]::FromBase64String('aW1wb3J0IHRpbWUsIHVybGxpYi5yZXF1ZXN0CnVybCA9ICJodHRwOi8vMTI3LjAuMC4xOjg3ODMvIgpmb3IgaSBpbiByYW5nZSg3MCk6CiAgICB0cnk6CiAgICAgICAgdXJsbGliLnJlcXVlc3QudXJsb3Blbih1cmwsIHRpbWVvdXQ9MikuY2xvc2UoKQogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoMCkKICAgIGV4Y2VwdCBTeXN0ZW1FeGl0OgogICAgICAgIHJhaXNlCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIGlmIGkgJSAxMCA9PSA5OgogICAgICAgICAgICBwcmludCgiU3RpbGwgY29ubmVjdGluZy4uLiIsIGkgKyAxLCBmbHVzaD1UcnVlKQogICAgICAgIHRpbWUuc2xlZXAoMSkKcHJpbnQoIlRoZSBlbmdpbmUgZGlkIG5vdCBhbnN3ZXIuIFJlYWQgdGhlIFpFVVMgU2VydmVyIHdpbmRvdy4iKQpyYWlzZSBTeXN0ZW1FeGl0KDEpCg==')); [IO.File]::WriteAllBytes((Join-Path $dir 'zeus_desktop.py'), [Convert]::FromBase64String('aW1wb3J0IHRpbWUsIHVybGxpYi5yZXF1ZXN0ClVSTCA9ICJodHRwOi8vMTI3LjAuMC4xOjg3ODMvIgpvayA9IEZhbHNlCmVuZCA9IHRpbWUudGltZSgpICsgMzAKd2hpbGUgdGltZS50aW1lKCkgPCBlbmQ6CiAgICB0cnk6CiAgICAgICAgdXJsbGliLnJlcXVlc3QudXJsb3BlbihVUkwsIHRpbWVvdXQ9MikuY2xvc2UoKQogICAgICAgIG9rID0gVHJ1ZQogICAgICAgIGJyZWFrCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIHRpbWUuc2xlZXAoMC40KQppZiBub3Qgb2s6CiAgICByYWlzZSBTeXN0ZW1FeGl0KDEpCnByaW50KCJPcGVuaW5nIHRoZSBaRVVTIHdpbmRvdy4iKQppbXBvcnQgd2Vidmlldwp3ZWJ2aWV3LmNyZWF0ZV93aW5kb3coIlpFVVMiLCBVUkwsIHdpZHRoPTE0NDAsIGhlaWdodD05MDApCndlYnZpZXcuc3RhcnQoKQo='))"
 "%PY%" -c "import webview" >nul 2>&1
 if errorlevel 1 (
   echo Installing the window toolkit. Internet is required this once.
