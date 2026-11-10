@@ -3,7 +3,7 @@ import urllib.request
 
 URL = "http://127.0.0.1:8783/"
 ok = False
-end = time.time() + 30
+end = time.time() + 480
 while time.time() < end:
     try:
         urllib.request.urlopen(URL, timeout=2).close()
