@@ -56,16 +56,7 @@ if __name__ == "__main__":
 $utf8 = New-Object System.Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Join-Path $root "zeus_desktop.py"), $desktopPy, $utf8)
 
-function Stop-Zeus {
-  Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*zeus3.v19.web*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-  $lines = netstat -ano | Select-String ":8783" | Select-String "LISTENING"
-  foreach ($line in $lines) {
-    $parts = ($line.ToString() -split "\s+") | Where-Object { $_ -ne "" }
-    $procId = $parts[-1]
-    if ($procId -match "^\d+$") { taskkill /PID $procId /F | Out-Null }
-  }
-}
-Stop-Zeus
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*zeus3.v19.web*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 & $py -c "import webview" | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -78,28 +69,40 @@ if ($LASTEXITCODE -ne 0) {
   if ($LASTEXITCODE -ne 0) { Write-Host "The window toolkit did not install."; exit 2 }
 }
 
+$terminal = "C:\Users\madex\OneDrive\Desktop\MetaTrader 5 - Copy\terminal64.exe"
+if (-not (Test-Path -LiteralPath $terminal)) {
+  $found = @(Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'" | Where-Object { $_.ExecutablePath } | Select-Object -ExpandProperty ExecutablePath)
+  $copy = $found | Where-Object { $_ -like "*MetaTrader 5 - Copy*" } | Select-Object -First 1
+  if ($copy) { $terminal = $copy }
+  elseif ($found.Count -eq 1) { $terminal = $found[0] }
+  else {
+    Write-Host "Log into the MetaTrader 5 Copy on your desktop, then run this again."
+    $found | ForEach-Object { Write-Host $_ }
+    exit 1
+  }
+}
+Write-Host "Using MetaTrader:"
+Write-Host $terminal
 $env:PYTHONPATH = Join-Path $root "src"
-Write-Host "Connecting to MetaTrader. The black python window stays blank until that finishes."
-$proc = Start-Process -FilePath $py -ArgumentList "-u","-m","zeus3.v19.web" -WorkingDirectory $root -WindowStyle Minimized -PassThru
+$env:ZEUS3_MT5_TERMINAL_PATH = $terminal
+Write-Host "Connecting. This should take under a minute. The engine window will show Mapped markets when it is ready."
+$proc = Start-Process -FilePath $py -ArgumentList @("-u","-m","zeus3.v19.web","--terminal-path",$terminal) -WorkingDirectory $root -WindowStyle Normal -PassThru
 
 $up = $false
-for ($i = 1; $i -le 180; $i++) {
+for ($i = 1; $i -le 75; $i++) {
   if ($proc.HasExited) {
-    Write-Host "The chart engine stopped. The black python window has the reason."
+    Write-Host "The chart engine stopped. Read the engine window."
     exit 1
   }
   try {
     $resp = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8783/" -TimeoutSec 2
     if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500) { $up = $true; break }
   } catch {}
-  if (($i % 15) -eq 0) {
-    Write-Host "Still connecting to MetaTrader... $i"
-  }
+  if (($i % 10) -eq 0) { Write-Host "Connecting to MetaTrader... $i" }
   Start-Sleep -Seconds 1
 }
-
 if (-not $up) {
-  Write-Host "MetaTrader did not answer. Leave the black python window open and send me any text that appears in it."
+  Write-Host "MetaTrader did not answer within a minute. The engine window has the reason."
   exit 1
 }
 Write-Host "Chart engine is running. Opening the ZEUS window."
@@ -115,6 +118,5 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
   }
 }
-Stop-Zeus
-Write-Host "ZEUS closed."
+Write-Host "ZEUS is open. You can close this window. Leave the engine window open."
 exit 0
