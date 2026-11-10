@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 set "PY=%CD%\runtime\python\python.exe"
 set "PYTHONPATH=%CD%\src"
-set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/869bea30af76eb2138ed4229fe871ac35e4692be"
+set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/898f52352299f4a99780c9e4594c63549a6a0e98"
 if not exist "%PY%" (
   echo Put DESKTOP_ZEUS.bat in the ZEUS folder, next to START_ZEUS3_V19_RC.bat
   pause
@@ -11,7 +11,7 @@ if not exist "%PY%" (
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
 echo Leave MetaTrader logged in. Close any old ZEUS Server window first.
-powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_probe.py' -OutFile '%CD%\zeus_probe.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'"
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_probe.py' -OutFile '%CD%\zeus_probe.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/7b654e038fc5fe4ff2f90e803438716aabf41d5d/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'"
 if exist "%CD%\ZEUS_PROGRESS.txt" del "%CD%\ZEUS_PROGRESS.txt"
 "%PY%" "%CD%\zeus_probe.py"
 if errorlevel 1 goto fail
