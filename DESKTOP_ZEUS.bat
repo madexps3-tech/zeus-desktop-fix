@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 set "PY=%CD%\runtime\python\python.exe"
 set "PYTHONPATH=%CD%\src"
-set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/898f52352299f4a99780c9e4594c63549a6a0e98"
+set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09"
 if not exist "%PY%" (
   echo Put DESKTOP_ZEUS.bat in the ZEUS folder, next to START_ZEUS3_V19_RC.bat
   pause
@@ -14,7 +14,7 @@ echo Leave MetaTrader logged in.
 echo Closing any stuck ZEUS loader.
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -like '*zeus3.v19.web*' -or $_.ExecutablePath -like '*ZEUS_RC11_WINDOWS_RETRY\runtime\python*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 timeout /t 2 /nobreak >nul
-powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_probe.py' -OutFile '%CD%\zeus_probe.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/7b654e038fc5fe4ff2f90e803438716aabf41d5d/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'"
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'"
 if exist "%CD%\ZEUS_PROGRESS.txt" del "%CD%\ZEUS_PROGRESS.txt"
 "%PY%" "%CD%\zeus_probe.py"
 if errorlevel 1 goto fail
@@ -24,7 +24,7 @@ if errorlevel 1 goto fail
 echo Checking the loader.
 "%PY%" -c "import zeus3.v19.web; print('Loader import ok')"
 if errorlevel 1 goto fail
-echo Starting the loader in its own window. Leave that window open.
+echo Starting one dashboard loader.
 start "ZEUS Server" /D "%CD%" "%PY%" -u -m zeus3.v19.web
 "%PY%" "%CD%\zeus_wait.py"
 if errorlevel 1 goto fail
@@ -41,6 +41,6 @@ pause
 exit /b 0
 :fail
 echo.
-echo Send me this window and the ZEUS Server window.
+echo Send me this window.
 pause
 exit /b 1
