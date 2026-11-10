@@ -3,14 +3,22 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 set "PY=%CD%\runtime\python\python.exe"
 set "PYTHONPATH=%CD%\src"
-set "ZEUS3_MT5_TERMINAL_PATH=C:\Users\madex\OneDrive\Desktop\MetaTrader 5 - Copy\terminal64.exe"
 if not exist "%PY%" (
   echo Put DESKTOP_ZEUS.bat in the ZEUS folder, next to START_ZEUS3_V19_RC.bat
   pause
   exit /b 2
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
-powershell -NoProfile -Command "$p=Join-Path (Get-Location).Path 'src\gold_shadow\shadow_book.py'; if(Test-Path -LiteralPath $p){$t=[IO.File]::ReadAllText($p); $n=$t.Replace('from sweep_shadow import','from gold_shadow.sweep_shadow import'); if($t -ne $n){$enc=New-Object System.Text.UTF8Encoding $false; [IO.File]::WriteAllText($p,$n,$enc)}}; $w=Join-Path (Get-Location).Path 'src\zeus3\v19\web.py'; if(Test-Path -LiteralPath $w){$t=[IO.File]::ReadAllText($w); if($t -notlike '*Connecting to MetaTrader*'){$n=$t.Replace('runtime = ChartHostRuntime.bootstrap(','print("Connecting to MetaTrader...", flush=True)'+[Environment]::NewLine+'        runtime = ChartHostRuntime.bootstrap('); $enc=New-Object System.Text.UTF8Encoding $false; [IO.File]::WriteAllText($w,$n,$enc)}}"
+echo Leave MetaTrader logged in. The test result stays in this window.
+powershell -NoProfile -Command "$dir=(Get-Location).Path; [IO.File]::WriteAllBytes((Join-Path $dir 'zeus_probe.py'), [Convert]::FromBase64String('aW1wb3J0IG9zLCBzeXMsIHN1YnByb2Nlc3MKZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgprbm93biA9IHIiQzpcVXNlcnNcbWFkZXhcT25lRHJpdmVcRGVza3RvcFxNZXRhVHJhZGVyIDUgLSBDb3B5XHRlcm1pbmFsNjQuZXhlIgpwcmludCgiTWV0YVRyYWRlciBmaWxlIGV4aXN0czoiLCBQYXRoKGtub3duKS5leGlzdHMoKSwgZmx1c2g9VHJ1ZSkKcHJpbnQoIkxvb2tpbmcgZm9yIHRoZSBydW5uaW5nIHRlcm1pbmFsLiIsIGZsdXNoPVRydWUpCnBhdGhzID0gW10KdHJ5OgogICAgcHMgPSBzdWJwcm9jZXNzLnJ1bigKICAgICAgICBbInBvd2Vyc2hlbGwiLCAiLU5vUHJvZmlsZSIsICItTm9uSW50ZXJhY3RpdmUiLCAiLUNvbW1hbmQiLAogICAgICAgICAiR2V0LUNpbUluc3RhbmNlIFdpbjMyX1Byb2Nlc3MgLUZpbHRlciBcIk5hbWU9J3Rlcm1pbmFsNjQuZXhlJ1wiIHwgU2VsZWN0LU9iamVjdCAtRXhwYW5kUHJvcGVydHkgRXhlY3V0YWJsZVBhdGgiXSwKICAgICAgICBjYXB0dXJlX291dHB1dD1UcnVlLCB0ZXh0PVRydWUsIHRpbWVvdXQ9MTIsCiAgICApCiAgICBwYXRocyA9IFtsaW5lLnN0cmlwKCkgZm9yIGxpbmUgaW4gKHBzLnN0ZG91dCBvciAiIikuc3BsaXRsaW5lcygpIGlmIGxpbmUuc3RyaXAoKS5sb3dlcigpLmVuZHN3aXRoKCJ0ZXJtaW5hbDY0LmV4ZSIpXQpleGNlcHQgRXhjZXB0aW9uIGFzIGV4YzoKICAgIHByaW50KCJDb3VsZCBub3QgbGlzdCB0ZXJtaW5hbHM6IiwgdHlwZShleGMpLl9fbmFtZV9fLCBmbHVzaD1UcnVlKQppZiBub3QgcGF0aHM6CiAgICBwcmludCgiTm8gcnVubmluZyB0ZXJtaW5hbDY0LmV4ZSB3YXMgZm91bmQuIiwgZmx1c2g9VHJ1ZSkKICAgIHRlcm1pbmFsID0ga25vd24KZWxzZToKICAgIGZvciBwYXRoIGluIHBhdGhzOgogICAgICAgIHByaW50KCJSdW5uaW5nOiIsIHBhdGgsIGZsdXNoPVRydWUpCiAgICBjb3B5ID0gW3BhdGggZm9yIHBhdGggaW4gcGF0aHMgaWYgIk1ldGFUcmFkZXIgNSAtIENvcHkiIGluIHBhdGhdCiAgICB0ZXJtaW5hbCA9IGNvcHlbMF0gaWYgY29weSBlbHNlIHBhdGhzWzBdCnByaW50KCJUZXN0aW5nOiIsIHRlcm1pbmFsLCBmbHVzaD1UcnVlKQpjb2RlID0gKAogICAgImltcG9ydCBzeXNcbiIKICAgICJpbXBvcnQgTWV0YVRyYWRlcjUgYXMgbXQ1XG4iCiAgICAib2sgPSBtdDUuaW5pdGlhbGl6ZShzeXMuYXJndlsxXSwgdGltZW91dD04MDAwKVxuIgogICAgInByaW50KCdSRVNVTFQnLCBib29sKG9rKSwgbXQ1Lmxhc3RfZXJyb3IoKSwgZmx1c2g9VHJ1ZSlcbiIKICAgICJpZiBvazpcbiIKICAgICIgICAgaW5mbyA9IG10NS5hY2NvdW50X2luZm8oKVxuIgogICAgIiAgICBwcmludCgnQUNDT1VOVCcsIGdldGF0dHIoaW5mbywgJ2xvZ2luJywgTm9uZSksIGdldGF0dHIoaW5mbywgJ3NlcnZlcicsIE5vbmUpLCBmbHVzaD1UcnVlKVxuIgogICAgIiAgICBtdDUuc2h1dGRvd24oKVxuIgogICAgInJhaXNlIFN5c3RlbUV4aXQoMCBpZiBvayBlbHNlIDEpXG4iCikKcHJvYyA9IHN1YnByb2Nlc3MuUG9wZW4oW3N5cy5leGVjdXRhYmxlLCAiLWMiLCBjb2RlLCB0ZXJtaW5hbF0sIHN0ZG91dD1zdWJwcm9jZXNzLlBJUEUsIHN0ZGVycj1zdWJwcm9jZXNzLlNURE9VVCwgdGV4dD1UcnVlKQp0cnk6CiAgICBvdXQsIF8gPSBwcm9jLmNvbW11bmljYXRlKHRpbWVvdXQ9MTUpCmV4Y2VwdCBzdWJwcm9jZXNzLlRpbWVvdXRFeHBpcmVkOgogICAgcHJvYy5raWxsKCkKICAgIHByaW50KCJNZXRhVHJhZGVyIGRpZCBub3QgYW5zd2VyIHRoZSA4IHNlY29uZCB0ZXN0LiIsIGZsdXNoPVRydWUpCiAgICBwcmludCgiVGhlIGNoYXJ0IGNhbm5vdCBvcGVuIHVudGlsIE1ldGFUcmFkZXIgYWNjZXB0cyB0aGlzIGNvbm5lY3Rpb24uIiwgZmx1c2g9VHJ1ZSkKICAgIHJhaXNlIFN5c3RlbUV4aXQoMSkKcHJpbnQob3V0IG9yICIiLCBmbHVzaD1UcnVlKQppZiBwcm9jLnJldHVybmNvZGUgIT0gMDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoMSkKUGF0aCgiWkVVU19URVJNSU5BTF9QQVRILnR4dCIpLndyaXRlX3RleHQodGVybWluYWwsIGVuY29kaW5nPSJ1dGYtOCIpCnByaW50KCJNZXRhVHJhZGVyIGFuc3dlcmVkLiBTdGFydGluZyB0aGUgY2hhcnQuIiwgZmx1c2g9VHJ1ZSkK'))"
+"%PY%" "%CD%\zeus_probe.py"
+if errorlevel 1 (
+  echo.
+  echo Send me this window. It now has the MetaTrader result.
+  pause
+  exit /b 1
+)
+set /p ZEUS3_MT5_TERMINAL_PATH=<"%CD%\ZEUS_TERMINAL_PATH.txt"
 powershell -NoProfile -Command "$dir=(Get-Location).Path; [IO.File]::WriteAllBytes((Join-Path $dir 'zeus_wait.py'), [Convert]::FromBase64String('aW1wb3J0IHRpbWUsIHVybGxpYi5yZXF1ZXN0CnVybCA9ICJodHRwOi8vMTI3LjAuMC4xOjg3ODMvIgpmb3IgaSBpbiByYW5nZSg3MCk6CiAgICB0cnk6CiAgICAgICAgdXJsbGliLnJlcXVlc3QudXJsb3Blbih1cmwsIHRpbWVvdXQ9MikuY2xvc2UoKQogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoMCkKICAgIGV4Y2VwdCBTeXN0ZW1FeGl0OgogICAgICAgIHJhaXNlCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIGlmIGkgJSAxMCA9PSA5OgogICAgICAgICAgICBwcmludCgiU3RpbGwgY29ubmVjdGluZy4uLiIsIGkgKyAxLCBmbHVzaD1UcnVlKQogICAgICAgIHRpbWUuc2xlZXAoMSkKcHJpbnQoIlRoZSBlbmdpbmUgZGlkIG5vdCBhbnN3ZXIuIFJlYWQgdGhlIFpFVVMgU2VydmVyIHdpbmRvdy4iKQpyYWlzZSBTeXN0ZW1FeGl0KDEpCg==')); [IO.File]::WriteAllBytes((Join-Path $dir 'zeus_desktop.py'), [Convert]::FromBase64String('aW1wb3J0IHRpbWUsIHVybGxpYi5yZXF1ZXN0ClVSTCA9ICJodHRwOi8vMTI3LjAuMC4xOjg3ODMvIgpvayA9IEZhbHNlCmVuZCA9IHRpbWUudGltZSgpICsgMzAKd2hpbGUgdGltZS50aW1lKCkgPCBlbmQ6CiAgICB0cnk6CiAgICAgICAgdXJsbGliLnJlcXVlc3QudXJsb3BlbihVUkwsIHRpbWVvdXQ9MikuY2xvc2UoKQogICAgICAgIG9rID0gVHJ1ZQogICAgICAgIGJyZWFrCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIHRpbWUuc2xlZXAoMC40KQppZiBub3Qgb2s6CiAgICByYWlzZSBTeXN0ZW1FeGl0KDEpCnByaW50KCJPcGVuaW5nIHRoZSBaRVVTIHdpbmRvdy4iKQppbXBvcnQgd2Vidmlldwp3ZWJ2aWV3LmNyZWF0ZV93aW5kb3coIlpFVVMiLCBVUkwsIHdpZHRoPTE0NDAsIGhlaWdodD05MDApCndlYnZpZXcuc3RhcnQoKQo='))"
 "%PY%" -c "import webview" >nul 2>&1
 if errorlevel 1 (
@@ -18,22 +26,15 @@ if errorlevel 1 (
   powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '%CD%\get-pip.py'"
   "%PY%" "%CD%\get-pip.py" --no-warn-script-location
   "%PY%" -m pip install pywebview
-  if errorlevel 1 (
-    echo The window toolkit did not install.
-    pause
-    exit /b 2
-  )
 )
-echo Using the open MetaTrader. Leave it logged in.
 echo A window titled ZEUS Server will open. Leave it open.
 start "ZEUS Server" /D "%CD%" "%PY%" -u -m zeus3.v19.web
 "%PY%" "%CD%\zeus_wait.py"
 if errorlevel 1 (
-  echo The chart did not open. Send me the text in the ZEUS Server window.
+  echo The test passed but the chart server did not open. Send me the ZEUS Server window.
   pause
   exit /b 1
 )
-echo Chart engine is running. Opening the ZEUS window.
+echo Opening the ZEUS window.
 "%PY%" "%CD%\zeus_desktop.py"
-echo You can close this window. Leave ZEUS Server open while you use the chart.
 pause
