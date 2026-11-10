@@ -57,6 +57,7 @@ $utf8 = New-Object System.Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Join-Path $root "zeus_desktop.py"), $desktopPy, $utf8)
 
 function Stop-Zeus {
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*zeus3.v19.web*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   $lines = netstat -ano | Select-String ":8783" | Select-String "LISTENING"
   foreach ($line in $lines) {
     $parts = ($line.ToString() -split "\s+") | Where-Object { $_ -ne "" }
@@ -78,24 +79,27 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $env:PYTHONPATH = Join-Path $root "src"
-Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*zeus3.v19.web*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Write-Host "Starting the chart engine..."
+Write-Host "Connecting to MetaTrader. The black python window stays blank until that finishes."
 $proc = Start-Process -FilePath $py -ArgumentList "-u","-m","zeus3.v19.web" -WorkingDirectory $root -WindowStyle Minimized -PassThru
 
 $up = $false
-for ($i = 1; $i -le 90; $i++) {
-  if ($proc.HasExited) { break }
+for ($i = 1; $i -le 180; $i++) {
+  if ($proc.HasExited) {
+    Write-Host "The chart engine stopped. The black python window has the reason."
+    exit 1
+  }
   try {
     $resp = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8783/" -TimeoutSec 2
     if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500) { $up = $true; break }
   } catch {}
-  Write-Host "Waiting for the chart engine... $i"
+  if (($i % 15) -eq 0) {
+    Write-Host "Still connecting to MetaTrader... $i"
+  }
   Start-Sleep -Seconds 1
 }
 
 if (-not $up) {
-  Write-Host "The chart engine did not start."
-  Write-Host "Click the minimized ZEUS Server window on the taskbar and send me the text in it."
+  Write-Host "MetaTrader did not answer. Leave the black python window open and send me any text that appears in it."
   exit 1
 }
 Write-Host "Chart engine is running. Opening the ZEUS window."
