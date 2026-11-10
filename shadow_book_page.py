@@ -1,23 +1,32 @@
 """Shadow book page. Scores only. Broker writes stay at zero."""
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
 
+from gold_shadow.mbo_book import VIRTUAL_EQUITY, gate, lot_from_ticks, read_mbo, update_ledger
 from zeus3.v19.shell import card, page
 
-SYMBOLS = ("XAUUSD", "XAGUSD", "WTI", "USOIL", "EURUSD", "USDJPY", "NAS100", "BTCUSD")
 ALIASES = {
     "XAUUSD": ("XAUUSD", "XAUUSD.a", "XAUUSD+", "GOLD"),
     "XAGUSD": ("XAGUSD", "XAGUSD.a", "SILVER"),
-    "WTI": ("WTI", "USOIL", "XTIUSD", "USOIL.a", "WTI.a", "USOUSD"),
-    "USOIL": ("USOIL", "WTI", "XTIUSD", "USOUSD"),
+    "WTI": ("USOUSD", "USOUSD+", "XTIUSD", "USOIL", "WTI", "WTIUSD", "SPOTCRUDE"),
     "EURUSD": ("EURUSD", "EURUSD.a"),
-    "USDJPY": ("USDJPY", "USDJPY.a"),
-    "NAS100": ("NAS100", "USTEC", "NAS100.a", "US100"),
+    "NAS100": ("NAS100", "USTEC", "NAS100.a", "US100", "NASUSD"),
     "BTCUSD": ("BTCUSD", "BTCUSD.a"),
 }
+ROOTS = {
+    "XAUUSD": ("XAUUSD", "GOLD"),
+    "XAGUSD": ("XAGUSD", "SILVER"),
+    "WTI": ("USOUSD", "XTIUSD", "USOIL", "WTIUSD", "WTI"),
+    "EURUSD": ("EURUSD",),
+    "NAS100": ("NAS100", "USTEC", "US100", "NASUSD"),
+    "BTCUSD": ("BTCUSD",),
+}
+SKIP = {"WTI": ("UKOUSD", "UKOIL", "XBRUSD", "BRENT")}
+
+
+def _norm(name):
+    return "".join(ch for ch in name.upper() if ch.isalnum())
 
 
 def _bars(mt5, symbol, timeframe, count):
@@ -26,13 +35,7 @@ def _bars(mt5, symbol, timeframe, count):
         return []
     rows = []
     for rate in rates:
-        rows.append({
-            "time": datetime.fromtimestamp(int(rate["time"]), timezone.utc).replace(tzinfo=None),
-            "open": float(rate["open"]),
-            "high": float(rate["high"]),
-            "low": float(rate["low"]),
-            "close": float(rate["close"]),
-        })
+        rows.append({"time": datetime.fromtimestamp(int(rate["time"]), timezone.utc).replace(tzinfo=None), "open": float(rate["open"]), "high": float(rate["high"]), "low": float(rate["low"]), "close": float(rate["close"])})
     return rows
 
 
@@ -41,7 +44,21 @@ def _resolve(mt5, symbol):
         if mt5.symbol_info(name) is not None:
             mt5.symbol_select(name, True)
             return name
-    return None
+    roots = tuple(_norm(item) for item in ROOTS.get(symbol, (symbol,)))
+    blocked = tuple(_norm(item) for item in SKIP.get(symbol, ()))
+    matches = []
+    for row in mt5.symbols_get() or ():
+        name = str(getattr(row, "name", "") or "")
+        key = _norm(name)
+        if not key or any(key.startswith(item) for item in blocked):
+            continue
+        if any(key.startswith(item) for item in roots):
+            matches.append(name)
+    if not matches:
+        return None
+    matches.sort(key=len)
+    mt5.symbol_select(matches[0], True)
+    return matches[0]
 
 
 def _broker_now(m5):
@@ -74,13 +91,29 @@ def _sierra_flow(symbol):
     short = metrics.get("delta_5s")
     longer = metrics.get("delta_60s", metrics.get("delta_15s"))
     flipped = isinstance(short, (int, float)) and isinstance(longer, (int, float)) and short * longer < 0
-    flow = OrderFlow(
-        absorption=_truthy(metrics.get("absorption")),
-        delta_flip_with_bias=flipped,
-        stacked_imbalance=_truthy(metrics.get("stacked_imbalance")) or _truthy(metrics.get("dom_imbalance")) or _truthy(metrics.get("mbo_pull_stack")) or _truthy(metrics.get("mbo_imbalance")),
-        stale=False,
-    )
+    flow = OrderFlow(absorption=_truthy(metrics.get("absorption")), delta_flip_with_bias=flipped, stacked_imbalance=_truthy(metrics.get("stacked_imbalance")) or _truthy(metrics.get("dom_imbalance")) or _truthy(metrics.get("mbo_pull_stack")) or _truthy(metrics.get("mbo_imbalance")), stale=False)
     return flow, state, metrics
+
+
+def _mbo_view(mt5, symbol, resolved, preview):
+    if symbol not in ("XAUUSD", "NAS100", "WTI"):
+        return {"mbo": None, "potentials": []}
+    mbo = read_mbo(symbol)
+    info = mt5.symbol_info(resolved)
+    quote = mt5.symbol_info_tick(resolved)
+    bid = float(quote.bid) if quote is not None else None
+    ask = float(quote.ask) if quote is not None else None
+    potentials = []
+    for row in preview:
+        if row.get("action") not in ("BUY", "SELL"):
+            continue
+        sized = lot_from_ticks(info, row.get("entry"), row.get("stop"))
+        decision = gate(str(row.get("action")), str(row.get("reason") or ""), mbo)
+        taken = bool(decision["taken"] and sized.get("lots") is not None)
+        reason = decision["reason"] if sized.get("lots") is not None or not decision["taken"] else sized["reason"]
+        action = decision["action"] if sized.get("lots") is not None or decision["action"] == "WAIT" else "WAIT"
+        potentials.append({"symbol": symbol, "broker_symbol": resolved, "strategy_id": row.get("strategy_id"), "action": action, "reason": reason, "entry": row.get("entry"), "stop": row.get("stop"), "target": row.get("target"), "lots": sized.get("lots"), "tick": sized.get("tick"), "tick_value": sized.get("tick_value"), "risk_dollars": sized.get("risk_dollars"), "bid": bid, "ask": ask, "taken": taken})
+    return {"mbo": mbo, "potentials": potentials}
 
 
 def snapshot():
@@ -107,17 +140,12 @@ def snapshot():
         m5 = _bars(mt5, resolved, mt5.TIMEFRAME_M5, 120)
         now = _broker_now(m5)
         official_flow, sierra_state, sierra_metrics = _sierra_flow(symbol)
-        scores.append({
-            "symbol": symbol,
-            "broker_symbol": resolved,
-            "clock": now.strftime("%H:%M"),
-            "sierra_state": sierra_state,
-            "sierra_metrics": sierra_metrics,
-            "official": book_summary(run_shadow_book(symbol, h1, m15, m5, official_flow, now, h4=h4)),
-            "structure_preview": book_summary(run_shadow_book(symbol, h1, m15, m5, preview_flow, now, h4=h4)),
-            "preview_is_tradable": False,
-        })
-    return {"ok": True, "broker_writes": 0, "sends_orders": False, "account": account, "scores": scores, "note": "Official waits unless fresh Sierra confirms."}
+        preview = book_summary(run_shadow_book(symbol, h1, m15, m5, preview_flow, now, h4=h4))
+        view = _mbo_view(mt5, symbol, resolved, preview)
+        scores.append({"symbol": symbol, "broker_symbol": resolved, "clock": now.strftime("%H:%M"), "sierra_state": sierra_state, "sierra_metrics": sierra_metrics, "mbo": view.get("mbo"), "official": book_summary(run_shadow_book(symbol, h1, m15, m5, official_flow, now, h4=h4)), "structure_preview": preview, "potentials": view.get("potentials") or [], "preview_is_tradable": False})
+    taken = [row for score in scores for row in score.get("potentials") or [] if row.get("taken")]
+    virtual = update_ledger(Path("shadow_virtual_10k.json"), taken)
+    return {"ok": True, "broker_writes": 0, "sends_orders": False, "account": account, "scores": scores, "virtual": virtual, "note": "MBO can confirm a shadow trade. Orders are not sent."}
 
 
 def _show(metrics, name):
@@ -138,11 +166,33 @@ def _rows(items):
     for row in items:
         action = str(row.get("action") or "WAIT")
         color = "good" if action in ("BUY", "SELL") else "muted"
-        entry = row.get("entry")
-        stop = row.get("stop")
-        target = row.get("target")
+        entry, stop, target = row.get("entry"), row.get("stop"), row.get("target")
         body.append("<tr><td>" + str(row.get("strategy_id", "")) + "</td><td class='" + color + "'>" + action + "</td><td>" + str(row.get("reason", "")) + "</td><td>" + ("-" if entry is None else str(entry)) + "</td><td>" + ("-" if stop is None else str(stop)) + "</td><td>" + ("-" if target is None else str(target)) + "</td></tr>")
     return "<table class='mono'><tr><th>STRATEGY</th><th>ACTION</th><th>REASON</th><th>ENTRY</th><th>STOP</th><th>TARGET</th></tr>" + "".join(body) + "</table>"
+
+
+def _virtual_card(data):
+    virtual = data.get("virtual") or {}
+    lines = ["<div class='mono'>Start " + format(VIRTUAL_EQUITY, ".0f") + " risk " + str(virtual.get("risk_dollars", 200)) + " equity " + str(virtual.get("equity", VIRTUAL_EQUITY)) + " closed " + str(virtual.get("closed_pnl", 0)) + " floating " + str(virtual.get("floating_pnl", 0)) + " orders are not sent</div>"]
+    for score in data.get("scores") or []:
+        mbo = score.get("mbo")
+        if not mbo:
+            continue
+        lines.append("<div class='mono'>" + str(score.get("symbol")) + " " + str(mbo.get("root")) + " " + str(mbo.get("reason")) + " sweep " + str(int(bool(mbo.get("sweep_consumed")))) + " iceberg " + str(int(bool(mbo.get("iceberg_refresh")))) + " pulled " + str(int(bool(mbo.get("size_pulled")))) + "</div>")
+    potentials = [row for score in data.get("scores") or [] for row in score.get("potentials") or []]
+    if not potentials:
+        lines.append("<div class='mono muted'>No Gold, Nasdaq, or oil setup right now.</div>")
+    else:
+        body = []
+        for row in potentials:
+            mark = "SHADOW" if row.get("taken") else "POTENTIAL"
+            lots = row.get("lots") if row.get("lots") is not None else "-"
+            risk = row.get("risk_dollars") if row.get("risk_dollars") is not None else "-"
+            body.append("<tr><td>" + mark + "</td><td>" + str(row.get("symbol")) + "</td><td>" + str(row.get("strategy_id")) + "</td><td>" + str(row.get("action")) + "</td><td>" + str(row.get("reason")) + "</td><td>" + str(lots) + "</td><td>" + str(row.get("entry")) + "</td><td>" + str(row.get("stop")) + "</td><td>" + str(row.get("target")) + "</td><td>" + str(risk) + "</td></tr>")
+        lines.append("<table class='mono'><tr><th></th><th>MARKET</th><th>STRATEGY</th><th>ACTION</th><th>REASON</th><th>LOTS</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>RISK</th></tr>" + "".join(body) + "</table>")
+    for trade in (virtual.get("trades") or [])[-8:]:
+        lines.append("<div class='mono'>" + str(trade.get("status")) + " " + str(trade.get("symbol")) + " " + str(trade.get("action")) + " " + str(trade.get("lots")) + " @ " + str(trade.get("entry")) + " pnl " + str(trade.get("pnl")) + "</div>")
+    return card("VIRTUAL 10K 2% MT5 TICKS MBO ON GC NQ CL", "".join(lines))
 
 
 def render():
@@ -166,5 +216,5 @@ def render():
         blocks.append(card(str(score["symbol"]) + " STRUCTURE PREVIEW not a trade", _rows(score.get("structure_preview") or [])))
     if not blocks:
         blocks.append(card("SHADOW BOOK", "<div class='mono'>Waiting for a broker connection.</div>"))
-    body = card("FLOATING P&L", pnl, 6) + card("OPEN TRADES", "<div class='mono'>" + pos_html + "</div>", 6) + card("AUTHORITY", "<div class='mono warn'>SHADOW ONLY. BROKER WRITES 0. ORDERS ARE NOT SENT</div>") + "".join(blocks)
+    body = card("FLOATING P&L", pnl, 6) + card("OPEN TRADES", "<div class='mono'>" + pos_html + "</div>", 6) + card("AUTHORITY", "<div class='mono warn'>SHADOW ONLY. BROKER WRITES 0. ORDERS ARE NOT SENT</div>") + _virtual_card(data) + "".join(blocks)
     return page(title="ZEUS Shadow Book", active="SHADOW", body=body, footer="Four shadow strategies. They score. They do not send orders.")
