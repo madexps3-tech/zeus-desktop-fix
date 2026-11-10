@@ -1,16 +1,11 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 set "ROOT="
-for %%D in ("C:\Zeus V3 world brian" "C:\ZEUS" "%USERPROFILE%\Desktop") do (
-  if exist "%%~D\src\zeus3\v19\shadow_book_page.py" set "ROOT=%%~D"
-)
+if exist "%~dp0src\zeus3\v19\shadow_book_page.py" set "ROOT=%~dp0"
+if not defined ROOT if exist "C:\Zeus V3 world brian\ZEUS_RC11_WINDOWS_RETRY\src\zeus3\v19\shadow_book_page.py" set "ROOT=C:\Zeus V3 world brian\ZEUS_RC11_WINDOWS_RETRY"
 if not defined ROOT (
-  for /d %%G in ("C:\Zeus*" "C:\ZEUS*") do (
-    if exist "%%~G\src\zeus3\v19\shadow_book_page.py" set "ROOT=%%~G"
-  )
-)
-if not defined ROOT (
-  echo Could not find the ZEUS folder. Put this bat inside it and run it again.
+  echo Could not find the ZEUS folder.
+  echo Copy this bat into C:\Zeus V3 world brian\ZEUS_RC11_WINDOWS_RETRY and run it there.
   pause
   exit /b 1
 )
@@ -30,6 +25,6 @@ echo The Shadow page will show GC, NQ and CL. Orders are not sent.
 pause
 exit /b 0
 :fail
-echo Install failed. Leave ZEUS closed and run this bat again.
+echo Install failed. Leave this window open and send me the text above.
 pause
 exit /b 1
