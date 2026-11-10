@@ -83,7 +83,7 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
         const bool tradedHere = std::fabs(oldOrder.price - tradePrice) <= tick * 2.0;
         if (match == nullptr)
         {
-            if (tradedHere && sc.LastTradeQuantity > 0) state->sweepUntil = now + 60.0;
+            if (tradedHere) state->sweepUntil = now + 60.0;
             else if (oldOrder.qty >= large) state->pulledUntil = now + 60.0;
             continue;
         }
@@ -92,8 +92,8 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
     }
     state->prevCount = count;
     if (count > 0) std::memcpy(state->prev, current, sizeof(OrderSnap) * static_cast<size_t>(count));
-    SCString path = sc.DataFilesFolder();
-    path.AppendFormat("zeus_mbo_%s.json", root);
+    SCString path;
+    path.Format("%szeus_mbo_%s.json", sc.DataFilesFolder().GetChars(), root);
     FILE* file = std::fopen(path.GetChars(), "wb");
     if (file == nullptr) return;
     std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0);
