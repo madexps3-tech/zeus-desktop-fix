@@ -14,6 +14,7 @@ if not exist "%CD%\zeus_desktop.py" (
   exit /b 2
 )
 echo This does not open Chrome or Edge.
+powershell -NoProfile -Command "$p=Join-Path (Get-Location).Path 'src\gold_shadow\shadow_book.py'; if(Test-Path -LiteralPath $p){ $t=[IO.File]::ReadAllText($p); $n=$t.Replace('from sweep_shadow import','from gold_shadow.sweep_shadow import'); if($t -ne $n){ $enc=New-Object System.Text.UTF8Encoding $false; [IO.File]::WriteAllText($p,$n,$enc); Write-Host 'Shadow page fixed.' } else { Write-Host 'Shadow page already fixed.' } } else { Write-Host 'Shadow file not found. The chart will still open.' }"
 "%PY%" -c "import webview" >nul 2>&1
 if errorlevel 1 (
   echo Adding the ZEUS window toolkit. Internet is required this once.
