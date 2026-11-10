@@ -6,6 +6,20 @@ if (-not (Test-Path -LiteralPath $py)) {
   exit 2
 }
 Write-Host "ZEUS desktop. This does not open Chrome or Edge."
+Write-Host "Close every MetaTrader except MetaTrader 5 Copy. That Copy must be logged in."
+
+$web = Join-Path $root "src\zeus3\v19\web.py"
+if (Test-Path -LiteralPath $web) {
+  $txt = [IO.File]::ReadAllText($web)
+  if ($txt -notlike "*ZEUS engine started*") {
+    $txt2 = $txt.Replace("def main() -> int:", "def main() -> int:`r`n    print(`"ZEUS engine started.`", flush=True)")
+    if ($txt2 -ne $txt) {
+      $enc = New-Object System.Text.UTF8Encoding $false
+      [IO.File]::WriteAllText($web, $txt2, $enc)
+      Write-Host "Engine will now print as soon as it starts."
+    }
+  }
+}
 
 $shadow = Join-Path $root "src\gold_shadow\shadow_book.py"
 if (Test-Path -LiteralPath $shadow) {
@@ -14,7 +28,6 @@ if (Test-Path -LiteralPath $shadow) {
   if ($t -ne $n) {
     $enc = New-Object System.Text.UTF8Encoding $false
     [IO.File]::WriteAllText($shadow, $n, $enc)
-    Write-Host "Shadow page fixed."
   }
 }
 
@@ -22,7 +35,7 @@ $desktopPy = @"
 import sys, time, traceback, urllib.request
 URL = "http://127.0.0.1:8783/"
 
-def wait_until_up(timeout=30):
+def wait_until_up(timeout=20):
     end = time.time() + timeout
     while time.time() < end:
         try:
@@ -56,10 +69,11 @@ if __name__ == "__main__":
 $utf8 = New-Object System.Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Join-Path $root "zeus_desktop.py"), $desktopPy, $utf8)
 
+Write-Host "Closing old ZEUS engine processes."
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
   $_.CommandLine -like "*zeus3.v19.web*" -or $_.ExecutablePath -like "*ZEUS_RC11_WINDOWS_RETRY\runtime\python*"
 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Start-Sleep -Seconds 1
+Start-Sleep -Seconds 2
 
 & $py -c "import webview" | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -74,12 +88,9 @@ if ($LASTEXITCODE -ne 0) {
 
 $terminal = "C:\Users\madex\OneDrive\Desktop\MetaTrader 5 - Copy\terminal64.exe"
 if (-not (Test-Path -LiteralPath $terminal)) {
-  Write-Host "MetaTrader 5 Copy was not found at:"
-  Write-Host $terminal
+  Write-Host "MetaTrader 5 Copy was not found."
   exit 1
 }
-Write-Host "Using MetaTrader:"
-Write-Host $terminal
 $env:PYTHONPATH = Join-Path $root "src"
 $env:ZEUS3_MT5_TERMINAL_PATH = $terminal
 $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -88,38 +99,41 @@ $psi.Arguments = "-u -m zeus3.v19.web --terminal-path `"$terminal`""
 $psi.WorkingDirectory = $root
 $psi.UseShellExecute = $true
 $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
-Write-Host "A ZEUS engine window will open. Leave it open. It should show Mapped markets."
+Write-Host "Opening the engine. Its window should say ZEUS engine started within a few seconds."
 $proc = [Diagnostics.Process]::Start($psi)
 
+function Test-ZeusPort {
+  $client = New-Object System.Net.Sockets.TcpClient
+  try {
+    $wait = $client.BeginConnect("127.0.0.1", 8783, $null, $null)
+    $ok = $wait.AsyncWaitHandle.WaitOne(400, $false)
+    if (-not $ok) { return $false }
+    $client.EndConnect($wait)
+    return $true
+  } catch { return $false } finally { $client.Close() }
+}
+
 $up = $false
-for ($i = 1; $i -le 90; $i++) {
+for ($i = 1; $i -le 45; $i++) {
   if ($proc.HasExited) {
-    Write-Host "The engine window closed. Send me the text that was in it."
+    Write-Host "The engine window closed. Send me the text in it."
     exit 1
   }
-  try {
-    $resp = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8783/" -TimeoutSec 2
-    if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500) { $up = $true; break }
-  } catch {}
-  if (($i % 10) -eq 0) { Write-Host "Connecting to MetaTrader... $i" }
+  if (Test-ZeusPort) { $up = $true; break }
+  if (($i % 5) -eq 0) { Write-Host "Waiting for the engine window to say ZEUS engine started... $i" }
   Start-Sleep -Seconds 1
 }
 if (-not $up) {
-  Write-Host "The chart did not open. Read the other window titled python and send me its text."
+  Write-Host "Stopped. The engine did not answer."
+  Write-Host "If the other window is still blank, MetaTrader is not answering. Close the other MetaTrader and leave only the Copy logged in."
+  if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
   exit 1
 }
 Write-Host "Chart engine is running. Opening the ZEUS window."
 & $py -u (Join-Path $root "zeus_desktop.py")
 if ($LASTEXITCODE -ne 0) {
-  Write-Host "The ZEUS window did not open. Installing the Windows window component. This does not open the Edge browser."
-  $setup = Join-Path $root "MicrosoftEdgeWebview2Setup.exe"
-  Invoke-WebRequest -UseBasicParsing -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $setup
-  Start-Process -FilePath $setup -ArgumentList "/silent","/install" -Wait
-  & $py -u (Join-Path $root "zeus_desktop.py")
-  if ($LASTEXITCODE -ne 0) {
-    Write-Host "The ZEUS window still did not open."
-    exit 1
-  }
+  Write-Host "The ZEUS window did not open."
+  exit 1
 }
-Write-Host "ZEUS is open. You can close this window. Leave the engine window open."
+Write-Host "ZEUS is open. Leave the engine window open."
 exit 0
