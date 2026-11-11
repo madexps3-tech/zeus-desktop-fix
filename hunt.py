@@ -25,6 +25,8 @@ def _signature(payload):
         parts.append("|".join((str(score.get("symbol")), str(score.get("clock")), str(mbo.get("sweep_consumed")), str(mbo.get("iceberg_refresh")), str(mbo.get("size_pulled")))))
         for row in score.get("structure_preview") or []:
             parts.append("|".join((str(row.get("strategy_id")), str(row.get("action")), str(row.get("reason")))))
+    for row in ((payload.get("zone") or {}).get("orders") or []):
+        parts.append("|".join((str(row.get("symbol")), str(row.get("status")), str(row.get("reason")), str(row.get("pnl")))))
     return "\n".join(parts)
 
 
@@ -41,6 +43,8 @@ def _remember(payload, previous):
         for row in score.get("structure_preview") or []:
             if row.get("action") in ("BUY", "SELL") or row.get("reason") not in ("OUTSIDE_SESSION",):
                 lines.append(str(score.get("symbol")) + " " + str(row.get("strategy_id")) + " " + str(row.get("action")) + " " + str(row.get("reason")))
+    for row in ((payload.get("zone") or {}).get("orders") or []):
+        lines.append("ZONE " + str(row.get("symbol")) + " " + str(row.get("status")) + " " + str(row.get("action")) + " " + str(row.get("reason")) + " pnl " + str(row.get("pnl")))
     if lines:
         with LOG.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"time": stamp, "lines": lines[:24]}) + "\n")
