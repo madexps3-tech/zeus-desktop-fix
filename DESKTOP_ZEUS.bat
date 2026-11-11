@@ -3,17 +3,15 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 set "PY=%CD%\runtime\python\python.exe"
 set "PYTHONPATH=%CD%\src"
-set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09"
+set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/a5c69f2dc5acc142594d34254e3d635b0840c07c"
 if not exist "%PY%" (
   echo This file must stay in the ZEUS folder.
   pause
   exit /b 2
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
-powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/766e2b914a3d7024981ae33ba3f8e110fc489a17/unlock_shadow.py' -OutFile '%CD%\unlock_shadow.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/main/hunt.py' -OutFile '%CD%\src\gold_shadow\hunt.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/main/apply_rules.py' -OutFile '%CD%\apply_rules.py'"
-"%PY%" "%CD%\unlock_shadow.py" "%CD%"
-if errorlevel 1 goto fail
-"%PY%" "%CD%\apply_rules.py" "%CD%"
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/install_zone.py' -OutFile '%CD%\install_zone.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part0.txt' -OutFile '%CD%\part0.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part1.txt' -OutFile '%CD%\part1.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part2.txt' -OutFile '%CD%\part2.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part3.txt' -OutFile '%CD%\part3.txt'"
+"%PY%" "%CD%\install_zone.py" "%CD%"
 if errorlevel 1 goto fail
 echo Leave MetaTrader logged in.
 echo Closing any stuck ZEUS loader.
