@@ -3,14 +3,15 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 set "PY=%CD%\runtime\python\python.exe"
 set "PYTHONPATH=%CD%\src"
-set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/3ac30120767f5d262c1995a1e574aa3164f579cc"
+set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/ef6b92e840a16562b65da765409626c8507b1702"
 if not exist "%PY%" (
   echo This file must stay in the ZEUS folder.
   pause
   exit /b 2
 )
 echo Starting ZEUS. This does not open Chrome or Edge.
-powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/install_zone.py' -OutFile '%CD%\install_zone.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part0.txt' -OutFile '%CD%\part0.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part1.txt' -OutFile '%CD%\part1.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part2.txt' -OutFile '%CD%\part2.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part3.txt' -OutFile '%CD%\part3.txt'"
+if not exist "%CD%\src\zeus3\v19" mkdir "%CD%\src\zeus3\v19"
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/install_zone.py' -OutFile '%CD%\install_zone.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part0.txt' -OutFile '%CD%\part0.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part1.txt' -OutFile '%CD%\part1.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part2.txt' -OutFile '%CD%\part2.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part3.txt' -OutFile '%CD%\part3.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/signals_engine.py' -OutFile '%CD%\src\zeus3\v19\signals_engine.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/signals_page.py' -OutFile '%CD%\src\zeus3\v19\signals_page.py'"
 "%PY%" "%CD%\install_zone.py" "%CD%"
 if errorlevel 1 goto fail
 echo Leave MetaTrader logged in.
