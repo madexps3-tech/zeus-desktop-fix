@@ -42,4 +42,53 @@ if "ZEUS_PROGRESS" not in text:
     )
     print("Loader progress added.", flush=True)
 
+if "def signals_page" not in text:
+    methods = (
+        "    async def signals_page(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import render_signals_page" + newline
+        + "        return web.Response(text=render_signals_page(), content_type='text/html')" + newline
+        + newline
+        + "    async def signals_snapshot(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import signals_snapshot" + newline
+        + "        return await signals_snapshot(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    marker_nl = "    def application(self) -> web.Application:" 
+    if marker not in text and marker_nl not in text:
+        print("Could not find the page list.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, methods + marker, 1)
+    print("Signals handlers added.", flush=True)
+
+if "/v19/signals" not in text:
+    old_route = 'app.router.add_get("/v19/shadow", self.shadow_book_page)'
+    new_route = (
+        old_route + newline
+        + '        app.router.add_get("/v19/signals", self.signals_page)' + newline
+        + '        app.router.add_get("/api/v19/signals", self.signals_snapshot)'
+    )
+    if old_route not in text:
+        print("Could not find the shadow page route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(old_route, new_route, 1)
+    print("Signals route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
+
+shell = Path("src") / "zeus3" / "v19" / "shell.py"
+nav = shell.read_text(encoding="utf-8")
+if "/v19/signals" not in nav:
+    old_nav = '("CHART", "/v19/chart"),'
+    if old_nav not in nav:
+        print("Could not find the chart tab.", flush=True)
+        raise SystemExit(1)
+    nav = nav.replace(
+        old_nav,
+        old_nav + ("\r\n" if "\r\n" in nav else "\n") + '    ("SIGNALS", "/v19/signals"),',
+        1,
+    )
+    shell.write_bytes(nav.encode("utf-8"))
+    print("Signals tab added.", flush=True)
+else:
+    print("Signals tab is already there.", flush=True)
