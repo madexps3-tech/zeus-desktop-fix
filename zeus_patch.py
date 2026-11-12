@@ -74,6 +74,32 @@ if "/v19/signals" not in text:
     text = text.replace(old_route, new_route, 1)
     print("Signals route added.", flush=True)
 
+if "def signals_taken" not in text:
+    taken_method = (
+        "    async def signals_taken(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import signals_taken" + newline
+        + "        return await signals_taken(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the taken handler.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, taken_method + marker, 1)
+    print("Taken handler added.", flush=True)
+
+if "/api/v19/signals/taken" not in text:
+    old_sig = 'app.router.add_get("/api/v19/signals", self.signals_snapshot)'
+    if old_sig not in text:
+        print("Could not find the signals route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_sig,
+        old_sig + newline + '        app.router.add_post("/api/v19/signals/taken", self.signals_taken)',
+        1,
+    )
+    print("Taken route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
 
 shell = Path("src") / "zeus3" / "v19" / "shell.py"
