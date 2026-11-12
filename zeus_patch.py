@@ -92,3 +92,40 @@ if "/v19/signals" not in nav:
     print("Signals tab added.", flush=True)
 else:
     print("Signals tab is already there.", flush=True)
+
+resolver = Path("src") / "zeus3" / "instruments" / "resolver.py"
+mapping = resolver.read_text(encoding="utf-8")
+resolver_newline = "\r\n" if "\r\n" in mapping else "\n"
+if "_prefer_plus" not in mapping:
+    helper = (
+        "def _prefer_plus(canonical: str, candidates: tuple[str, ...]) -> str | None:" + resolver_newline
+        + "    plus = tuple(x for x in candidates if _upper(x) == _upper(canonical) + \"+\")" + resolver_newline
+        + "    if len(plus) == 1:" + resolver_newline
+        + "        return plus[0]" + resolver_newline
+        + "    return None" + resolver_newline
+        + resolver_newline
+        + resolver_newline
+        + "def resolve_broker_symbol("
+    )
+    old_def = "def resolve_broker_symbol("
+    old_tie = (
+        "    if len(canonical_decorated) > 1:" + resolver_newline
+        + "        return MappingResult(canonical, None, 0, True, canonical_decorated)"
+    )
+    new_tie = (
+        "    if len(canonical_decorated) > 1:" + resolver_newline
+        + "        chosen = _prefer_plus(canonical, canonical_decorated)" + resolver_newline
+        + "        if chosen is not None:" + resolver_newline
+        + "            return MappingResult(canonical, chosen, 90, False, canonical_decorated)" + resolver_newline
+        + "        return MappingResult(canonical, None, 0, True, canonical_decorated)"
+    )
+    if old_def not in mapping or old_tie not in mapping:
+        print("Could not update the gold symbol match.", flush=True)
+        raise SystemExit(1)
+    mapping = mapping.replace(old_def, helper, 1)
+    mapping = mapping.replace(old_tie, new_tie, 1)
+    resolver.write_bytes(mapping.encode("utf-8"))
+    print("Gold now uses XAUUSD+ when both gold names exist.", flush=True)
+else:
+    print("Gold symbol match is already updated.", flush=True)
+
