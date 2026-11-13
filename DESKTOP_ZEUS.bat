@@ -1,14 +1,33 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 set "PY=%CD%\runtime\python\python.exe"
+if not exist "%PY%" (
+  echo This copy is not in the ZEUS folder. Looking for it...
+  set "ROOT="
+  for /f "delims=" %%F in ('dir /s /b "%USERPROFILE%\python.exe" 2^>nul') do (
+    echo %%F | findstr /i "runtime\\python\\python.exe" >nul && set "ROOT=%%~dpF"
+  )
+  if not defined ROOT (
+    echo.
+    echo Put this file in the folder that contains the runtime folder.
+    echo That is the folder you used the last time ZEUS opened.
+    pause
+    exit /b 2
+  )
+  cd /d "!ROOT!\..\.."
+  set "PY=!CD!\runtime\python\python.exe"
+)
 set "PYTHONPATH=%CD%\src"
-set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/0eb3a5f3d0ee4eeba1b946f932c78642d0496952%PY%" (
-  echo This file must stay in the ZEUS folder.
+set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/0eb3a5f3d0ee4eeba1b946f932c78642d0496952"
+if not exist "%PY%" (
+  echo The ZEUS folder was found but its Python is missing.
+  echo Folder: %CD%
   pause
   exit /b 2
 )
-echo Starting ZEUS. This does not open Chrome or Edge.
+echo Starting ZEUS from %CD%
+echo This does not open Chrome or Edge.
 if not exist "%CD%\src\zeus3\v19" mkdir "%CD%\src\zeus3\v19"
 powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/install_zone.py' -OutFile '%CD%\install_zone.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part0.txt' -OutFile '%CD%\part0.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part1.txt' -OutFile '%CD%\part1.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part2.txt' -OutFile '%CD%\part2.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part3.txt' -OutFile '%CD%\part3.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/signals_engine.py' -OutFile '%CD%\src\zeus3\v19\signals_engine.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/signals_page.py' -OutFile '%CD%\src\zeus3\v19\signals_page.py'"
 "%PY%" "%CD%\install_zone.py" "%CD%"
