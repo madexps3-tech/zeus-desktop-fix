@@ -413,3 +413,49 @@ else:
         raise SystemExit(1)
     boot_path.write_bytes(boot_fixed.encode("utf-8"))
     print("The loader is no longer cut off.", flush=True)
+
+
+stage = Path("src") / "zeus3" / "chart" / "runtime.py"
+stage_text = stage.read_text(encoding="utf-8")
+snl = "\r\n" if "\r\n" in stage_text else "\n"
+old_stage = "        worker.start()" + snl + snl + "        mappings, catalog = build_fast_runtime_mappings(worker)"
+new_stage = (
+    "        def _boot_note(msg):" + snl
+    + "            print(msg, flush=True)" + snl
+    + "            with open('ZEUS_PROGRESS.txt', 'a', encoding='utf-8') as handle:" + snl
+    + "                handle.write(msg + chr(10))" + snl
+    + "        _boot_note('Asking MetaTrader for the account')" + snl
+    + "        from threading import Thread" + snl
+    + "        _box = {}" + snl
+    + "        def _start_worker():" + snl
+    + "            try:" + snl
+    + "                _box['ok'] = worker.start()" + snl
+    + "            except BaseException as exc:" + snl
+    + "                _box['error'] = exc" + snl
+    + "        _starter = Thread(target=_start_worker, daemon=True)" + snl
+    + "        _starter.start()" + snl
+    + "        _starter.join(20)" + snl
+    + "        if _starter.is_alive():" + snl
+    + "            try:" + snl
+    + "                worker.close()" + snl
+    + "            except Exception:" + snl
+    + "                pass" + snl
+    + "            _boot_note('The account call did not return')" + snl
+    + "            raise TimeoutError('account call')" + snl
+    + "        if 'error' in _box:" + snl
+    + "            raise _box['error']" + snl
+    + "        _boot_note('Reading the symbol names')" + snl
+    + "        mappings, catalog = build_fast_runtime_mappings(worker)" + snl
+    + "        _boot_note('Symbol names are in')"
+)
+old_page = "        try:" + snl + "            host = cls("
+new_page = "        _boot_note('Building the page')" + snl + "        try:" + snl + "            host = cls("
+if "_boot_note('Asking MetaTrader for the account')" in stage_text:
+    print("Startup stages are already shown.", flush=True)
+elif old_stage not in stage_text or old_page not in stage_text:
+    print("Could not show the startup stages.", flush=True)
+    raise SystemExit(1)
+else:
+    stage_text = stage_text.replace(old_stage, new_stage, 1).replace(old_page, new_page, 1)
+    stage.write_bytes(stage_text.encode("utf-8"))
+    print("Startup now shows which step it is on.", flush=True)
