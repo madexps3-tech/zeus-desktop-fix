@@ -145,23 +145,28 @@ function draw(){
   if(!rows.length){ctx.fillStyle="#8ea3b8";ctx.fillText("No candles for "+symbol+" "+chart, 20, 40);return}
   let lo=Infinity, hi=-Infinity;
   rows.forEach(b=>{lo=Math.min(lo,b.low);hi=Math.max(hi,b.high)});
+  const q=data.quote||{};
+  if(q.bid!=null){lo=Math.min(lo,Number(q.bid));hi=Math.max(hi,Number(q.bid))}
   const span=Math.max(hi-lo, 0.00001);
   const row=(data.rows||[]).find(r=>r.chart===selected&&r.entry!=null);
-  if(row){lo=Math.min(lo,row.stop,row.target,row.entry);hi=Math.max(hi,row.stop,row.target,row.entry)}
+  if(row&&Math.abs(row.entry-((lo+hi)/2))<span*1.2){
+    lo=Math.min(lo,row.stop,row.target,row.entry);hi=Math.max(hi,row.stop,row.target,row.entry)
+  }
   const levels=(data.pools)||[];
   const mark=(data.reaction)||{};
-  levels.forEach(level=>{
-    if(Math.abs(level.price-((lo+hi)/2))<span*1.6){lo=Math.min(lo,level.price);hi=Math.max(hi,level.price)}
-  });
   const pad=(hi-lo)*0.08||span*0.08; lo-=pad; hi+=pad;
   const y=p=>plotT+((hi-p)/(hi-lo))*(plotB-plotT);
   const step=(plotR-plotL)/Math.max(1,rows.length);
   levels.forEach(level=>{
     const price=level.price;
-    if(price<lo||price>hi)return;
     const taken=mark.taken&&mark.taken.name===level.name;
     const next=mark.next&&mark.next.name===level.name;
     const color=taken?"#e9c66b":(next?"#67d6a3":(LEVEL_COLOR[(level.name.split(" ")[0])]||"#8ea3b8"));
+    if(price<lo||price>hi){
+      ctx.fillStyle=color;
+      ctx.fillText((price>hi?"↑ ":"↓ ")+level.name+" "+price, plotL+4, price>hi?plotT+12:plotB-4);
+      return;
+    }
     ctx.strokeStyle=color; ctx.globalAlpha=0.85; ctx.setLineDash(level.name.indexOf("YESTERDAY")>=0?[2,4]:[6,4]);
     ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
     ctx.setLineDash([]); ctx.globalAlpha=1; ctx.fillStyle=color;
@@ -206,7 +211,6 @@ function draw(){
     ctx.fillText(price.toFixed(price>100?2:5), plotR+4, y(price)+4);
   }
   const picked=(data.rows||[]).find(r=>r.chart===selected)||{};
-  const q=data.quote||{};
   const feed=data.feed||{};
   ctx.fillStyle=feed.quote_stale?"#ef7f88":"#e7eef5";
   ctx.fillText(symbol+"  "+chart+"   BID "+(q.bid??"—")+"   ASK "+(q.ask??"—")+"   SPREAD "+(data.spread??"—")+"   "+(feed.quote_stale?"STALE":"LIVE "+(feed.quote_age??"—")+"s"), 12, 18);
@@ -346,6 +350,32 @@ document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
 window.addEventListener("pagehide",()=>{clearInterval(timer);if(control)control.abort()});
 buttons();load();timer=setInterval(load,1000);
 </script></body></html>"""
+
+
+def _bucket_seconds(chart: str) -> int:
+    return {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}[chart]
+
+
+def _live_candles(bars: list[dict[str, Any]], bid: float, chart: str) -> list[dict[str, Any]]:
+    """Move the current candle with the quote. A closed bar alone looks like a picture."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    step = _bucket_seconds(chart)
+    bucket = datetime.fromtimestamp(int(now.timestamp()) // step * step, tz=timezone.utc)
+    if not bars:
+        return [{"time": bucket.isoformat(), "open": bid, "high": bid, "low": bid, "close": bid}]
+    last = dict(bars[-1])
+    try:
+        opened = datetime.fromisoformat(str(last["time"]).replace("Z", "+00:00"))
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+    except ValueError:
+        opened = bucket
+    if opened < bucket:
+        return [*bars, {"time": bucket.isoformat(), "open": bid, "high": bid, "low": bid, "close": bid}]
+    last["close"] = bid
+    last["high"] = max(float(last["high"]), bid)
+    last["low"] = min(float(last["low"]), bid)
+    return [*bars[:-1], last]
 
 
 def _bars(host: Any, symbol: str, chart: str, max_age: float) -> list[dict[str, Any]]:
@@ -541,10 +571,11 @@ def _news(symbol: str) -> dict[str, Any]:
 
 
 def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
-    bars_by_chart = {name: _bars(host, symbol, name, 2 if name == chart else 30) for name in CHARTS}
+    bars_by_chart = {name: _bars(host, symbol, name, 0 if name == chart else 30) for name in CHARTS}
     quote = host.runtime.projection.market_data.quote(symbol)
     bid = float(quote.bid)
     ask = float(quote.ask)
+    bars_by_chart[chart] = _live_candles(bars_by_chart.get(chart) or [], bid, chart)
     spread = round(ask - bid, 5)
     book = _book(symbol)
     levels = session_levels(bars_by_chart.get("M15") or bars_by_chart.get("M5") or [])
