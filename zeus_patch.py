@@ -207,3 +207,46 @@ else:
     runtime.write_bytes(clock.replace(old_quotes, new_quotes, 1).encode("utf-8"))
     print("Startup reads three quotes, not the whole list.", flush=True)
 
+
+
+runtime_fast = Path("src") / "zeus3" / "chart" / "runtime.py"
+fast = runtime_fast.read_text(encoding="utf-8")
+fast_nl = "\r\n" if "\r\n" in fast else "\n"
+old_import = "from zeus3.instruments.live_mapping import build_runtime_mappings"
+new_import = "from zeus3.instruments.live_mapping import build_fast_runtime_mappings"
+old_call = "mappings, catalog = build_runtime_mappings(worker)"
+new_call = "mappings, catalog = build_fast_runtime_mappings(worker)"
+old_worker = (
+    "        worker = SubprocessMT5ReadClient(" + fast_nl
+    + "            MT5WorkerConfig(" + fast_nl
+    + "                profile_id=\"PRIMARY_CHART\"," + fast_nl
+    + "                terminal_path=selected," + fast_nl
+    + "                expected_login=expected_login," + fast_nl
+    + "                expected_server=expected_server," + fast_nl
+    + "                expected_company=expected_company," + fast_nl
+    + "            )" + fast_nl
+    + "        )"
+)
+new_worker = (
+    "        worker = SubprocessMT5ReadClient(" + fast_nl
+    + "            MT5WorkerConfig(" + fast_nl
+    + "                profile_id=\"PRIMARY_CHART\"," + fast_nl
+    + "                terminal_path=selected," + fast_nl
+    + "                expected_login=expected_login," + fast_nl
+    + "                expected_server=expected_server," + fast_nl
+    + "                expected_company=expected_company," + fast_nl
+    + "                initialize_timeout_ms=15000," + fast_nl
+    + "            )" + fast_nl
+    + "        )"
+)
+if "build_fast_runtime_mappings" in fast and "initialize_timeout_ms=15000" in fast:
+    print("Direct name mapping is already installed.", flush=True)
+else:
+    if old_import not in fast or old_call not in fast or old_worker not in fast:
+        print("Could not install the direct name mapping.", flush=True)
+        raise SystemExit(1)
+    fast = fast.replace(old_import, new_import, 1)
+    fast = fast.replace(old_call, new_call, 1)
+    fast = fast.replace(old_worker, new_worker, 1)
+    runtime_fast.write_bytes(fast.encode("utf-8"))
+    print("Startup checks the real symbol names only.", flush=True)

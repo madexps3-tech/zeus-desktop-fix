@@ -183,3 +183,111 @@ def build_runtime_mappings(
         )
 
     return mappings, tuple(catalog)
+
+def build_fast_runtime_mappings(
+    worker: BrokerReadClient,
+    *,
+    canonical_symbols: Iterable[str] | None = None,
+) -> tuple[dict[str, MappingResult], tuple[dict[str, Any], ...]]:
+    """Map by the broker's real names. Do not download the whole symbol list."""
+    requested = tuple(
+        str(x).upper()
+        for x in (
+            canonical_symbols
+            if canonical_symbols is not None
+            else BUILTIN_INSTRUMENTS.keys()
+        )
+    )
+    cached = _load_symbol_cache()
+    old_catalog = getattr(worker, "catalog_request_timeout_seconds", None)
+    old_request = getattr(worker, "request_timeout_seconds", None)
+    if old_catalog is not None:
+        worker.catalog_request_timeout_seconds = 1.5
+    if old_request is not None:
+        worker.request_timeout_seconds = 1.5
+    mappings: dict[str, MappingResult] = {}
+    catalog: list[dict[str, Any]] = []
+    try:
+        for canonical in requested:
+            definition = BUILTIN_INSTRUMENTS.get(canonical)
+            if definition is None:
+                continue
+            found = _first_live_name(worker, _name_attempts(canonical, definition.aliases, cached.get(canonical)))
+            if found is None:
+                mapping = MappingResult(canonical, None, 0, False, ())
+            else:
+                mapping = MappingResult(canonical, found, 90, False, (found,))
+                cached[canonical] = found
+            mappings[canonical] = mapping
+            catalog.append(
+                {
+                    "canonical_symbol": canonical,
+                    "display_name": definition.display_name,
+                    "asset_class": definition.asset_class,
+                    "broker_symbol": mapping.broker_symbol,
+                    "mapped": mapping.execution_ready,
+                    "ambiguous": False,
+                    "confidence": mapping.confidence,
+                    "reason": "DIRECT_NAME" if mapping.execution_ready else None,
+                }
+            )
+    finally:
+        if old_catalog is not None:
+            worker.catalog_request_timeout_seconds = old_catalog
+        if old_request is not None:
+            worker.request_timeout_seconds = old_request
+    _save_symbol_cache(cached)
+    return mappings, tuple(catalog)
+
+
+def _name_attempts(canonical: str, aliases: tuple[str, ...], cached: str | None) -> tuple[str, ...]:
+    ordered: list[str] = []
+    if cached:
+        ordered.append(cached)
+    for base in (canonical, *aliases):
+        ordered.append(base + "+")
+        ordered.append(base)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in ordered:
+        key = name.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(name)
+    return tuple(unique[:3])
+
+
+def _first_live_name(worker: BrokerReadClient, names: tuple[str, ...]) -> str | None:
+    for name in names:
+        try:
+            worker.symbol_spec(name)
+        except Exception:
+            continue
+        return name
+    return None
+
+
+def _cache_path():
+    from pathlib import Path
+    return Path.cwd() / "ZEUS_SYMBOL_CACHE.json"
+
+
+def _load_symbol_cache() -> dict[str, str]:
+    import json
+    path = _cache_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k).upper(): str(v) for k, v in raw.items() if str(v).strip()}
+
+
+def _save_symbol_cache(cache: dict[str, str]) -> None:
+    import json
+    try:
+        _cache_path().write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    except OSError:
+        return

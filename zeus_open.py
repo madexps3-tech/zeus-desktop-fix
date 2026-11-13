@@ -59,7 +59,7 @@ def read_text(path: Path) -> str:
 
 def backend_ready() -> bool:
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{BACK}/", timeout=1).close()
+        urllib.request.urlopen(f"http://127.0.0.1:{BACK}/", timeout=4).close()
         return True
     except Exception:
         return False
