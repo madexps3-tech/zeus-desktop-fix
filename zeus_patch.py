@@ -374,19 +374,14 @@ new_boot = (
     + "            raise _boot_box['error']" + bnl
     + "        runtime = _boot_box['runtime']"
 )
-if "_boot_thread.join(45)" in boot:
-    print("MetaTrader is given 45 seconds.", flush=True)
+if "_boot_thread" not in boot:
+    print("The loader is no longer cut off.", flush=True)
 elif "_boot_thread.join(25)" in boot:
     boot = boot.replace("_boot_thread.join(25)", "_boot_thread.join(45)", 1)
-    boot = boot.replace("within 25 seconds.", "within 45 seconds.", 1)
     boot_path.write_bytes(boot.encode("utf-8"))
-    print("MetaTrader is given 45 seconds.", flush=True)
-elif old_boot not in boot:
-    print("Could not install the MetaTrader wait.", flush=True)
-    raise SystemExit(1)
+    print("The old cutoff is still in place.", flush=True)
 else:
-    boot_path.write_bytes(boot.replace(old_boot, new_boot, 1).encode("utf-8"))
-    print("MetaTrader is given 45 seconds.", flush=True)
+    print("The old cutoff is still in place.", flush=True)
 
 import re
 direct_boot = (
@@ -437,7 +432,7 @@ new_stage = (
     + "        _starter.join(20)" + snl
     + "        if _starter.is_alive():" + snl
     + "            try:" + snl
-    + "                worker.close()" + snl
+    + "                worker._terminate_owned()" + snl
     + "            except Exception:" + snl
     + "                pass" + snl
     + "            _boot_note('The account call did not return')" + snl

@@ -13,8 +13,8 @@ for i in range(900):
         if text != seen:
             print(text[len(seen):], end="", flush=True)
             seen = text
-        if "did not answer" in text.lower():
-            print("MetaTrader did not answer. ZEUS has stopped. This window is not still loading.", flush=True)
+        if "did not answer" in text.lower() or "did not return" in text.lower():
+            print("This step did not return. ZEUS has stopped. This window is not still loading.", flush=True)
             raise SystemExit(1)
     if i and i % 30 == 0:
         print("Still loading. Leave this window and the ZEUS Server window open.", flush=True)
