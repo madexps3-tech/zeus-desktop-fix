@@ -250,3 +250,88 @@ else:
     fast = fast.replace(old_worker, new_worker, 1)
     runtime_fast.write_bytes(fast.encode("utf-8"))
     print("Startup checks the real symbol names only.", flush=True)
+
+
+page = Path("src") / "zeus3" / "v19" / "web.py"
+page_text = page.read_text(encoding="utf-8")
+page_nl = "\r\n" if "\r\n" in page_text else "\n"
+old_brain = (
+    "        try:" + page_nl
+    + "            self.integrated_brain = self._new_integrated_brain(runtime)" + page_nl
+    + "            brain_start_error = None" + page_nl
+    + "        except Exception as exc:" + page_nl
+    + "            # A failed/corrupt research journal must never stop the owner's" + page_nl
+    + "            # known-working manual trading desk from starting." + page_nl
+    + "            self.integrated_brain = None" + page_nl
+    + "            brain_start_error = f'{type(exc).__name__}: {exc}'"
+)
+new_brain = (
+    "        self.integrated_brain = None" + page_nl
+    + "        brain_start_error = None" + page_nl
+    + "        self._defer_brain = True"
+)
+old_scrub = (
+    "            self._v1_crash_recovery_count = await asyncio.to_thread(" + page_nl
+    + "                self._scrub_orphaned_v1_demo_authority, self.runtime)" + page_nl
+    + "            self._v1_crash_recovery_error = None"
+)
+new_scrub = (
+    "            self._v1_crash_recovery_count = 0" + page_nl
+    + "            self._v1_crash_recovery_error = 'PAGE_FIRST'" + page_nl
+    + "            asyncio.create_task(self._open_page_then_finish())"
+)
+method = (
+    "    async def _open_page_then_finish(self) -> None:" + page_nl
+    + "        try:" + page_nl
+    + "            self._v1_crash_recovery_count = await asyncio.to_thread(" + page_nl
+    + "                self._scrub_orphaned_v1_demo_authority, self.runtime)" + page_nl
+    + "            self._v1_crash_recovery_error = None" + page_nl
+    + "        except Exception as exc:" + page_nl
+    + "            self._v1_crash_recovery_error = f'{type(exc).__name__}: {exc}'" + page_nl
+    + "            self._v1_demo_last_tick = {" + page_nl
+    + "                'status': 'BLOCKED'," + page_nl
+    + "                'blockers': ['V1_CANONICAL_CRASH_RECOVERY_NOT_VERIFIED']," + page_nl
+    + "                'broker_writes': 0," + page_nl
+    + "            }" + page_nl
+    + "        if getattr(self, '_defer_brain', False) and self.integrated_brain is None:" + page_nl
+    + "            try:" + page_nl
+    + "                self.integrated_brain = await asyncio.to_thread(" + page_nl
+    + "                    self._new_integrated_brain, self.runtime)" + page_nl
+    + "            except Exception as exc:" + page_nl
+    + "                self.integrated_brain = None" + page_nl
+    + "                self._brain_last_tick = {" + page_nl
+    + "                    'status': 'RESEARCH_PRODUCER_FAIL_CLOSED'," + page_nl
+    + "                    'error': f'{type(exc).__name__}: {exc}'," + page_nl
+    + "                    'broker_writes': 0," + page_nl
+    + "                }" + page_nl
+    + "        if self.integrated_brain is not None and self._brain_task is None:" + page_nl
+    + "            try:" + page_nl
+    + "                self._subscribe_world_brain_reads()" + page_nl
+    + "                self._brain_task = asyncio.create_task(" + page_nl
+    + "                    self._integrated_brain_loop(), name='v19-integrated-world-brain'," + page_nl
+    + "                )" + page_nl
+    + "            except Exception as exc:" + page_nl
+    + "                self._brain_last_tick = {" + page_nl
+    + "                    'status': 'RESEARCH_PRODUCER_FAIL_CLOSED'," + page_nl
+    + "                    'error': f'{type(exc).__name__}: {exc}'," + page_nl
+    + "                    'broker_writes': 0," + page_nl
+    + "                }" + page_nl
+    + "        if self._v1_crash_recovery_error is None and self._native_auto_task is None:" + page_nl
+    + "            self._native_auto_task = asyncio.create_task(" + page_nl
+    + "                self._native_auto_loop(), name='v19-native-auto-dispatcher'" + page_nl
+    + "            )" + page_nl
+    + page_nl
+    + "    async def on_startup(self, app: web.Application) -> None:"
+)
+anchor = "    async def on_startup(self, app: web.Application) -> None:"
+if "_open_page_then_finish" in page_text and "_defer_brain = True" in page_text:
+    print("Trading page already opens before the research brain.", flush=True)
+else:
+    if old_brain not in page_text or old_scrub not in page_text or anchor not in page_text:
+        print("Could not open the trading page first.", flush=True)
+        raise SystemExit(1)
+    page_text = page_text.replace(old_brain, new_brain, 1)
+    page_text = page_text.replace(old_scrub, new_scrub, 1)
+    page_text = page_text.replace(anchor, method, 1)
+    page.write_bytes(page_text.encode("utf-8"))
+    print("Trading page opens before the research brain.", flush=True)

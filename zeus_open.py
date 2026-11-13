@@ -74,6 +74,14 @@ def status() -> dict:
     elif CHILD is not None and CHILD.poll() not in (None, 0) and not backend_ready():
         tail = "\n".join(log.strip().splitlines()[-12:]) or "The loader stopped."
         last = tail
+    elif not backend_ready():
+        extra = ""
+        for line in reversed(log.splitlines()):
+            if line.strip():
+                extra = line.strip()
+                break
+        if extra and extra not in last:
+            last = last + "\n" + extra
     return {"ready": backend_ready(), "line": last}
 
 
