@@ -387,3 +387,29 @@ elif old_boot not in boot:
 else:
     boot_path.write_bytes(boot.replace(old_boot, new_boot, 1).encode("utf-8"))
     print("MetaTrader is given 45 seconds.", flush=True)
+
+import re
+direct_boot = (
+    "        runtime = ChartHostRuntime.bootstrap(" + bnl
+    + "            terminal_path=selected_terminal," + bnl
+    + "            expected_login=expected_login," + bnl
+    + "            expected_server=expected_server," + bnl
+    + "            expected_company=expected_company," + bnl
+    + "        )"
+)
+boot_now = boot_path.read_text(encoding="utf-8")
+if "_boot_thread" not in boot_now:
+    print("The loader is no longer cut off.", flush=True)
+else:
+    boot_fixed, count = re.subn(
+        r"        _boot_box = \{\}.*?        runtime = _boot_box\['runtime'\]",
+        direct_boot,
+        boot_now,
+        count=1,
+        flags=re.S,
+    )
+    if count != 1:
+        print("Could not remove the loader cutoff.", flush=True)
+        raise SystemExit(1)
+    boot_path.write_bytes(boot_fixed.encode("utf-8"))
+    print("The loader is no longer cut off.", flush=True)
