@@ -207,13 +207,25 @@ def build_fast_runtime_mappings(
         worker.request_timeout_seconds = 1.5
     mappings: dict[str, MappingResult] = {}
     catalog: list[dict[str, Any]] = []
+    timed_out = False
     try:
         for canonical in requested:
             definition = BUILTIN_INSTRUMENTS.get(canonical)
             if definition is None:
                 continue
-            found = _first_live_name(worker, _name_attempts(canonical, definition.aliases, cached.get(canonical)))
-            if found is None:
+            found = None
+            if not timed_out:
+                try:
+                    found = _first_live_name(
+                        worker,
+                        _name_attempts(canonical, definition.aliases, cached.get(canonical)),
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    found = cached.get(canonical)
+            else:
+                found = cached.get(canonical)
+            if not found:
                 mapping = MappingResult(canonical, None, 0, False, ())
             else:
                 mapping = MappingResult(canonical, found, 90, False, (found,))
@@ -255,14 +267,16 @@ def _name_attempts(canonical: str, aliases: tuple[str, ...], cached: str | None)
             continue
         seen.add(key)
         unique.append(name)
-    return tuple(unique[:3])
+    return tuple(unique[:2])
 
 
 def _first_live_name(worker: BrokerReadClient, names: tuple[str, ...]) -> str | None:
     for name in names:
         try:
             worker.symbol_spec(name)
-        except Exception:
+        except Exception as exc:
+            if "timed out" in str(exc).lower():
+                raise TimeoutError(str(exc)) from exc
             continue
         return name
     return None
