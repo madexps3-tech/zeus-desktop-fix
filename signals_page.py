@@ -571,11 +571,13 @@ def _news(symbol: str) -> dict[str, Any]:
 
 
 def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
-    bars_by_chart = {name: _bars(host, symbol, name, 0 if name == chart else 30) for name in CHARTS}
+    bars_by_chart = {name: _bars(host, symbol, name, 0) for name in CHARTS}
     quote = host.runtime.projection.market_data.quote(symbol)
     bid = float(quote.bid)
     ask = float(quote.ask)
-    bars_by_chart[chart] = _live_candles(bars_by_chart.get(chart) or [], bid, chart)
+    mid = (bid + ask) / 2
+    for name in CHARTS:
+        bars_by_chart[name] = _live_candles(bars_by_chart.get(name) or [], mid, name)
     spread = round(ask - bid, 5)
     book = _book(symbol)
     levels = session_levels(bars_by_chart.get("M15") or bars_by_chart.get("M5") or [])
