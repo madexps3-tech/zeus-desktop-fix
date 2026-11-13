@@ -571,8 +571,16 @@ def _news(symbol: str) -> dict[str, Any]:
 
 
 def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
+    core = host.runtime.projection.market_data
+    try:
+        quote = core.refresh_quote(symbol)
+    except Exception:
+        quote = core.quote(symbol)
+    try:
+        core.refresh_bars(symbol, Timeframe(chart), count=4, replace_cache=False)
+    except Exception:
+        pass
     bars_by_chart = {name: _bars(host, symbol, name, 0) for name in CHARTS}
-    quote = host.runtime.projection.market_data.quote(symbol)
     bid = float(quote.bid)
     ask = float(quote.ask)
     mid = (bid + ask) / 2
