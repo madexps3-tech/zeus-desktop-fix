@@ -16,9 +16,12 @@ from zeus3.v19.signals_engine import (
     FUTURES_ROOTS,
     PAIRS,
     POSITION_NAMES,
+    _session_name,
     align_ladder,
     build_rows,
+    liquidity,
     mark_taken,
+    reaction,
     record,
     session_levels,
 )
@@ -143,22 +146,24 @@ function draw(){
   const span=Math.max(hi-lo, 0.00001);
   const row=(data.rows||[]).find(r=>r.chart===selected&&r.entry!=null);
   if(row){lo=Math.min(lo,row.stop,row.target,row.entry);hi=Math.max(hi,row.stop,row.target,row.entry)}
-  const levels=((data.sessions||{}).levels)||[];
+  const levels=(data.pools)||[];
+  const mark=(data.reaction)||{};
   levels.forEach(level=>{
-    if(Math.abs(level.high-((lo+hi)/2))<span*1.6){lo=Math.min(lo,level.low);hi=Math.max(hi,level.high)}
+    if(Math.abs(level.price-((lo+hi)/2))<span*1.6){lo=Math.min(lo,level.price);hi=Math.max(hi,level.price)}
   });
   const pad=(hi-lo)*0.08||span*0.08; lo-=pad; hi+=pad;
   const y=p=>plotT+((hi-p)/(hi-lo))*(plotB-plotT);
   const step=(plotR-plotL)/Math.max(1,rows.length);
   levels.forEach(level=>{
-    const color=LEVEL_COLOR[level.name]||"#8ea3b8";
-    [level.high, level.low].forEach((price,index)=>{
-      if(price<lo||price>hi)return;
-      ctx.strokeStyle=color; ctx.globalAlpha=0.85; ctx.setLineDash(level.name==="YESTERDAY"?[2,4]:[6,4]);
-      ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
-      ctx.setLineDash([]); ctx.globalAlpha=1; ctx.fillStyle=color;
-      ctx.fillText(level.name+" "+(index?"LOW":"HIGH"), plotL+4, y(price)-3);
-    });
+    const price=level.price;
+    if(price<lo||price>hi)return;
+    const taken=mark.taken&&mark.taken.name===level.name;
+    const next=mark.next&&mark.next.name===level.name;
+    const color=taken?"#e9c66b":(next?"#67d6a3":(LEVEL_COLOR[(level.name.split(" ")[0])]||"#8ea3b8"));
+    ctx.strokeStyle=color; ctx.globalAlpha=0.85; ctx.setLineDash(level.name.indexOf("YESTERDAY")>=0?[2,4]:[6,4]);
+    ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha=1; ctx.fillStyle=color;
+    ctx.fillText((taken?"TAKEN ":(next?"NEXT ":""))+level.name, plotL+4, y(price)-3);
   });
   if(row){
     ctx.setLineDash([4,4]);
@@ -200,15 +205,16 @@ function draw(){
   }
   const picked=(data.rows||[]).find(r=>r.chart===selected)||{};
   const q=data.quote||{};
-  ctx.fillStyle="#e7eef5";
-  ctx.fillText(symbol+"  "+chart+"   BID "+(q.bid??"—")+"   ASK "+(q.ask??"—")+"   SPREAD "+(data.spread??"—"), 12, 18);
+  const feed=data.feed||{};
+  ctx.fillStyle=feed.quote_stale?"#ef7f88":"#e7eef5";
+  ctx.fillText(symbol+"  "+chart+"   BID "+(q.bid??"—")+"   ASK "+(q.ask??"—")+"   SPREAD "+(data.spread??"—")+"   "+(feed.quote_stale?"STALE":"LIVE "+(feed.quote_age??"—")+"s"), 12, 18);
   ctx.fillStyle="#e9c66b";
-  ctx.fillText((picked.state||"")+"   "+((data.sessions||{}).current||"")+"   "+(picked.reason==="POTENTIAL"?(picked.side==="BUY"?"POTENTIAL BUY":"POTENTIAL SELL"):""), 12, 36);
+  ctx.fillText((picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+"   "+(picked.reason==="POTENTIAL"?(picked.side==="BUY"?"POTENTIAL BUY":"POTENTIAL SELL"):"")+(feed.candles_stale?"   CANDLES OLD":""), 12, 36);
 }
 function researchLine(title, book){
   const bits=Object.keys(book||{}).map(chart=>{
     const x=book[chart];
-    return chart+" "+(x.wins||0)+" wins, "+(x.losses||0)+" losses, "+(x.be_wins||0)+" be-wins, "+(x.be_scratches||0)+" scratch";
+    return chart+" "+(x.wins||0)+" wins, "+(x.losses||0)+" losses, "+(x.open||0)+" open, "+(x.be_wins||0)+" be-wins, "+(x.be_scratches||0)+" scratch";
   });
   return bits.length?title+" · "+bits.join(" · "):title+" · none yet";
 }
@@ -235,11 +241,21 @@ function paint(){
   const pos=data.positions||[];
   $("positions").innerHTML=pos.length?pos.map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
     <button onclick="manage(${p.ticket},'CLOSE_POSITION')">CLOSE</button>
-    <button onclick="manage(${p.ticket},'STOP_TO_ENTRY',${p.price_open})">STOP TO ENTRY</button></div>`).join(""):"<div class='muted'>No open broker position on this pair.</div>";
+    <button onclick="manage(${p.ticket},'BREAK_EVEN',${p.price_open})">BE</button>
+    <button onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
+    <button onclick="manage(${p.ticket},'PARTIAL',null,50)">50%</button>
+    <button onclick="editStop(${p.ticket})">EDIT SL</button>
+    <button onclick="editR(${p.ticket},${p.price_open},${p.stop_loss},'${p.side}')">EDIT R</button></div>`).join(""):"<div class='muted'>No open broker position on this pair.</div>";
   const research=data.research||{};
-  $("research").textContent=researchLine("TAKEN", research.taken)+"\n"+researchLine("IF TAKEN", research.if_taken)+"\nThe old log was set aside. TAKEN is only an order this page sent. IF TAKEN was never sent.";
+  const openBits=(research.open||[]).map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning, "+(x.next_vote||"NONE"));
+  const align=research.alignment||{};
+  const alignBits=Object.keys(align).map(k=>k+" "+(align[k].wins||0)+" wins, "+(align[k].losses||0)+" losses");
+  $("research").textContent=researchLine("TAKEN", research.taken)+"\n"+researchLine("IF TAKEN", research.if_taken)+"\n"+(openBits.length?("OPEN · "+openBits.join(" · ")+"\n"):"")+(alignBits.length?("NEXT CHART · "+alignBits.join(" · ")+"\n"):"")+"TAKEN is an order this page sent. IF TAKEN was never sent. The second result is the 20-pip scratch.";
   const row=(data.rows||[]).find(r=>r.chart===selected);
-  $("status").textContent=row&&row.note?row.chart+" · "+row.note:"Click a row. TRADE sends a market order. POTENTIAL cannot be sent. The kill switch can still refuse a trade.";
+  const news=data.news||{};
+  const feed=data.feed||{};
+  const newsLine=news.line||"NO CALENDAR";
+  $("status").textContent=(feed.line?feed.line+"\n":"")+(row&&row.note?row.chart+" · "+row.note:"")+"\n"+newsLine;
 }
 async function trade(chartName){
   const row=(data.rows||[]).find(r=>r.chart===chartName&&r.tradeable);
@@ -266,16 +282,38 @@ async function trade(chartName){
     load();
   }catch(e){$("status").textContent="NOT SENT · "+e.message}
 }
-async function manage(ticket, action, entry){
-  const body={owner_approved:true,ticket:ticket,action:action==="STOP_TO_ENTRY"?"MODIFY_POSITION":action,reason:"SIGNALS PAGE"};
-  if(action==="STOP_TO_ENTRY")body.stop_loss=entry;
+async function manage(ticket, action, entry, pct){
+  const body={owner_approved:true,fast_ack:true,ticket:ticket,action:action,reason:"SIGNALS PAGE"};
+  if(action==="BREAK_EVEN")body.stop_loss=entry;
+  if(action==="PARTIAL")body.partial_pct=pct;
   if(action==="CLOSE_POSITION"&&!confirm("Close ticket "+ticket+" at the market?"))return;
+  if(action==="PARTIAL"&&!confirm("Close "+pct+"% of ticket "+ticket+"?"))return;
   try{
     const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
     const j=await r.json();
     $("status").textContent=((j.management||{}).ok?"BROKER OK":"BLOCKED")+" · "+((j.management||{}).reason||j.message||"");
     load();
   }catch(e){$("status").textContent="MANAGE ERROR · "+e.message}
+}
+async function editStop(ticket){
+  const price=Number(prompt("New stop price"));
+  if(!isFinite(price)||price<=0)return;
+  const body={owner_approved:true,fast_ack:true,ticket:ticket,action:"MODIFY_POSITION",stop_loss:price,reason:"SIGNALS PAGE EDIT SL"};
+  const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json();
+  $("status").textContent=((j.management||{}).ok?"STOP SENT":"BLOCKED")+" · "+((j.management||{}).reason||j.message||"");
+  load();
+}
+async function editR(ticket, entry, stop, side){
+  const multiple=Number(prompt("Target in R, for example 2"));
+  if(!isFinite(multiple)||multiple<=0||!isFinite(entry)||!isFinite(stop)){$("status").textContent="NO R · the stop is missing";return}
+  const risk=Math.abs(entry-stop);
+  const price=side==="BUY"?entry+risk*multiple:entry-risk*multiple;
+  const body={owner_approved:true,fast_ack:true,ticket:ticket,action:"MODIFY_POSITION",take_profits:[price],reason:"SIGNALS PAGE EDIT R"};
+  const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json();
+  $("status").textContent=((j.management||{}).ok?"TARGET SENT "+price:"BLOCKED")+" · "+((j.management||{}).reason||j.message||"");
+  load();
 }
 const cv=$("cv");
 cv.addEventListener("wheel",e=>{e.preventDefault();zoom(e.deltaY>0?15:-15)},{passive:false});
@@ -284,7 +322,7 @@ cv.addEventListener("pointerup",()=>{drag=null});
 cv.addEventListener("pointermove",e=>{if(drag==null)return;const dx=e.clientX-drag;drag=e.clientX;pan+=dx<0?-2:2;draw()});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
 window.addEventListener("pagehide",()=>{clearInterval(timer);if(control)control.abort()});
-buttons();load();timer=setInterval(load,3000);
+buttons();load();timer=setInterval(load,1000);
 </script></body></html>"""
 
 
@@ -401,14 +439,92 @@ def render_signals_page() -> str:
     return PAGE
 
 
+_NEWS: Any = None
+_TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
+
+
+def _feed(quote: Any, candle_time: str, chart: str) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    tick = getattr(quote, "broker_timestamp_utc", None) or getattr(quote, "received_at_utc", None) or now
+    if getattr(tick, "tzinfo", None) is None:
+        tick = tick.replace(tzinfo=timezone.utc)
+    quote_age = max(0, int((now - tick).total_seconds()))
+    candle = None
+    if candle_time:
+        try:
+            candle = datetime.fromisoformat(str(candle_time).replace("Z", "+00:00"))
+            if candle.tzinfo is None:
+                candle = candle.replace(tzinfo=timezone.utc)
+        except ValueError:
+            candle = None
+    candle_age = max(0, int((now - candle).total_seconds())) if candle else None
+    limit = _TF_SECONDS.get(chart, 60) * 3
+    candles_stale = candle_age is None or candle_age > limit
+    health = str(getattr(getattr(quote, "health", ""), "value", getattr(quote, "health", "")) or "")
+    quote_stale = quote_age > 60 or health in {"STALE", "DISCONNECTED", "ERROR"}
+    session = _session_name(now if candles_stale else (candle or now))
+    if health in {"DISCONNECTED", "ERROR"}:
+        market = "NO FEED"
+    elif quote_stale:
+        market = "STALE"
+    else:
+        market = "OPEN"
+    return {
+        "quote_age": quote_age,
+        "candle_age": candle_age,
+        "quote_stale": quote_stale,
+        "candles_stale": candles_stale,
+        "session": session,
+        "market": market,
+        "line": f"FEED {market} · quote {quote_age}s ago · candle {candle_age if candle_age is not None else '—'}s ago · {session}",
+    }
+
+
+def _news(symbol: str) -> dict[str, Any]:
+    global _NEWS
+    try:
+        from zeus3.chart.news_risk import NewsRiskService
+
+        if _NEWS is None:
+            _NEWS = NewsRiskService(background=True)
+        snap = _NEWS.snapshot(symbol)
+    except Exception:
+        return {"line": "NO CALENDAR"}
+    if snap.get("state") == "UNAVAILABLE":
+        return {"line": "NO CALENDAR"}
+    upcoming = list(snap.get("upcoming_events") or [])
+    holiday = next((row for row in upcoming if str(row.get("impact") or "").upper() == "HOLIDAY"), None)
+    nxt = upcoming[0] if upcoming else snap.get("nearest_event")
+    if not nxt:
+        return {"line": "NO NEWS ON THE CALENDAR" + (" · " + str(holiday.get("name") or "HOLIDAY") if holiday else "")}
+    seconds = float(nxt.get("seconds_from_now") or 0)
+    minutes = int(abs(seconds) // 60)
+    clock = f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
+    when = "ago" if seconds < 0 else "in"
+    today = []
+    for row in upcoming:
+        if float(row.get("seconds_from_now") or 0) > 24 * 3600:
+            break
+        today.append(str(row.get("name") or "event") + " " + str(row.get("impact") or "UNKNOWN"))
+    line = f"NEXT {nxt.get('name') or 'event'} {nxt.get('impact') or 'UNKNOWN'} {when} {clock}"
+    if holiday:
+        line = "CLOSED · " + str(holiday.get("name") or "HOLIDAY") + " · " + line
+    if today:
+        line += " · TODAY " + " · ".join(today[:4])
+    if snap.get("state") not in {"LIVE_SCHEDULE", "CACHED_SCHEDULE"}:
+        line = "NO CALENDAR · " + line
+    return {"line": line, "state": snap.get("state")}
+
+
 def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
-    bars_by_chart = {name: _bars(host, symbol, name, 5 if name == chart else 45) for name in CHARTS}
+    bars_by_chart = {name: _bars(host, symbol, name, 2 if name == chart else 30) for name in CHARTS}
     quote = host.runtime.projection.market_data.quote(symbol)
     bid = float(quote.bid)
     ask = float(quote.ask)
     spread = round(ask - bid, 5)
     book = _book(symbol)
     levels = session_levels(bars_by_chart.get("M15") or bars_by_chart.get("M5") or [])
+    pools = liquidity(levels, bars_by_chart)
     rows = build_rows(symbol, bars_by_chart, book, spread, levels)
     try:
         research = record(symbol, rows, bars_by_chart)
@@ -427,6 +543,8 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
         "quote": {"bid": bid, "ask": ask},
         "spread": spread,
         "sessions": levels,
+        "pools": pools,
+        "reaction": reaction(bars_by_chart.get(chart) or [], pools),
         "rows": rows,
         "ladder": align_ladder(symbol, book, bid, ask),
         "flow": {
@@ -442,6 +560,8 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
         },
         "positions": _positions(host, symbol),
         "research": research,
+        "feed": _feed(quote, ((bars_by_chart.get(chart) or [None])[-1] or {}).get("time", ""), chart),
+        "news": _news(symbol),
         "server_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     }
 

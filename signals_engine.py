@@ -171,7 +171,7 @@ def _row(
         "r": round(ratio, 2),
         "time": when,
         "ready": ready,
-        "tradeable": tradeable and ready,
+        "tradeable": bool(tradeable),
         "session": _session(when),
     }
 
@@ -183,6 +183,30 @@ def _swept(bars: list[dict[str, Any]], level: float, kind: str) -> bool:
         if kind == "LOW" and _num(bar, "low") < level and _num(bar, "close") > level:
             return True
     return False
+
+
+def _aim(side: str, entry: float, stop: float, candidate: float | None) -> float:
+    """The next swing when it is at least 0.5R. Otherwise one times the risk."""
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return entry
+    one_r = entry + risk if side == "BUY" else entry - risk
+    if side == "BUY" and candidate is not None and candidate >= entry + risk * MIN_R:
+        return candidate
+    if side == "SELL" and candidate is not None and candidate <= entry - risk * MIN_R:
+        return candidate
+    return one_r
+
+
+ABOVE = {
+    "M1": ("M5", "M15"),
+    "M5": ("M15", "H1"),
+    "M15": ("H1", "H4"),
+    "M30": ("H1", "H4"),
+    "H1": ("H4", "D1"),
+    "H4": ("D1",),
+    "D1": (),
+}
 
 
 def signal_for_chart(chart: str, bars: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -209,29 +233,35 @@ def signal_for_chart(chart: str, bars: list[dict[str, Any]]) -> dict[str, Any] |
     swept_high = _num(last, "high") > last_high["price"] and close < last_high["price"]
     swept_low = _num(last, "low") < last_low["price"] and close > last_low["price"]
     if swept_high:
-        return _row(chart, "SELL", "SWEEP", close, _num(last, "high"), last_low["price"], _time(last), True)
+        stop = _num(last, "high")
+        return _row(chart, "SELL", "SWEEP", close, stop, _aim("SELL", close, stop, last_low["price"]), _time(last), True)
     if swept_low:
-        return _row(chart, "BUY", "SWEEP", close, _num(last, "low"), last_high["price"], _time(last), True)
+        stop = _num(last, "low")
+        return _row(chart, "BUY", "SWEEP", close, stop, _aim("BUY", close, stop, last_high["price"]), _time(last), True)
 
     if trend == "UP" and close < last_low["price"] and _swept(earlier, last_low["price"], "LOW"):
-        risk = _num(last, "high") - close
-        target = prior_low if prior_low < close else close - risk
-        return _row(chart, "SELL", "MSS", close, _num(last, "high"), target, _time(last), True)
+        stop = _num(last, "high")
+        return _row(chart, "SELL", "MSS", close, stop, _aim("SELL", close, stop, prior_low), _time(last), True)
     if trend == "DOWN" and close > last_high["price"] and _swept(earlier, last_high["price"], "HIGH"):
-        risk = close - _num(last, "low")
-        target = prior_high if prior_high > close else close + risk
-        return _row(chart, "BUY", "MSS", close, _num(last, "low"), target, _time(last), True)
+        stop = _num(last, "low")
+        return _row(chart, "BUY", "MSS", close, stop, _aim("BUY", close, stop, prior_high), _time(last), True)
 
     if trend == "UP" and close > last_high["price"]:
         ready = _num(last, "low") <= last_high["price"] and close > last_high["price"]
-        return _row(chart, "BUY", "BOS", last_high["price"], last_low["price"], _num(last, "high"), _time(last), ready)
+        entry = last_high["price"]
+        stop = last_low["price"]
+        return _row(chart, "BUY", "BOS", entry, stop, _aim("BUY", entry, stop, None), _time(last), ready)
     if trend == "DOWN" and close < last_low["price"]:
         ready = _num(last, "high") >= last_low["price"] and close < last_low["price"]
-        return _row(chart, "SELL", "BOS", last_low["price"], last_high["price"], _num(last, "low"), _time(last), ready)
+        entry = last_low["price"]
+        stop = last_high["price"]
+        return _row(chart, "SELL", "BOS", entry, stop, _aim("SELL", entry, stop, None), _time(last), ready)
     if trend == "UP" and close < last_low["price"]:
-        return _row(chart, "SELL", "CHoCH", close, last_high["price"], last_low["price"], _time(last), True)
+        stop = last_high["price"]
+        return _row(chart, "SELL", "CHoCH", close, stop, _aim("SELL", close, stop, prior_low), _time(last), True)
     if trend == "DOWN" and close > last_high["price"]:
-        return _row(chart, "BUY", "CHoCH", close, last_low["price"], last_high["price"], _time(last), True)
+        stop = last_low["price"]
+        return _row(chart, "BUY", "CHoCH", close, stop, _aim("BUY", close, stop, prior_high), _time(last), True)
     if trend == "RANGE":
         span = last_high["price"] - last_low["price"]
         if span <= 0:
@@ -447,19 +477,117 @@ def build_rows(
         row["note"] = note
         row["spread"] = spread
         rows.append(row)
+    _retain(symbol, rows, bars_by_chart)
     by_chart = {row["chart"]: row for row in rows}
     for row in rows:
         if not row.get("side"):
             row["higher"] = "—"
+            row["next_vote"] = "NONE"
             continue
-        higher = []
-        for chart in ("H4", "D1"):
-            other = by_chart.get(chart) or {}
-            if chart == row["chart"] or not other.get("side"):
+        labels = []
+        vote = "NONE"
+        first = True
+        for chart in ABOVE.get(str(row.get("chart")), ()):
+            state_word = str((by_chart.get(chart) or {}).get("state") or "")
+            if state_word == "TREND UP":
+                word = "WITH" if row["side"] == "BUY" else "AGAINST"
+            elif state_word == "TREND DOWN":
+                word = "WITH" if row["side"] == "SELL" else "AGAINST"
+            else:
                 continue
-            higher.append("WITH " + chart if other["side"] == row["side"] else "AGAINST " + chart)
-        row["higher"] = ", ".join(higher) or "—"
+            labels.append(word + " " + chart)
+            if first:
+                vote = word
+                first = False
+        row["higher"] = ", ".join(labels) or "—"
+        row["next_vote"] = vote
     return rows
+
+
+def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, list[dict[str, Any]]]) -> None:
+    """Keep a priced signal until its stop or its target. A quiet candle does not erase it."""
+    state = _load_state()
+    active: dict[str, dict[str, Any]] = state.setdefault("active", {})
+    changed = False
+    for row in rows:
+        chart = str(row.get("chart"))
+        key = symbol + "|" + chart
+        if row.get("tradeable") and row.get("entry") is not None:
+            active[key] = {**row, "symbol": symbol}
+            changed = True
+            continue
+        held = active.get(key)
+        if not held:
+            continue
+        result, _be, mfe = _score_path(held, bars_by_chart.get(chart) or [], float(BE_MOVE.get(symbol, 0.0)))
+        if result in ("WIN", "LOSS"):
+            active.pop(key, None)
+            changed = True
+            continue
+        note = "Held until the stop or the target."
+        row.clear()
+        row.update(held)
+        row["mfe"] = mfe
+        row["tradeable"] = True
+        row["note"] = note
+        row["decision"] = held.get("decision") or "HELD"
+    if changed:
+        _save_state(state)
+
+
+def liquidity(levels: dict[str, Any], bars_by_chart: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Pools the candles can prove. Not the resting book."""
+    pools: list[dict[str, Any]] = []
+    names = [str(level.get("name")) for level in levels.get("levels") or []]
+    current = str(levels.get("current") or "")
+    previous = ""
+    order = ["ASIA", "LONDON", "NEW_YORK", "LATE"]
+    if current in order:
+        index = order.index(current)
+        previous = order[index - 1] if index else "YESTERDAY"
+    for level in levels.get("levels") or []:
+        name = str(level.get("name"))
+        label = "PREVIOUS " + name if name == previous else name
+        pools.append({"name": label + " HIGH", "price": float(level["high"]), "kind": "HIGH"})
+        pools.append({"name": label + " LOW", "price": float(level["low"]), "kind": "LOW"})
+    for chart in ("H4", "D1"):
+        bars = bars_by_chart.get(chart) or []
+        if len(bars) < 20:
+            continue
+        points = swings(bars[:-1])
+        highs = [point for point in points if point["kind"] == "HIGH"]
+        lows = [point for point in points if point["kind"] == "LOW"]
+        if highs:
+            pools.append({"name": chart + " SWING HIGH", "price": float(highs[-1]["price"]), "kind": "HIGH"})
+        if lows:
+            pools.append({"name": chart + " SWING LOW", "price": float(lows[-1]["price"]), "kind": "LOW"})
+    return pools
+
+
+def reaction(bars: list[dict[str, Any]], pools: list[dict[str, Any]]) -> dict[str, Any]:
+    """A wick through a pool that closes back inside is taken. The next pool is only a target."""
+    closed = bars[:-1] if len(bars) > 1 else []
+    if not closed or not pools:
+        return {"taken": None, "next": None}
+    last = closed[-1]
+    close = _num(last, "close")
+    taken = None
+    for pool in pools:
+        price = float(pool["price"])
+        if pool["kind"] == "HIGH" and _num(last, "high") > price and close < price:
+            if taken is None or abs(price - close) < abs(float(taken["price"]) - close):
+                taken = pool
+        if pool["kind"] == "LOW" and _num(last, "low") < price and close > price:
+            if taken is None or abs(price - close) < abs(float(taken["price"]) - close):
+                taken = pool
+    nxt = None
+    if taken and taken["kind"] == "HIGH":
+        below = [pool for pool in pools if float(pool["price"]) < close]
+        nxt = max(below, key=lambda pool: float(pool["price"])) if below else None
+    elif taken and taken["kind"] == "LOW":
+        above = [pool for pool in pools if float(pool["price"]) > close]
+        nxt = min(above, key=lambda pool: float(pool["price"])) if above else None
+    return {"taken": taken, "next": nxt}
 
 
 def _load_state() -> dict[str, Any]:
@@ -471,6 +599,8 @@ def _load_state() -> dict[str, Any]:
     state.setdefault("taken_open", {})
     state.setdefault("if_taken", {})
     state.setdefault("taken", {})
+    state.setdefault("active", {})
+    state.setdefault("alignment", {})
     return state
 
 
@@ -555,10 +685,18 @@ def _finish(state: dict[str, Any], store: str, summary_name: str, bars_by_chart:
         chart = str(row.get("chart"))
         bucket = summary.setdefault(chart, _empty_bucket())
         _apply(bucket, result, be_result)
+        vote = str(row.get("next_vote") or "NONE")
+        if vote not in ("WITH", "AGAINST"):
+            vote = "NONE"
+        align = state.setdefault("alignment", {}).setdefault(vote, _empty_bucket())
+        if result == "WIN":
+            align["wins"] = int(align.get("wins") or 0) + 1
+        elif result == "LOSS":
+            align["losses"] = int(align.get("losses") or 0) + 1
         _append({
             "event": result, "book": summary_name, "symbol": symbol, "at": now,
             "chart": chart, "reason": row.get("reason"), "side": row.get("side"),
-            "r": row.get("r"), "be": be_result, "mfe": mfe,
+            "r": row.get("r"), "be": be_result, "mfe": mfe, "next_vote": vote,
         })
         done.append(key)
     for key in done:
@@ -572,7 +710,7 @@ def record(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, lis
     if_summary: dict[str, dict[str, int]] = state.setdefault("if_taken", {})
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     for row in rows:
-        if not row.get("side") or not row.get("ready") or not row.get("tradeable"):
+        if not row.get("side") or not row.get("tradeable"):
             continue
         if row.get("entry") is None:
             continue
@@ -586,7 +724,24 @@ def record(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, lis
     _finish(state, "if_open", "if_taken", bars_by_chart, symbol, now)
     _finish(state, "taken_open", "taken", bars_by_chart, symbol, now)
     _save_state(state)
-    return {"taken": state.get("taken") or {}, "if_taken": state.get("if_taken") or {}}
+    open_detail = [
+        {
+            "chart": row.get("chart"),
+            "side": row.get("side"),
+            "reason": row.get("reason"),
+            "mfe": row.get("mfe"),
+            "entry": row.get("entry"),
+            "next_vote": row.get("next_vote") or "NONE",
+        }
+        for row in (state.get("if_open") or {}).values()
+        if str(row.get("symbol")) == symbol
+    ]
+    return {
+        "taken": state.get("taken") or {},
+        "if_taken": state.get("if_taken") or {},
+        "alignment": state.get("alignment") or {},
+        "open": open_detail,
+    }
 
 
 def mark_taken(row: dict[str, Any]) -> dict[str, Any]:
