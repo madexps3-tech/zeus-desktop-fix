@@ -181,3 +181,29 @@ if "_prefer_plus" not in mapping:
 else:
     print("Gold symbol match is already updated.", flush=True)
 
+runtime = Path("src") / "zeus3" / "chart" / "runtime.py"
+clock = runtime.read_text(encoding="utf-8")
+clock_newline = "\r\n" if "\r\n" in clock else "\n"
+old_quotes = (
+    "            try:" + clock_newline
+    + "                mapped_quotes.append(worker.quote(mapping.broker_symbol))" + clock_newline
+    + "            except Exception:" + clock_newline
+    + "                continue"
+)
+new_quotes = (
+    "            if len(mapped_quotes) >= 3:" + clock_newline
+    + "                break" + clock_newline
+    + "            try:" + clock_newline
+    + "                mapped_quotes.append(worker.quote(mapping.broker_symbol))" + clock_newline
+    + "            except Exception:" + clock_newline
+    + "                continue"
+)
+if "len(mapped_quotes) >= 3" in clock:
+    print("Startup quotes are already limited.", flush=True)
+elif old_quotes not in clock:
+    print("Could not limit the startup quotes.", flush=True)
+    raise SystemExit(1)
+else:
+    runtime.write_bytes(clock.replace(old_quotes, new_quotes, 1).encode("utf-8"))
+    print("Startup reads three quotes, not the whole list.", flush=True)
+
