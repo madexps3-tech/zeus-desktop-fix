@@ -364,10 +364,9 @@ new_boot = (
     + "                _boot_box['error'] = exc" + bnl
     + "        _boot_thread = threading.Thread(target=_boot_markets, name='zeus-mt5-boot', daemon=True)" + bnl
     + "        _boot_thread.start()" + bnl
-    + "        _boot_thread.join(25)" + bnl
+    + "        _boot_thread.join(45)" + bnl
     + "        if _boot_thread.is_alive():" + bnl
-    + "            print('MetaTrader did not answer within 25 seconds.', flush=True)" + bnl
-    + "            print('The terminal in OneDrive is not responding.', flush=True)" + bnl
+    + "            print('MetaTrader did not answer within 45 seconds.', flush=True)" + bnl
     + "            print(selected_terminal, flush=True)" + bnl
     + "            _step('MetaTrader did not answer')" + bnl
     + "            os._exit(4)" + bnl
@@ -375,11 +374,16 @@ new_boot = (
     + "            raise _boot_box['error']" + bnl
     + "        runtime = _boot_box['runtime']"
 )
-if "_boot_thread.join(25)" in boot:
-    print("The 25 second stop is already installed.", flush=True)
+if "_boot_thread.join(45)" in boot:
+    print("MetaTrader is given 45 seconds.", flush=True)
+elif "_boot_thread.join(25)" in boot:
+    boot = boot.replace("_boot_thread.join(25)", "_boot_thread.join(45)", 1)
+    boot = boot.replace("within 25 seconds.", "within 45 seconds.", 1)
+    boot_path.write_bytes(boot.encode("utf-8"))
+    print("MetaTrader is given 45 seconds.", flush=True)
 elif old_boot not in boot:
-    print("Could not install the 25 second stop.", flush=True)
+    print("Could not install the MetaTrader wait.", flush=True)
     raise SystemExit(1)
 else:
     boot_path.write_bytes(boot.replace(old_boot, new_boot, 1).encode("utf-8"))
-    print("MetaTrader is given 25 seconds, then ZEUS stops.", flush=True)
+    print("MetaTrader is given 45 seconds.", flush=True)
