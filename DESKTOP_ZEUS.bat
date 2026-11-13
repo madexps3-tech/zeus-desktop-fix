@@ -29,7 +29,7 @@ if not exist "%PY%" (
 echo Starting ZEUS from %CD%
 echo This does not open Chrome or Edge.
 if not exist "%CD%\src\zeus3\v19" mkdir "%CD%\src\zeus3\v19"
-powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/96625abc501b547b4be9a7704ac626c6b939ab71/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/install_zone.py' -OutFile '%CD%\install_zone.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part0.txt' -OutFile '%CD%\part0.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part1.txt' -OutFile '%CD%\part1.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part2.txt' -OutFile '%CD%\part2.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part3.txt' -OutFile '%CD%\part3.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/signals_engine.py' -OutFile '%CD%\src\zeus3\v19\signals_engine.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/signals_page.py' -OutFile '%CD%\src\zeus3\v19\signals_page.py'"
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/96625abc501b547b4be9a7704ac626c6b939ab71/zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/9ff0675ff5abb33ed8124b855fe8b87db58c36f5/zeus_open.py' -OutFile '%CD%\zeus_open.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/53554f970633cd88a7e78376695d5fb99c720d09/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/install_zone.py' -OutFile '%CD%\install_zone.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part0.txt' -OutFile '%CD%\part0.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part1.txt' -OutFile '%CD%\part1.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part2.txt' -OutFile '%CD%\part2.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part3.txt' -OutFile '%CD%\part3.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/signals_engine.py' -OutFile '%CD%\src\zeus3\v19\signals_engine.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/signals_page.py' -OutFile '%CD%\src\zeus3\v19\signals_page.py'"
 "%PY%" "%CD%\install_zone.py" "%CD%"
 if errorlevel 1 goto fail
 echo Leave MetaTrader logged in.
@@ -47,7 +47,7 @@ echo Checking the loader.
 if errorlevel 1 goto fail
 echo Starting one dashboard loader.
 if exist "%CD%\ZEUS_SERVER.log" del "%CD%\ZEUS_SERVER.log"
-start "ZEUS Server" /D "%CD%" cmd /c ""%PY%" -u -m zeus3.v19.web > "%CD%\ZEUS_SERVER.log" 2>&1"
+start "ZEUS Server" /D "%CD%" cmd /c ""%PY%" -u "%CD%\zeus_open.py""
 "%PY%" "%CD%\zeus_wait.py"
 if errorlevel 1 goto fail
 echo Opening the ZEUS window.
