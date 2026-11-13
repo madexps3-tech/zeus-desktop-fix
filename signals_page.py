@@ -349,6 +349,33 @@ cv.addEventListener("pointermove",e=>{if(drag==null)return;const dx=e.clientX-dr
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
 window.addEventListener("pagehide",()=>{clearInterval(timer);if(control)control.abort()});
 buttons();load();timer=setInterval(load,1000);
+let fastBid=null,fastAsk=null;
+async function fastQuote(){
+  if(document.visibilityState==="hidden"||!data)return;
+  try{
+    const r=await fetch("/api/quote?symbol="+encodeURIComponent(symbol));
+    const j=await r.json();
+    if(!r.ok||!j.ok)return;
+    const q=j.quote||{};
+    const bid=Number(q.bid),ask=Number(q.ask);
+    if(!isFinite(bid)||!isFinite(ask))return;
+    if(bid===fastBid&&ask===fastAsk)return;
+    fastBid=bid;fastAsk=ask;
+    data.quote={bid:bid,ask:ask};
+    data.spread=ask-bid;
+    const rows=data.candles||[];
+    if(rows.length){
+      const last=rows[rows.length-1];
+      const mid=(bid+ask)/2;
+      last.close=mid;
+      last.high=Math.max(Number(last.high),mid);
+      last.low=Math.min(Number(last.low),mid);
+    }
+    if(data.feed){data.feed.quote_stale=false;data.feed.quote_age=0;}
+    draw();
+  }catch(e){}
+}
+setInterval(fastQuote,100);
 </script></body></html>"""
 
 
@@ -572,6 +599,17 @@ def _news(symbol: str) -> dict[str, Any]:
 
 def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
     core = host.runtime.projection.market_data
+    try:
+        from zeus3.market_data.subscriptions import SubscriptionPriority
+
+        host.runtime.market_runtime.add_quote_watch(
+            symbol,
+            priority=SubscriptionPriority.ACTIVE_CHART,
+            minimum_interval_seconds=0.05,
+            task_id=f"ACTIVE_CHART_QUOTE:{symbol}",
+        )
+    except Exception:
+        pass
     try:
         quote = core.refresh_quote(symbol)
     except Exception:
