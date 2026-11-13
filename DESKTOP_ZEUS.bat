@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 set "PY=%CD%\runtime\python\python.exe"
 set "PYTHONPATH=%CD%\src"
-set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/a1415ceccd18ee0da1d8c756b63bfdbf7775e7d2"
+set "BASE=https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/6dfa2e0b7eb52df0dabaada20c7e07abb37d452d
 if not exist "%PY%" (
   echo This file must stay in the ZEUS folder.
   pause
