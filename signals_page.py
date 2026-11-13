@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import asyncio
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Any
@@ -28,6 +29,7 @@ from zeus3.v19.signals_engine import (
 
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _LOCK = threading.Lock()
+_ORDER_BUSY = threading.Event()
 _LAST: dict[str, dict[str, Any]] = {}
 
 LABELS = {
@@ -267,20 +269,26 @@ async function trade(chartName){
   const risk=Number($("risk").value);
   if(!isFinite(risk)||risk<=0){$("status").textContent="NOT SENT · set the risk percent";return}
   $("status").textContent="SENDING...";
+  const started=performance.now();
   try{
+    await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
     const r=await fetch("/api/v19/owner-order/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
       owner_approved:true,symbol:symbol,timeframe:chartName,order_type:row.side==="BUY"?"MARKET_BUY":"MARKET_SELL",
       entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:risk,horizon_lane:"INTRADAY",
       owner_note:"SIGNALS PAGE "+row.reason+" "+row.decision
     })});
     const j=await r.json();
-    if(!r.ok||j.ok===false)throw Error(j.message||"rejected");
+    const ms=Math.round((j.timings_ms&&j.timings_ms.total)||(performance.now()-started));
+    if(!r.ok||j.ok===false)throw Error((j.message||"rejected")+" · "+ms+" ms");
     const ex=j.execution||j;
-    if(ex.submitted===false){$("status").textContent="NOT SENT · "+((ex.blockers||[]).join(" · ")||"the broker did not accept");return}
-    await fetch("/api/v19/signals/taken",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({symbol:symbol,chart:chartName,side:row.side,reason:row.reason,entry:row.entry,stop:row.stop,target:row.target,r:row.r,time:row.time})});
-    $("status").textContent="SENT · check the position below";
+    if(ex.submitted===false){$("status").textContent="NOT SENT · "+((ex.blockers||[]).join(" · ")||"the broker did not accept")+" · "+ms+" ms";return}
+    fetch("/api/v19/signals/taken",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({symbol:symbol,chart:chartName,side:row.side,reason:row.reason,entry:row.entry,stop:row.stop,target:row.target,r:row.r,time:row.time})}).catch(()=>{});
+    $("status").textContent="SENT · "+ms+" ms · check the position below";
     load();
   }catch(e){$("status").textContent="NOT SENT · "+e.message}
+  finally{
+    fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{});
+  }
 }
 async function manage(ticket, action, entry, pct){
   const body={owner_approved:true,fast_ack:true,ticket:ticket,action:action,reason:"SIGNALS PAGE"};
@@ -288,21 +296,30 @@ async function manage(ticket, action, entry, pct){
   if(action==="PARTIAL")body.partial_pct=pct;
   if(action==="CLOSE_POSITION"&&!confirm("Close ticket "+ticket+" at the market?"))return;
   if(action==="PARTIAL"&&!confirm("Close "+pct+"% of ticket "+ticket+"?"))return;
+  const started=performance.now();
   try{
+    await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
     const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
     const j=await r.json();
-    $("status").textContent=((j.management||{}).ok?"BROKER OK":"BLOCKED")+" · "+((j.management||{}).reason||j.message||"");
+    const ms=Math.round(j.management_server_ms||(performance.now()-started));
+    $("status").textContent=((j.management||{}).ok?"BROKER OK":"BLOCKED")+" · "+((j.management||{}).reason||j.message||"")+" · "+ms+" ms";
     load();
   }catch(e){$("status").textContent="MANAGE ERROR · "+e.message}
+  finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
 async function editStop(ticket){
   const price=Number(prompt("New stop price"));
   if(!isFinite(price)||price<=0)return;
+  const started=performance.now();
   const body={owner_approved:true,fast_ack:true,ticket:ticket,action:"MODIFY_POSITION",stop_loss:price,reason:"SIGNALS PAGE EDIT SL"};
-  const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
-  const j=await r.json();
-  $("status").textContent=((j.management||{}).ok?"STOP SENT":"BLOCKED")+" · "+((j.management||{}).reason||j.message||"");
-  load();
+  await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
+  try{
+    const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+    const j=await r.json();
+    const ms=Math.round(j.management_server_ms||(performance.now()-started));
+    $("status").textContent=((j.management||{}).ok?"STOP SENT":"BLOCKED")+" · "+((j.management||{}).reason||j.message||"")+" · "+ms+" ms";
+    load();
+  }finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
 async function editR(ticket, entry, stop, side){
   const multiple=Number(prompt("Target in R, for example 2"));
@@ -310,10 +327,15 @@ async function editR(ticket, entry, stop, side){
   const risk=Math.abs(entry-stop);
   const price=side==="BUY"?entry+risk*multiple:entry-risk*multiple;
   const body={owner_approved:true,fast_ack:true,ticket:ticket,action:"MODIFY_POSITION",take_profits:[price],reason:"SIGNALS PAGE EDIT R"};
-  const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
-  const j=await r.json();
-  $("status").textContent=((j.management||{}).ok?"TARGET SENT "+price:"BLOCKED")+" · "+((j.management||{}).reason||j.message||"");
-  load();
+  const started=performance.now();
+  await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
+  try{
+    const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+    const j=await r.json();
+    const ms=Math.round(j.management_server_ms||(performance.now()-started));
+    $("status").textContent=((j.management||{}).ok?"TARGET SENT "+price:"BLOCKED")+" · "+((j.management||{}).reason||j.message||"")+" · "+ms+" ms";
+    load();
+  }finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
 const cv=$("cv");
 cv.addEventListener("wheel",e=>{e.preventDefault();zoom(e.deltaY>0?15:-15)},{passive:false});
@@ -329,6 +351,8 @@ buttons();load();timer=setInterval(load,1000);
 def _bars(host: Any, symbol: str, chart: str, max_age: float) -> list[dict[str, Any]]:
     key = symbol + "|" + chart
     cached = _CACHE.get(key)
+    if _ORDER_BUSY.is_set():
+        return cached[1] if cached else []
     if cached and monotonic() - cached[0] < max_age:
         return cached[1]
     rows = host.runtime.projection.market_data.bars(symbol, Timeframe(chart), count=400)
@@ -571,13 +595,17 @@ async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
     chart = str(request.query.get("chart") or "M5").upper()
     if symbol not in PAIRS or chart not in CHARTS:
         return web.json_response({"ok": False, "message": "unknown pair or chart"}, status=400)
+    if _ORDER_BUSY.is_set():
+        cached = _LAST.get(symbol)
+        if cached:
+            return web.json_response(cached)
     if not _LOCK.acquire(blocking=False):
         cached = _LAST.get(symbol)
         if cached:
             return web.json_response(cached)
         return web.json_response({"ok": False, "message": "Still reading MetaTrader."}, status=503)
     try:
-        payload = _payload(symbol, chart, host)
+        payload = await asyncio.to_thread(_payload, symbol, chart, host)
     except Exception as exc:
         return web.json_response(
             {"ok": False, "message": f"{symbol} is not on this MetaTrader feed. {exc}"},
@@ -587,6 +615,19 @@ async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
         _LOCK.release()
     _LAST[symbol] = payload
     return web.json_response(payload)
+
+
+async def signals_priority(host: Any, request: web.Request) -> web.Response:
+    """Hold chart reads while an order is on its way to the broker."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if bool((body or {}).get("active")):
+        _ORDER_BUSY.set()
+    else:
+        _ORDER_BUSY.clear()
+    return web.json_response({"ok": True})
 
 
 async def signals_taken(host: Any, request: web.Request) -> web.Response:
