@@ -47,7 +47,7 @@ echo Checking the loader.
 if errorlevel 1 goto fail
 echo Starting one dashboard loader.
 if exist "%CD%\ZEUS_SERVER.log" del "%CD%\ZEUS_SERVER.log"
-start "ZEUS Server" /D "%CD%" cmd /c ""%PY%" -u "%CD%\zeus_open.py""
+start "ZEUS Server" /D "%CD%" cmd /c ""%PY%" -u -m zeus3.v19.web > "%CD%\ZEUS_SERVER.log" 2>&1"
 "%PY%" "%CD%\zeus_wait.py"
 if errorlevel 1 goto fail
 echo Opening the ZEUS window.
