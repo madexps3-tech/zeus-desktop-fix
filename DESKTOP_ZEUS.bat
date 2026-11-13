@@ -42,6 +42,10 @@ if errorlevel 1 goto fail
 set /p ZEUS3_MT5_TERMINAL_PATH=<"%CD%\ZEUS_TERMINAL_PATH.txt"
 "%PY%" "%CD%\zeus_patch.py"
 if errorlevel 1 goto fail
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/1282d8b1a1f2f1a1f12ff3ef900c96a0b7d25f87/zeus_mt5_check.py' -OutFile '%CD%\zeus_mt5_check.py'"
+echo Testing the MetaTrader connection.
+"%PY%" "%CD%\zeus_mt5_check.py"
+if errorlevel 1 goto fail
 echo Checking the loader.
 "%PY%" -c "import zeus3.v19.web; print('Loader import ok')"
 if errorlevel 1 goto fail
