@@ -1,4 +1,4 @@
-"""One signal per chart. A close beyond a swing is a break. A wick is a sweep."""
+"""Manual signals. 15-minute place, 1-minute fill. TRADE only at 1.5R or more."""
 
 from __future__ import annotations
 
@@ -10,6 +10,28 @@ from typing import Any
 PAIRS = ("XAUUSD", "XAGUSD", "NAS100", "BTCUSD", "EURUSD", "USDJPY", "WTI")
 CHARTS = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 MIN_R = 0.5
+TRADE_R = 0.5
+MANUAL = {"PULLBACK", "BREAK", "RANGE", "SWING", "ICEBERG", "CHOCH"}
+# A 1-minute wick wider than this is not a scalp. Price units, not pips.
+MAX_WICK = {
+    "XAUUSD": 8.0,
+    "XAGUSD": 0.20,
+    "NAS100": 80.0,
+    "WTI": 0.40,
+    "EURUSD": 0.0012,
+    "USDJPY": 0.20,
+    "BTCUSD": 200.0,
+}
+# One price step past an iceberg. The spread rule can still block it.
+ICE_TICK = {
+    "XAUUSD": 0.1,
+    "XAGUSD": 0.005,
+    "NAS100": 1.0,
+    "WTI": 0.01,
+    "EURUSD": 0.0001,
+    "USDJPY": 0.01,
+    "BTCUSD": 1.0,
+}
 WING = 2
 LOG = Path("signal_research_v2.jsonl")
 STATE = Path("signal_research_state_v2.json")
@@ -371,9 +393,10 @@ def pair_flow(symbol: str, book: dict[str, Any] | None, ready: bool) -> tuple[st
     """The pair state. No price in the file, so this never says the book is at the entry."""
     book = book or {}
     if not ready:
-        return "WAIT", "The pullback has not held yet."
+        return "WAIT", "The candle has not closed back yet."
     delta = book.get("delta_5s")
-    if book.get("iceberg_refresh"):
+    ice = book.get("iceberg")
+    if not (isinstance(ice, dict) and ice.get("price") is not None) and book.get("iceberg_refresh"):
         return "ICEBERG SOMEWHERE", "An iceberg flag is on for this pair. The file has no price, so this is not an entry."
     if book.get("size_pulled"):
         return "PULLED", "Orders were pulled on this pair. The file does not say at which price."
@@ -436,46 +459,388 @@ def align_ladder(symbol: str, book: dict[str, Any] | None, bid: float, ask: floa
     }
 
 
+def _closed(bars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return bars[:-1] if len(bars) > 1 else []
+
+
+def _ends(bars: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    closed = _closed(bars)
+    if len(closed) < 20:
+        return [], [], []
+    points = swings(closed)
+    highs = [point for point in points if point["kind"] == "HIGH"]
+    lows = [point for point in points if point["kind"] == "LOW"]
+    return points, highs, lows
+
+
+def _nearest(side: str, entry: float, prices: list[float]) -> float | None:
+    if side == "BUY":
+        above = [price for price in prices if price > entry]
+        return min(above) if above else None
+    below = [price for price in prices if price < entry]
+    return max(below) if below else None
+
+
+def _offer(
+    chart: str,
+    side: str,
+    reason: str,
+    entry: float,
+    stop: float,
+    target: float | None,
+    when: str,
+    spread: float,
+    symbol: str,
+    *,
+    wick_limit: bool,
+) -> dict[str, Any]:
+    """Show the R that is on offer. The button exists only at 1.5R with a stop the spread can live behind."""
+    risk = abs(entry - stop)
+    reward = None if target is None else ((target - entry) if side == "BUY" else (entry - target))
+    notes: list[str] = []
+    tradeable = True
+    ratio = None
+    if risk <= 0 or reward is None or reward <= 0:
+        tradeable = False
+        notes.append("No next level in the trade direction, so this is not an order.")
+    else:
+        ratio = reward / risk
+        if ratio < TRADE_R:
+            tradeable = False
+            notes.append(f"On offer {ratio:.2f}R. Below {TRADE_R:.1f}R is shown, not sent.")
+    if wick_limit and risk > float(MAX_WICK.get(symbol, risk or 0.0)):
+        tradeable = False
+        notes.append("The 1-minute wick is wider than this pair allows.")
+    if spread > 0 and risk > 0 and spread > risk * 0.1 + 1e-9:
+        tradeable = False
+        notes.append("The spread is more than a tenth of the stop.")
+    if tradeable:
+        notes.append("Manual entry. Nothing is sent until TRADE is pressed.")
+    return {
+        "chart": chart,
+        "side": side,
+        "reason": reason,
+        "entry": round(entry, 5),
+        "stop": round(stop, 5),
+        "target": None if target is None or reward is None or reward <= 0 else round(target, 5),
+        "r": None if ratio is None else round(ratio, 2),
+        "time": when,
+        "ready": True,
+        "tradeable": tradeable,
+        "state": "READY" if tradeable else "SHOWN",
+        "session": _session(when),
+        "note": " ".join(notes),
+        "spread_eats_target": bool(spread > 0 and risk > 0 and spread > risk * 0.1 + 1e-9),
+    }
+
+
+def _pullback(symbol: str, m15: list[dict[str, Any]], m5: list[dict[str, Any]], m1: list[dict[str, Any]], spread: float) -> dict[str, Any] | None:
+    points, highs, lows = _ends(m15)
+    if len(highs) < 2 or len(lows) < 2:
+        return None
+    trend = _trend(points)
+    if trend not in ("UP", "DOWN"):
+        return None
+    _, highs5, lows5 = _ends(m5)
+    closed = _closed(m1)
+    if not highs5 or not lows5 or not closed:
+        return None
+    last = closed[-1]
+    if trend == "UP":
+        dip = lows5[-1]
+        if highs5[-1]["index"] > dip["index"]:
+            return None
+        if not (_num(last, "low") <= dip["price"] and _num(last, "close") > dip["price"] and _num(last, "close") > _num(last, "open")):
+            return None
+        target = _nearest("BUY", _num(last, "close"), [point["price"] for point in highs5 + highs])
+        return _offer("M15", "BUY", "PULLBACK", _num(last, "close"), _num(last, "low"), target, _time(last), spread, symbol, wick_limit=True)
+    peak = highs5[-1]
+    if lows5[-1]["index"] > peak["index"]:
+        return None
+    if not (_num(last, "high") >= peak["price"] and _num(last, "close") < peak["price"] and _num(last, "close") < _num(last, "open")):
+        return None
+    target = _nearest("SELL", _num(last, "close"), [point["price"] for point in lows5 + lows])
+    return _offer("M15", "SELL", "PULLBACK", _num(last, "close"), _num(last, "high"), target, _time(last), spread, symbol, wick_limit=True)
+
+
+def _break_side(closed: list[dict[str, Any]], level: float, side: str) -> bool:
+    """A close through the level, then the next close still outside. A wick back inside is not this."""
+    for index in range(len(closed) - 2, max(len(closed) - 6, 1), -1):
+        previous = closed[index - 1]
+        broke = closed[index]
+        held = closed[index + 1]
+        if side == "BUY":
+            through = _num(previous, "close") <= level and _num(broke, "close") > level and _num(held, "close") > level
+        else:
+            through = _num(previous, "close") >= level and _num(broke, "close") < level and _num(held, "close") < level
+        if through and index >= len(closed) - 4:
+            return True
+    return False
+
+
+def _break(symbol: str, m15: list[dict[str, Any]], m1: list[dict[str, Any]], spread: float) -> dict[str, Any] | None:
+    closed15 = _closed(m15)
+    _, highs, lows = _ends(m15)
+    closed1 = _closed(m1)
+    if len(closed15) < 6 or not closed1 or not (highs or lows):
+        return None
+    last = closed1[-1]
+    if highs and _break_side(closed15, highs[-1]["price"], "BUY") and _num(last, "low") <= highs[-1]["price"] and _num(last, "close") > highs[-1]["price"]:
+        level = highs[-1]["price"]
+        target = _nearest("BUY", _num(last, "close"), [point["price"] for point in highs if point["price"] > level])
+        return _offer("M15", "BUY", "BREAK", _num(last, "close"), _num(last, "low"), target, _time(last), spread, symbol, wick_limit=True)
+    if lows and _break_side(closed15, lows[-1]["price"], "SELL") and _num(last, "high") >= lows[-1]["price"] and _num(last, "close") < lows[-1]["price"]:
+        level = lows[-1]["price"]
+        target = _nearest("SELL", _num(last, "close"), [point["price"] for point in lows if point["price"] < level])
+        return _offer("M15", "SELL", "BREAK", _num(last, "close"), _num(last, "high"), target, _time(last), spread, symbol, wick_limit=True)
+    return None
+
+
+def _range(symbol: str, m15: list[dict[str, Any]], m1: list[dict[str, Any]], spread: float) -> dict[str, Any] | None:
+    points, highs, lows = _ends(m15)
+    if not points or _trend(points) != "RANGE" or not highs or not lows:
+        return None
+    high = highs[-1]["price"]
+    low = lows[-1]["price"]
+    span = high - low
+    closed = _closed(m1)
+    if span <= 0 or not closed:
+        return None
+    last = closed[-1]
+    if _num(last, "low") <= low + span * 0.1 and _num(last, "close") > low and _num(last, "close") >= _num(last, "open"):
+        return _offer("M15", "BUY", "RANGE", _num(last, "close"), _num(last, "low"), high, _time(last), spread, symbol, wick_limit=True)
+    if _num(last, "high") >= high - span * 0.1 and _num(last, "close") < high and _num(last, "close") <= _num(last, "open"):
+        return _offer("M15", "SELL", "RANGE", _num(last, "close"), _num(last, "high"), low, _time(last), spread, symbol, wick_limit=True)
+    return None
+
+
+def _m3(bars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Three-minute candles built from the one-minute feed. The broker has no 3-minute chart."""
+    groups: list[dict[str, Any]] = []
+    bucket: dict[str, Any] | None = None
+    key = ""
+    for bar in _closed(bars):
+        moment = _when(_time(bar))
+        if moment is None:
+            continue
+        stamp = moment.replace(minute=(moment.minute // 3) * 3, second=0, microsecond=0)
+        stamp_key = stamp.isoformat()
+        if bucket is None or stamp_key != key:
+            if bucket is not None:
+                groups.append(bucket)
+            key = stamp_key
+            bucket = {
+                "time": stamp_key,
+                "open": _num(bar, "open"),
+                "high": _num(bar, "high"),
+                "low": _num(bar, "low"),
+                "close": _num(bar, "close"),
+            }
+        else:
+            bucket["high"] = max(float(bucket["high"]), _num(bar, "high"))
+            bucket["low"] = min(float(bucket["low"]), _num(bar, "low"))
+            bucket["close"] = _num(bar, "close")
+    if bucket is not None:
+        groups.append(bucket)
+    return groups
+
+
+def _choch(symbol: str, m15: list[dict[str, Any]], m1: list[dict[str, Any]], spread: float) -> dict[str, Any] | None:
+    """15-minute body close through a swing, then a 3-minute order block retest and a 3-minute sweep."""
+    closed15 = _closed(m15)
+    _, highs, lows = _ends(m15)
+    three = _m3(m1)
+    if len(closed15) < 6 or len(three) < 8 or not highs or not lows:
+        return None
+    last15 = closed15[-1]
+    body_down = _num(last15, "close") < _num(last15, "open") and _num(last15, "close") < lows[-1]["price"]
+    body_up = _num(last15, "close") > _num(last15, "open") and _num(last15, "close") > highs[-1]["price"]
+    if not body_down and not body_up:
+        return None
+    side = "SELL" if body_down else "BUY"
+    level = lows[-1]["price"] if side == "SELL" else highs[-1]["price"]
+    # The order block is the last 3-minute candle in the old direction, before the close through.
+    opposite = [bar for bar in three if (_num(bar, "close") > _num(bar, "open") if side == "SELL" else _num(bar, "close") < _num(bar, "open"))]
+    if not opposite:
+        return None
+    block = opposite[-1]
+    block_high = _num(block, "high")
+    block_low = _num(block, "low")
+    later = [bar for bar in three if _time(bar) > _time(block)]
+    if len(later) < 2:
+        return None
+    retested = False
+    for bar in later[:-1]:
+        touched = _num(bar, "high") >= block_low and _num(bar, "low") <= block_high
+        rejected = _num(bar, "close") < block_low if side == "SELL" else _num(bar, "close") > block_high
+        if touched and rejected:
+            retested = True
+            break
+    if not retested:
+        return None
+    sweep = later[-1]
+    if side == "SELL":
+        swept = _num(sweep, "high") > block_high and _num(sweep, "close") < block_high and _num(sweep, "close") < _num(sweep, "open")
+        if not swept:
+            return None
+        target = _nearest("SELL", _num(sweep, "close"), [point["price"] for point in lows if point["price"] < level])
+        return _offer("M15", "SELL", "CHOCH", _num(sweep, "close"), _num(sweep, "high"), target, _time(sweep), spread, symbol, wick_limit=True)
+    swept = _num(sweep, "low") < block_low and _num(sweep, "close") > block_low and _num(sweep, "close") > _num(sweep, "open")
+    if not swept:
+        return None
+    target = _nearest("BUY", _num(sweep, "close"), [point["price"] for point in highs if point["price"] > level])
+    return _offer("M15", "BUY", "CHOCH", _num(sweep, "close"), _num(sweep, "low"), target, _time(sweep), spread, symbol, wick_limit=True)
+
+
+def _intraday(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], spread: float) -> dict[str, Any] | None:
+    m15 = bars_by_chart.get("M15") or []
+    m5 = bars_by_chart.get("M5") or []
+    m1 = bars_by_chart.get("M1") or []
+    return _choch(symbol, m15, m1, spread) or _break(symbol, m15, m1, spread) or _pullback(symbol, m15, m5, m1, spread) or _range(symbol, m15, m1, spread)
+
+
+def _swing(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], spread: float) -> dict[str, Any] | None:
+    """The same pullback or break, read on the 4-hour chart. The stop is the 4-hour swing."""
+    h4 = bars_by_chart.get("H4") or []
+    h1 = bars_by_chart.get("H1") or []
+    points, highs, lows = _ends(h4)
+    closed_h4 = _closed(h4)
+    closed_h1 = _closed(h1)
+    if len(highs) < 2 or len(lows) < 2 or len(closed_h4) < 6 or not closed_h1:
+        return None
+    last = closed_h1[-1]
+    trend = _trend(points)
+    if _break_side(closed_h4, highs[-1]["price"], "BUY"):
+        entry = _num(closed_h4[-1], "close")
+        stop = min(_num(bar, "low") for bar in closed_h4[-2:])
+        target = _nearest("BUY", entry, [point["price"] for point in highs if point["price"] > highs[-1]["price"]])
+        row = _offer("H4", "BUY", "SWING", entry, stop, target, _time(closed_h4[-1]), spread, symbol, wick_limit=False)
+        if row["target"] is not None:
+            return row
+    if _break_side(closed_h4, lows[-1]["price"], "SELL"):
+        entry = _num(closed_h4[-1], "close")
+        stop = max(_num(bar, "high") for bar in closed_h4[-2:])
+        target = _nearest("SELL", entry, [point["price"] for point in lows if point["price"] < lows[-1]["price"]])
+        row = _offer("H4", "SELL", "SWING", entry, stop, target, _time(closed_h4[-1]), spread, symbol, wick_limit=False)
+        if row["target"] is not None:
+            return row
+    if trend == "UP" and lows[-1]["index"] > highs[-1]["index"]:
+        dip = lows[-1]["price"]
+        if _num(last, "low") <= dip and _num(last, "close") > dip and _num(last, "close") > _num(last, "open"):
+            target = _nearest("BUY", _num(last, "close"), [point["price"] for point in highs])
+            return _offer("H4", "BUY", "SWING", _num(last, "close"), dip, target, _time(last), spread, symbol, wick_limit=False)
+    if trend == "DOWN" and highs[-1]["index"] > lows[-1]["index"]:
+        peak = highs[-1]["price"]
+        if _num(last, "high") >= peak and _num(last, "close") < peak and _num(last, "close") < _num(last, "open"):
+            target = _nearest("SELL", _num(last, "close"), [point["price"] for point in lows])
+            return _offer("H4", "SELL", "SWING", _num(last, "close"), peak, target, _time(last), spread, symbol, wick_limit=False)
+    return None
+
+
+def _iceberg(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], book: dict[str, Any] | None, spread: float) -> dict[str, Any] | None:
+    ice = (book or {}).get("iceberg")
+    if not isinstance(ice, dict) or ice.get("price") is None:
+        return None
+    side_name = str(ice.get("side") or "").lower()
+    if side_name not in ("bid", "ask"):
+        return None
+    side = "BUY" if side_name == "bid" else "SELL"
+    price = float(ice["price"])
+    tick = float(ICE_TICK.get(symbol, 0.0))
+    if tick <= 0:
+        return None
+    stop = price - tick if side == "BUY" else price + tick
+    _, highs, lows = _ends(bars_by_chart.get("M15") or [])
+    _, highs5, lows5 = _ends(bars_by_chart.get("M5") or [])
+    pool = [point["price"] for point in (highs + highs5 if side == "BUY" else lows + lows5)]
+    target = _nearest(side, price, pool)
+    stamp = ice.get("time")
+    when = ""
+    try:
+        when = datetime.fromtimestamp(float(stamp), timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        when = datetime.now(timezone.utc).isoformat()
+    row = _offer("M1", side, "ICEBERG", price, stop, target, when, spread, symbol, wick_limit=False)
+    if not (book or {}).get("fresh"):
+        row["tradeable"] = False
+        row["state"] = "SHOWN"
+        row["note"] = "The iceberg file is stale. " + str(row.get("note") or "")
+    if int(ice.get("refills") or 0) < 1:
+        row["tradeable"] = False
+        row["state"] = "SHOWN"
+        row["note"] = "The size has not refilled, so this is not an iceberg yet. " + str(row.get("note") or "")
+    return row
+
+
+def _wait(chart: str, note: str, trend: str) -> dict[str, Any]:
+    return {
+        "chart": chart, "side": "", "reason": "NO_SIGNAL", "r": None,
+        "decision": "—", "note": note, "state": "WAIT", "trend": trend, "tradeable": False,
+    }
+
+
+def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None) -> None:
+    """A market order uses the live price. A stop already through that price cannot be sent."""
+    if not row.get("side") or row.get("stop") is None:
+        return
+    stop = float(row["stop"])
+    target = row.get("target")
+    if row["side"] == "SELL":
+        dead = ask is not None and stop <= float(ask)
+        passed = bid is not None and target is not None and float(target) >= float(bid)
+    else:
+        dead = bid is not None and stop >= float(bid)
+        passed = ask is not None and target is not None and float(target) <= float(ask)
+    if dead or passed:
+        row["tradeable"] = False
+        row["state"] = "SHOWN"
+        reason = "Price is already through this stop, so the broker will not take it." if dead else "Price is already through this target."
+        row["note"] = reason + " " + str(row.get("note") or "")
+
+
 def build_rows(
     symbol: str,
     bars_by_chart: dict[str, list[dict[str, Any]]],
     book: dict[str, Any] | None,
     spread: float,
     levels: dict[str, Any],
+    bid: float | None = None,
+    ask: float | None = None,
 ) -> list[dict[str, Any]]:
+    """One manual row on M15, one swing on H4, and the iceberg on M1 when the file has a price."""
+    del levels
+    intraday = _intraday(symbol, bars_by_chart, spread)
+    swing = _swing(symbol, bars_by_chart, spread)
+    iceberg = _iceberg(symbol, bars_by_chart, book, spread)
+    notes = {
+        "M1": "The 1-minute chart is the fill. No iceberg price in the file.",
+        "M5": "No separate signal. The 5-minute chart is only the dip.",
+        "M15": "No pullback, break, or range on the 15-minute chart.",
+        "M30": "No separate signal.",
+        "H1": "No separate signal. The 1-hour chart is not an entry.",
+        "H4": "No 4-hour swing.",
+        "D1": "No separate signal.",
+    }
     rows: list[dict[str, Any]] = []
     for chart in CHARTS:
         bars = bars_by_chart.get(chart) or []
         closed = bars[:-1]
         points = swings(closed) if len(closed) >= 20 else []
-        state = market_state(points) if points else "RANGE"
-        row = signal_for_chart(chart, bars)
-        if row is None:
-            row = breakout_watch(chart, bars, levels)
-        if row is None:
-            rows.append({
-                "chart": chart, "side": "", "reason": "NO_SIGNAL", "r": None,
-                "decision": "—", "note": "No 0.5R structure on this chart.",
-                "state": state, "tradeable": False,
-            })
-            continue
-        row["state"] = state
-        if row.get("reason") == "POTENTIAL":
-            row["decision"] = "POTENTIAL"
-            if book and book.get("size_pulled"):
-                row["note"] = str(row.get("note") or "") + " Orders were pulled on this pair. The file does not say at which price."
-            rows.append(row)
-            continue
-        decision, note = pair_flow(symbol, book, bool(row.get("ready")))
-        reward = abs(float(row["target"]) - float(row["entry"]))
-        if spread > 0 and reward > 0 and spread >= reward * 0.5:
-            note = "The spread is at least half of this target. " + note
-            row["spread_eats_target"] = True
+        trend = market_state(points) if points else "RANGE"
+        chosen = {"M15": intraday, "H4": swing, "M1": iceberg}.get(chart)
+        if chosen is None:
+            row = _wait(chart, notes[chart], trend)
         else:
-            row["spread_eats_target"] = False
-        row["decision"] = decision
-        row["note"] = note
-        row["spread"] = spread
+            row = dict(chosen)
+            row["trend"] = trend
+            decision, flow_note = pair_flow(symbol, book, True)
+            if row["reason"] == "ICEBERG":
+                decision = "ICEBERG"
+            row["decision"] = decision
+            if flow_note and row["reason"] != "ICEBERG":
+                row["note"] = (str(row.get("note") or "") + " " + flow_note).strip()
+            row["spread"] = spread
+            _live_stop(row, bid, ask)
         rows.append(row)
     _retain(symbol, rows, bars_by_chart)
     by_chart = {row["chart"]: row for row in rows}
@@ -488,7 +853,7 @@ def build_rows(
         vote = "NONE"
         first = True
         for chart in ABOVE.get(str(row.get("chart")), ()):
-            state_word = str((by_chart.get(chart) or {}).get("state") or "")
+            state_word = str((by_chart.get(chart) or {}).get("trend") or (by_chart.get(chart) or {}).get("state") or "")
             if state_word == "TREND UP":
                 word = "WITH" if row["side"] == "BUY" else "AGAINST"
             elif state_word == "TREND DOWN":
@@ -501,6 +866,7 @@ def build_rows(
                 first = False
         row["higher"] = ", ".join(labels) or "—"
         row["next_vote"] = vote
+        _live_stop(row, bid, ask)
     return rows
 
 
@@ -512,12 +878,18 @@ def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, li
     for row in rows:
         chart = str(row.get("chart"))
         key = symbol + "|" + chart
-        if row.get("tradeable") and row.get("entry") is not None:
-            active[key] = {**row, "symbol": symbol}
+        if row.get("reason") in MANUAL and row.get("entry") is not None:
+            if row.get("tradeable"):
+                active[key] = {**row, "symbol": symbol}
+            else:
+                active.pop(key, None)
             changed = True
             continue
         held = active.get(key)
-        if not held:
+        if not held or held.get("reason") not in MANUAL:
+            if held:
+                active.pop(key, None)
+                changed = True
             continue
         result, _be, mfe = _score_path(held, bars_by_chart.get(chart) or [], float(BE_MOVE.get(symbol, 0.0)))
         if result in ("WIN", "LOSS"):
@@ -528,7 +900,8 @@ def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, li
         row.clear()
         row.update(held)
         row["mfe"] = mfe
-        row["tradeable"] = True
+        row["tradeable"] = bool(held.get("tradeable")) and float(held.get("r") or 0) >= TRADE_R
+        row["state"] = "READY" if row["tradeable"] else "SHOWN"
         row["note"] = note
         row["decision"] = held.get("decision") or "HELD"
     if changed:

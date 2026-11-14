@@ -83,7 +83,7 @@ tr.pick{outline:1px solid var(--warn)}
   <button onclick="zoom(20)">ZOOM OUT</button>
   <button onclick="fit()">FIT</button>
   <label>RISK % <input id="risk" value="2" style="width:52px"></label>
-  <span class="muted">One chart. POTENTIAL is not a trade. The book has no iceberg price yet.</span>
+  <span class="muted">TRADE from 0.5R sends a market order to the MT5 account that is logged in. A stop that price has already passed is not sent.</span>
 </div>
 <main>
   <section class="card">
@@ -113,8 +113,9 @@ const LEVEL_COLOR={ASIA:"#7aa2d6",LONDON:"#e9c66b",NEW_YORK:"#67d6a3",YESTERDAY:
 let symbol=localStorage.getItem("sig_symbol")||"XAUUSD";
 let chart=localStorage.getItem("sig_chart")||"M5";
 let data=null, visible=80, pan=0, drag=null, selected=chart;
-let busy=false, timer=null, control=null;
+let busy=false, timer=null, control=null, holdStatusUntil=0;
 function $(id){return document.getElementById(id)}
+function setStatus(text, holdMs){$("status").textContent=text; holdStatusUntil=Date.now()+(holdMs||0)}
 function buttons(){
   $("pairs").innerHTML=PAIRS.map(p=>`<button class="${p[0]===symbol?"on":""}" onclick="setPair('${p[0]}')">${p[1]}</button>`).join("");
   $("charts").innerHTML=CHARTS.map(c=>`<button class="${c===chart?"on":""}" onclick="setChart('${c}')">${c}</button>`).join("");
@@ -275,7 +276,7 @@ function paint(){
     <div>DELTA 60s</div><b>${f.delta_60s??"not in this book"}</b>
     <div>WHO IS HITTING</div><b class="${f.stepping==="BUYERS"?"good":(f.stepping==="SELLERS"?"bad":"")}">${f.stepping||"—"}</b>
     <div>ABSORPTION</div><b>${f.absorption?"YES":"no"}</b>
-    <div>ICEBERG</div><b>${f.iceberg?"YES · no price":"no"}</b>
+    <div>ICEBERG</div><b>${f.iceberg_price!=null?("YES · "+f.iceberg_side+" "+f.iceberg_price):(f.iceberg?"YES · no price":"no")}</b>
     <div>PULLED</div><b>${f.pulled?"YES · no price":"no"}</b>
     <div>SWEEP</div><b>${f.sweep_consumed?"YES · no price":"no"}</b>
     <div class="muted">${ladder.shown?"Ladder shifted by "+ladder.shift+". Not an entry.":(ladder.reason==="NO_LADDER"?"Ladder is not in the file yet.":"Ladder not drawn. "+(ladder.reason||""))}</div>
@@ -297,18 +298,22 @@ function paint(){
   const news=data.news||{};
   const feed=data.feed||{};
   const newsLine=news.line||"NO CALENDAR";
-  $("status").textContent=(feed.line?feed.line+"\n":"")+(row&&row.note?row.chart+" · "+row.note:"")+"\n"+newsLine;
+  if(Date.now()>=holdStatusUntil) $("status").textContent=(feed.line?feed.line+"\n":"")+(row&&row.note?row.chart+" · "+row.note:"")+"\n"+newsLine;
 }
 async function trade(chartName){
   const row=(data.rows||[]).find(r=>r.chart===chartName&&r.tradeable);
-  if(!row)return;
+  if(!row){setStatus("NOT SENT · this row has no order. A stop that price has already passed stays on the row with no button.", 8000);return}
   const open=(data.positions||[]).find(p=>p.side&&p.side!==row.side);
-  if(open){$("status").textContent="NOT SENT · this pair already has a "+open.side+". Close it first.";return}
-  const msg="Send a MARKET "+row.side+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThe book says "+row.decision+".\nThis goes to the connected MT5 account.";
+  if(open){setStatus("NOT SENT · this pair already has a "+open.side+". Close it first.", 8000);return}
+  const quote=(data&&data.quote)||{};
+  const bid=Number(quote.bid), ask=Number(quote.ask);
+  if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){setStatus("NOT SENT · a sell stop must be above the live ask, and the target below the bid. Price has already gone through this one.", 12000);return}
+  if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){setStatus("NOT SENT · a buy stop must be below the live bid, and the target above the ask. Price has already gone through this one.", 12000);return}
+  const msg="Send a MARKET "+row.side+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThe book says "+row.decision+".\nThis goes to the MT5 account that is logged in.";
   if(!confirm(msg))return;
   const risk=Number($("risk").value);
-  if(!isFinite(risk)||risk<=0){$("status").textContent="NOT SENT · set the risk percent";return}
-  $("status").textContent="SENDING...";
+  if(!isFinite(risk)||risk<=0){setStatus("NOT SENT · set the risk percent", 8000);return}
+  setStatus("SENDING...", 20000);
   const started=performance.now();
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
@@ -321,11 +326,11 @@ async function trade(chartName){
     const ms=Math.round((j.timings_ms&&j.timings_ms.total)||(performance.now()-started));
     if(!r.ok||j.ok===false)throw Error((j.message||"rejected")+" · "+ms+" ms");
     const ex=j.execution||j;
-    if(ex.submitted===false){$("status").textContent="NOT SENT · "+((ex.blockers||[]).join(" · ")||"the broker did not accept")+" · "+ms+" ms";return}
+    if(ex.submitted===false){setStatus("NOT SENT · "+((ex.blockers||[]).join(" · ")||ex.message||"the broker did not accept")+" · "+ms+" ms", 15000);return}
     fetch("/api/v19/signals/taken",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({symbol:symbol,chart:chartName,side:row.side,reason:row.reason,entry:row.entry,stop:row.stop,target:row.target,r:row.r,time:row.time})}).catch(()=>{});
-    $("status").textContent="SENT · "+ms+" ms · check the position below";
+    setStatus("SENT · "+ms+" ms · the position is on the logged-in MT5 account", 15000);
     load();
-  }catch(e){$("status").textContent="NOT SENT · "+e.message}
+  }catch(e){setStatus("NOT SENT · "+e.message, 15000)}
   finally{
     fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{});
   }
@@ -507,6 +512,18 @@ def _book(symbol: str) -> dict[str, Any]:
             "futures_bid": raw.get("bid"),
             "futures_ask": raw.get("ask"),
         })
+        ice = raw.get("iceberg")
+        if isinstance(ice, dict) and ice.get("price") is not None:
+            book["iceberg"] = {
+                "price": float(ice["price"]),
+                "side": str(ice.get("side") or ""),
+                "bid_size": float(ice.get("bid_size") or 0),
+                "ask_size": float(ice.get("ask_size") or 0),
+                "refills": int(ice.get("refills") or 0),
+                "time": ice.get("time"),
+            }
+        else:
+            book["iceberg"] = None
     try:
         from zeus3.v19.shadow_book_page import _sierra_flow
 
@@ -664,7 +681,7 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
     book = _book(symbol)
     levels = session_levels(bars_by_chart.get("M15") or bars_by_chart.get("M5") or [])
     pools = liquidity(levels, bars_by_chart)
-    rows = build_rows(symbol, bars_by_chart, book, spread, levels)
+    rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)
     try:
         research = record(symbol, rows, bars_by_chart)
     except Exception:
@@ -690,6 +707,8 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
             "fresh": bool(book.get("fresh")),
             "absorption": bool(book.get("absorption")),
             "iceberg": bool(book.get("iceberg_refresh")),
+            "iceberg_price": (book.get("iceberg") or {}).get("price") if isinstance(book.get("iceberg"), dict) else None,
+            "iceberg_side": (book.get("iceberg") or {}).get("side") if isinstance(book.get("iceberg"), dict) else None,
             "pulled": bool(book.get("size_pulled")),
             "sweep_consumed": bool(book.get("sweep_consumed")),
             "delta_5s": book.get("delta_5s"),
