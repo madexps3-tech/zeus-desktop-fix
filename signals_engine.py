@@ -1,4 +1,4 @@
-"""Manual signals. 15-minute place, 1-minute fill. TRADE only at 1.5R or more."""
+"""Confirmed signals. A zone is touched only after a 1-minute close. The stop has to clear the spread."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 
 PAIRS = ("XAUUSD", "XAGUSD", "NAS100", "BTCUSD", "EURUSD", "USDJPY", "WTI")
 CHARTS = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
+ROWS = ("ICEBERG", "INTRADAY", "INTERDAY", "SWING")
 MIN_R = 0.5
 TRADE_R = 0.5
 MANUAL = {"PULLBACK", "BREAK", "RANGE", "SWING", "ICEBERG", "CHOCH"}
@@ -798,6 +799,258 @@ def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None) -> Non
         row["note"] = reason + " " + str(row.get("note") or "")
 
 
+def _headline(points: list[dict[str, Any]]) -> str:
+    """The line on the chart. It does not open a trade."""
+    trend = _trend(points)
+    if trend == "UP":
+        return "BULLISH"
+    if trend == "DOWN":
+        return "BEARISH"
+    return "RANGE"
+
+
+def _dedupe(zones: list[dict[str, Any]], spread: float) -> list[dict[str, Any]]:
+    gap = max(float(spread or 0.0), 0.0) * 2.0
+    kept: list[dict[str, Any]] = []
+    for zone in sorted(zones, key=lambda item: (item["kind"], float(item["price"]))):
+        if kept and kept[-1]["kind"] == zone["kind"] and abs(float(zone["price"]) - float(kept[-1]["price"])) <= gap:
+            continue
+        kept.append(zone)
+    return kept
+
+
+def _collect_zones(
+    levels: dict[str, Any],
+    highs: list[float],
+    lows: list[float],
+    spread: float,
+    *,
+    high_name: str,
+    low_name: str,
+) -> list[dict[str, Any]]:
+    zones: list[dict[str, Any]] = []
+    for level in levels.get("levels") or []:
+        name = str(level.get("name") or "LEVEL")
+        if level.get("high") is not None:
+            zones.append({"name": name + " HIGH", "price": float(level["high"]), "kind": "HIGH"})
+        if level.get("low") is not None:
+            zones.append({"name": name + " LOW", "price": float(level["low"]), "kind": "LOW"})
+    for price in highs:
+        zones.append({"name": high_name, "price": float(price), "kind": "HIGH"})
+    for price in lows:
+        zones.append({"name": low_name, "price": float(price), "kind": "LOW"})
+    return _dedupe(zones, spread)
+
+
+def _harvest(symbol: str, entry: float, target: float) -> str:
+    dist = abs(float(target) - float(entry))
+    if symbol == "XAUUSD":
+        return f"{round(dist / 0.1)} pips"
+    if symbol == "EURUSD":
+        return f"{round(dist / 0.0001)} pips"
+    if symbol == "USDJPY":
+        return f"{round(dist / 0.01)} pips"
+    if symbol == "NAS100":
+        return f"{round(dist)} points"
+    if symbol == "BTCUSD":
+        return f"${round(dist)}"
+    if symbol == "XAGUSD":
+        return f"{dist:.3f}"
+    if symbol == "WTI":
+        return f"{dist:.2f}"
+    return f"{dist:.5f}"
+
+
+def _nearest_zone(side: str, entry: float, zones: list[dict[str, Any]]) -> float | None:
+    prices = [float(zone["price"]) for zone in zones]
+    if side == "BUY":
+        above = [price for price in prices if price > entry]
+        return min(above) if above else None
+    below = [price for price in prices if price < entry]
+    return max(below) if below else None
+
+
+def _beyond(side: str, entry: float, prices: list[float], need: float) -> float | None:
+    if side == "BUY":
+        cands = [price for price in prices if price <= entry - need]
+        return max(cands) if cands else None
+    cands = [price for price in prices if price >= entry + need]
+    return min(cands) if cands else None
+
+
+def _stop_price(side: str, entry: float, wick: float, spread: float, beyond: list[float], *, wider: list[float] | None = None) -> float | None:
+    """The wick first. If it is inside 10 times the spread, the swing beyond the zone. A higher-timeframe swing is wider."""
+    need = float(spread) * 10.0 if spread and spread > 0 else 0.0
+    if side == "BUY" and wick >= entry:
+        wick = entry - need if need else entry - 1e-9
+    if side == "SELL" and wick <= entry:
+        wick = entry + need if need else entry + 1e-9
+    stop = wick
+    if wider:
+        further = _beyond(side, entry, wider, max(abs(entry - wick), need))
+        if further is not None:
+            stop = further
+    if need and abs(entry - stop) + 1e-9 < need:
+        stop = _beyond(side, entry, list(beyond) + list(wider or []), need)
+    if stop is None:
+        return None
+    if need and abs(entry - stop) + 1e-9 < need:
+        return None
+    if side == "BUY" and stop >= entry:
+        return None
+    if side == "SELL" and stop <= entry:
+        return None
+    return stop
+
+
+def _turn(last: dict[str, Any], zones: list[dict[str, Any]], side: str) -> dict[str, Any] | None:
+    kind = "LOW" if side == "BUY" else "HIGH"
+    close = _num(last, "close")
+    open_ = _num(last, "open")
+    hits = []
+    for zone in zones:
+        if zone["kind"] != kind:
+            continue
+        price = float(zone["price"])
+        if side == "BUY" and _num(last, "low") <= price and close > price and close >= open_:
+            hits.append(zone)
+        if side == "SELL" and _num(last, "high") >= price and close < price and close <= open_:
+            hits.append(zone)
+    if not hits:
+        return None
+    return min(hits, key=lambda zone: abs(float(zone["price"]) - close))
+
+
+def _break_confirm(closed: list[dict[str, Any]], zones: list[dict[str, Any]], side: str) -> dict[str, Any] | None:
+    if len(closed) < 3:
+        return None
+    older, broke, held = closed[-3], closed[-2], closed[-1]
+    kind = "HIGH" if side == "BUY" else "LOW"
+    hits = []
+    for zone in zones:
+        if zone["kind"] != kind:
+            continue
+        price = float(zone["price"])
+        if side == "BUY":
+            ok = _num(older, "close") <= price and _num(broke, "close") > price and _num(held, "close") > price
+        else:
+            ok = _num(older, "close") >= price and _num(broke, "close") < price and _num(held, "close") < price
+        if ok:
+            hits.append(zone)
+    if not hits:
+        return None
+    close = _num(held, "close")
+    return min(hits, key=lambda zone: abs(float(zone["price"]) - close))
+
+
+def _sentence(state: str, reason: str, side: str, zone: dict[str, Any], stop: float, target: float, harvest: str) -> str:
+    edge = "buy zone" if side == "BUY" else "sell zone"
+    price = round(float(zone["price"]), 5)
+    if reason == "RANGE":
+        what = f"The 1-minute candle closed back out of the {edge} at {price}."
+    elif reason == "PULLBACK":
+        way = "up" if side == "BUY" else "down"
+        what = f"The trend is {way}. The 1-minute candle closed back {way} from the {edge} at {price}."
+    else:
+        what = f"Two 1-minute candles closed through the {edge} at {price}."
+    side_word = "below" if side == "BUY" else "above"
+    return (
+        f"{reason} {side}. Price is {state.lower()}. {what} "
+        f"Stop {side_word} the wick at {round(stop, 5)}. Target {round(target, 5)}. {harvest}."
+    )
+
+
+def _pack(
+    symbol: str,
+    chart: str,
+    reason: str,
+    side: str,
+    state: str,
+    zone: dict[str, Any],
+    last: dict[str, Any],
+    stop: float,
+    target: float,
+    spread: float,
+) -> dict[str, Any] | None:
+    entry = _num(last, "close")
+    if side == "BUY" and not (target > entry > stop):
+        return None
+    if side == "SELL" and not (stop > entry > target):
+        return None
+    if abs(target - entry) <= abs(entry - stop):
+        return None
+    harvest = _harvest(symbol, entry, target)
+    row = _offer(chart, side, reason, entry, stop, target, _time(last), spread, symbol, wick_limit=False)
+    if not row.get("tradeable"):
+        return None
+    row["harvest"] = harvest
+    row["market"] = state
+    row["score_on"] = "M1"
+    row["zone"] = float(zone["price"])
+    row["note"] = _sentence(state, reason, side, zone, stop, target, harvest)
+    return row
+
+
+def _choose(
+    symbol: str,
+    chart: str,
+    state: str,
+    closed: list[dict[str, Any]],
+    zones: list[dict[str, Any]],
+    spread: float,
+    beyond: list[float],
+    *,
+    wider: list[float] | None = None,
+) -> dict[str, Any] | None:
+    if len(closed) < 3 or not zones:
+        return None
+    last = closed[-1]
+    found: list[tuple[str, str, dict[str, Any]]] = []
+    for side in ("BUY", "SELL"):
+        zone = _break_confirm(closed, zones, side)
+        if zone is not None:
+            found.append(("BREAK", side, zone))
+    if not found:
+        if state == "BULLISH":
+            zone = _turn(last, zones, "BUY")
+            if zone is not None:
+                found.append(("PULLBACK", "BUY", zone))
+        elif state == "BEARISH":
+            zone = _turn(last, zones, "SELL")
+            if zone is not None:
+                found.append(("PULLBACK", "SELL", zone))
+        else:
+            for side in ("BUY", "SELL"):
+                zone = _turn(last, zones, side)
+                if zone is not None:
+                    found.append(("RANGE", side, zone))
+    if not found:
+        return None
+    close = _num(last, "close")
+    reason, side, zone = min(found, key=lambda item: abs(float(item[2]["price"]) - close))
+    if reason == "BREAK":
+        earlier = closed[-2]
+        wick = min(_num(earlier, "low"), _num(last, "low")) if side == "BUY" else max(_num(earlier, "high"), _num(last, "high"))
+    else:
+        wick = _num(last, "low") if side == "BUY" else _num(last, "high")
+    stop = _stop_price(side, close, wick, spread, beyond, wider=wider)
+    if stop is None:
+        return None
+    target = _nearest_zone(side, close, zones)
+    if target is None:
+        return None
+    return _pack(symbol, chart, reason, side, state, zone, last, stop, target, spread)
+
+
+def _prices(points: list[dict[str, Any]], kind: str, count: int = 6) -> list[float]:
+    return [float(point["price"]) for point in points if point["kind"] == kind][-count:]
+
+
+def _bars_for(row: dict[str, Any], bars_by_chart: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    name = str(row.get("score_on") or "M1")
+    return bars_by_chart.get(name) or bars_by_chart.get(str(row.get("chart"))) or []
+
+
 def build_rows(
     symbol: str,
     bars_by_chart: dict[str, list[dict[str, Any]]],
@@ -807,103 +1060,156 @@ def build_rows(
     bid: float | None = None,
     ask: float | None = None,
 ) -> list[dict[str, Any]]:
-    """One manual row on M15, one swing on H4, and the iceberg on M1 when the file has a price."""
-    del levels
-    intraday = _intraday(symbol, bars_by_chart, spread)
-    swing = _swing(symbol, bars_by_chart, spread)
-    iceberg = _iceberg(symbol, bars_by_chart, book, spread)
-    notes = {
-        "M1": "The 1-minute chart is the fill. No iceberg price in the file.",
-        "M5": "No separate signal. The 5-minute chart is only the dip.",
-        "M15": "No pullback, break, or range on the 15-minute chart.",
-        "M30": "No separate signal.",
-        "H1": "No separate signal. The 1-hour chart is not an entry.",
-        "H4": "No 4-hour swing.",
-        "D1": "No separate signal.",
+    """Four rows. A touch is not a signal. A stop inside 10 times the spread is not shown."""
+    m1 = bars_by_chart.get("M1") or []
+    m15 = bars_by_chart.get("M15") or []
+    h4 = bars_by_chart.get("H4") or []
+    d1 = bars_by_chart.get("D1") or []
+    closed = _closed(m1)
+    points15, highs15, lows15 = _ends(m15)
+    points4, highs4, lows4 = _ends(h4)
+    _points_d, highs_d, lows_d = _ends(d1)
+    state = _headline(points15)
+    day_levels = levels or {"levels": []}
+    intraday_zones = _collect_zones(
+        day_levels,
+        _prices(highs15, "HIGH") + _prices(_ends(bars_by_chart.get("H1") or [])[1], "HIGH", 4),
+        _prices(lows15, "LOW") + _prices(_ends(bars_by_chart.get("H1") or [])[2], "LOW", 4),
+        spread,
+        high_name="SWING HIGH",
+        low_name="SWING LOW",
+    )
+    beyond = _prices(lows15, "LOW") + _prices(highs15, "HIGH")
+    intraday = _choose(symbol, "INTRADAY", state, closed, intraday_zones, spread, beyond)
+    swing_levels = {
+        "levels": [level for level in (day_levels.get("levels") or []) if str(level.get("name")) == "YESTERDAY"]
     }
+    swing_zones = _collect_zones(
+        swing_levels,
+        _prices(highs4, "HIGH", 4) + _prices(highs_d, "HIGH", 2),
+        _prices(lows4, "LOW", 4) + _prices(lows_d, "LOW", 2),
+        spread,
+        high_name="4H HIGH",
+        low_name="4H LOW",
+    )
+    wider = _prices(lows4, "LOW", 4) + _prices(highs4, "HIGH", 4)
+    swing_state = _headline(points4)
+    swing = _choose(
+        symbol, "SWING", swing_state, closed, swing_zones, spread, wider, wider=wider,
+    )
+    iceberg = _iceberg(symbol, bars_by_chart, book, spread)
+    if iceberg is not None:
+        risk = abs(float(iceberg.get("entry") or 0) - float(iceberg.get("stop") or 0))
+        if spread > 0 and risk + 1e-9 < spread * 10.0:
+            iceberg = None
+        elif iceberg.get("target") is None or not iceberg.get("tradeable"):
+            iceberg = None
+    notes = {
+        "ICEBERG": "No iceberg price in the file.",
+        "INTRADAY": "No 1-minute candle has closed back out of a zone.",
+        "INTERDAY": "No intraday trade is still open.",
+        "SWING": "No confirmed turn at yesterday or the 4-hour swing.",
+    }
+    chosen = {"ICEBERG": iceberg, "INTRADAY": intraday, "SWING": swing}
     rows: list[dict[str, Any]] = []
-    for chart in CHARTS:
-        bars = bars_by_chart.get(chart) or []
-        closed = bars[:-1]
-        points = swings(closed) if len(closed) >= 20 else []
-        trend = market_state(points) if points else "RANGE"
-        chosen = {"M15": intraday, "H4": swing, "M1": iceberg}.get(chart)
-        if chosen is None:
-            row = _wait(chart, notes[chart], trend)
+    for chart in ROWS:
+        row = dict(chosen[chart]) if chosen.get(chart) else _wait(chart, notes[chart], state)
+        row["chart"] = chart
+        row["market"] = state
+        row["score_on"] = "M1"
+        row.setdefault("harvest", "—")
+        if row.get("side"):
+            delta = (book or {}).get("delta_60s")
+            if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta > 0:
+                row["decision"] = "60s BUYERS"
+            elif isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta < 0:
+                row["decision"] = "60s SELLERS"
+            else:
+                row["decision"] = "—"
+            if chart == "ICEBERG":
+                row["decision"] = "ICEBERG"
         else:
-            row = dict(chosen)
-            row["trend"] = trend
-            decision, flow_note = pair_flow(symbol, book, True)
-            if row["reason"] == "ICEBERG":
-                decision = "ICEBERG"
-            row["decision"] = decision
-            if flow_note and row["reason"] != "ICEBERG":
-                row["note"] = (str(row.get("note") or "") + " " + flow_note).strip()
-            row["spread"] = spread
-            _live_stop(row, bid, ask)
-        rows.append(row)
-    _retain(symbol, rows, bars_by_chart)
-    by_chart = {row["chart"]: row for row in rows}
-    for row in rows:
-        if not row.get("side"):
+            row["decision"] = "—"
             row["higher"] = "—"
             row["next_vote"] = "NONE"
-            continue
-        labels = []
-        vote = "NONE"
-        first = True
-        for chart in ABOVE.get(str(row.get("chart")), ()):
-            state_word = str((by_chart.get(chart) or {}).get("trend") or (by_chart.get(chart) or {}).get("state") or "")
-            if state_word == "TREND UP":
-                word = "WITH" if row["side"] == "BUY" else "AGAINST"
-            elif state_word == "TREND DOWN":
-                word = "WITH" if row["side"] == "SELL" else "AGAINST"
-            else:
-                continue
-            labels.append(word + " " + chart)
-            if first:
-                vote = word
-                first = False
-        row["higher"] = ", ".join(labels) or "—"
-        row["next_vote"] = vote
-        _live_stop(row, bid, ask)
+        rows.append(row)
+    _retain(symbol, rows, bars_by_chart)
+    by_name = {row["chart"]: row for row in rows}
+    intra = by_name.get("INTRADAY") or {}
+    inter = by_name["INTERDAY"]
+    if intra.get("side") and intra.get("target") is not None and intra.get("entry") is not None:
+        side = str(intra["side"])
+        entry = float(intra["entry"])
+        target = float(intra["target"])
+        further = _nearest_zone(side, target, intraday_zones)
+        if further is None or abs(further - entry) <= abs(target - entry):
+            inter.update(_wait("INTERDAY", "Nothing beyond the first zone.", state))
+        else:
+            harvest = _harvest(symbol, entry, further)
+            inter.update({
+                "chart": "INTERDAY",
+                "side": side,
+                "reason": "RUNNER",
+                "entry": entry,
+                "stop": entry,
+                "target": further,
+                "r": None,
+                "harvest": harvest,
+                "tradeable": False,
+                "state": "SHOWN",
+                "market": state,
+                "score_on": "M1",
+                "decision": "—",
+                "higher": "—",
+                "next_vote": "NONE",
+                "note": (
+                    f"Not a new order. The first zone is {round(target, 5)}. "
+                    f"The half left on aims at {round(further, 5)}. {harvest}."
+                ),
+            })
+    else:
+        inter.update(_wait("INTERDAY", "No intraday trade is still open.", state))
+    inter["market"] = state
+    for row in rows:
+        row["market"] = state
+        if row.get("side"):
+            _live_stop(row, bid, ask)
+            if row["chart"] == "INTERDAY":
+                row["tradeable"] = False
+                row["state"] = "SHOWN"
     return rows
 
 
 def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, list[dict[str, Any]]]) -> None:
-    """Keep a priced signal until its stop or its target. A quiet candle does not erase it."""
+    """Keep a priced signal until its stop or its target. The next one waits until this one is finished."""
     state = _load_state()
     active: dict[str, dict[str, Any]] = state.setdefault("active", {})
     changed = False
     for row in rows:
         chart = str(row.get("chart"))
+        if chart == "INTERDAY":
+            continue
         key = symbol + "|" + chart
-        if row.get("reason") in MANUAL and row.get("entry") is not None:
-            if row.get("tradeable"):
-                active[key] = {**row, "symbol": symbol}
-            else:
-                active.pop(key, None)
-            changed = True
-            continue
         held = active.get(key)
-        if not held or held.get("reason") not in MANUAL:
-            if held:
-                active.pop(key, None)
-                changed = True
-            continue
-        result, _be, mfe = _score_path(held, bars_by_chart.get(chart) or [], float(BE_MOVE.get(symbol, 0.0)))
-        if result in ("WIN", "LOSS"):
+        if held and held.get("reason") in MANUAL and held.get("entry") is not None:
+            result, _be, mfe = _score_path(held, _bars_for(held, bars_by_chart), float(BE_MOVE.get(symbol, 0.0)))
+            if result not in ("WIN", "LOSS"):
+                row.clear()
+                row.update(held)
+                row["mfe"] = mfe
+                row["tradeable"] = bool(held.get("tradeable")) and float(held.get("r") or 0) >= TRADE_R
+                row["state"] = "READY" if row["tradeable"] else "SHOWN"
+                row["note"] = "Held until the stop or the target. " + str(held.get("note") or "")
+                row["decision"] = held.get("decision") or "HELD"
+                continue
             active.pop(key, None)
             changed = True
-            continue
-        note = "Held until the stop or the target."
-        row.clear()
-        row.update(held)
-        row["mfe"] = mfe
-        row["tradeable"] = bool(held.get("tradeable")) and float(held.get("r") or 0) >= TRADE_R
-        row["state"] = "READY" if row["tradeable"] else "SHOWN"
-        row["note"] = note
-        row["decision"] = held.get("decision") or "HELD"
+        if row.get("reason") in MANUAL and row.get("entry") is not None and row.get("tradeable"):
+            active[key] = {**row, "symbol": symbol}
+            changed = True
+        elif held:
+            active.pop(key, None)
+            changed = True
     if changed:
         _save_state(state)
 
@@ -1051,7 +1357,7 @@ def _finish(state: dict[str, Any], store: str, summary_name: str, bars_by_chart:
     for key, row in open_rows.items():
         if str(row.get("symbol")) != symbol:
             continue
-        result, be_result, mfe = _score_path(row, bars_by_chart.get(str(row.get("chart"))) or [], float(BE_MOVE.get(symbol, 0.0)))
+        result, be_result, mfe = _score_path(row, _bars_for(row, bars_by_chart), float(BE_MOVE.get(symbol, 0.0)))
         if not result:
             row["mfe"] = mfe
             continue

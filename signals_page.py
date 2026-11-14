@@ -83,7 +83,7 @@ tr.pick{outline:1px solid var(--warn)}
   <button onclick="zoom(20)">ZOOM OUT</button>
   <button onclick="fit()">FIT</button>
   <label>RISK % <input id="risk" value="2" style="width:52px"></label>
-  <span class="muted">TRADE from 0.5R sends a market order to the MT5 account that is logged in. A stop that price has already passed is not sent.</span>
+  <span class="muted">A signal is a confirmed 1-minute candle. The stop must clear 10 times the spread. TRADE sends one market order to the logged-in MT5 account.</span>
 </div>
 <main>
   <section class="card">
@@ -112,7 +112,7 @@ const CHARTS=["M1","M5","M15","M30","H1","H4","D1"];
 const LEVEL_COLOR={ASIA:"#7aa2d6",LONDON:"#e9c66b",NEW_YORK:"#67d6a3",YESTERDAY:"#c084fc",LATE:"#8ea3b8"};
 let symbol=localStorage.getItem("sig_symbol")||"XAUUSD";
 let chart=localStorage.getItem("sig_chart")||"M5";
-let data=null, visible=80, pan=0, drag=null, selected=chart;
+let data=null, visible=80, pan=0, drag=null, selected=chart, pickedRow="INTRADAY";
 let busy=false, timer=null, control=null, holdStatusUntil=0;
 function $(id){return document.getElementById(id)}
 function setStatus(text, holdMs){$("status").textContent=text; holdStatusUntil=Date.now()+(holdMs||0)}
@@ -178,7 +178,7 @@ function draw(){
   const q=data.quote||{};
   if(q.bid!=null){lo=Math.min(lo,Number(q.bid));hi=Math.max(hi,Number(q.bid))}
   const span=Math.max(hi-lo, 0.00001);
-  const row=(data.rows||[]).find(r=>r.chart===selected&&r.entry!=null);
+  const row=(data.rows||[]).find(r=>r.chart===pickedRow&&r.entry!=null);
   if(row&&Math.abs(row.entry-((lo+hi)/2))<span*1.2){
     lo=Math.min(lo,row.stop,row.target,row.entry);hi=Math.max(hi,row.stop,row.target,row.entry)
   }
@@ -240,7 +240,8 @@ function draw(){
     const price=hi-(hi-lo)*i/4;
     ctx.fillText(price.toFixed(price>100?2:5), plotR+4, y(price)+4);
   }
-  const picked=(data.rows||[]).find(r=>r.chart===selected)||{};
+  const picked=(data.rows||[]).find(r=>r.chart===pickedRow)||{};
+  const market=(data&&data.market)||picked.market||"";
   const feed=data.feed||{};
   ctx.fillStyle=feed.quote_stale?"#ef7f88":"#e7eef5";
   ctx.fillText((feed.quote_stale?"STALE":"LIVE "+(feed.quote_age??"—")+"s")+"   "+(feed.session||""), 12, 18);
@@ -251,7 +252,7 @@ function draw(){
     ctx.lineWidth=1; ctx.fillStyle="#e9c66b"; ctx.fillText("BID "+px(q.bid), plotR-120, yy-6);
   }
   ctx.fillStyle="#e9c66b";
-  ctx.fillText((picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+"   "+(picked.reason==="POTENTIAL"?(picked.side==="BUY"?"POTENTIAL BUY":"POTENTIAL SELL"):"")+(feed.candles_stale?"   CANDLES OLD":""), 12, 36);
+  ctx.fillText((market||"")+"   "+(picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+(feed.candles_stale?"   CANDLES OLD":""), 12, 36);
   paintQuote();
 }
 function researchLine(title, book){
@@ -263,12 +264,11 @@ function researchLine(title, book){
 }
 function paint(){
   const rows=data.rows||[];
-  $("grid").innerHTML="<tr><th>CHART</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>R</th><th>REASON</th><th>HIGHER</th><th>BOOK</th><th></th></tr>"+
+  $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
-      const side=r.side?`<span class="${r.side==="BUY"?"good":"bad"}">${r.reason==="POTENTIAL"?"POTENTIAL "+r.side:r.side}</span>`:"—";
-      const flow=r.decision==="BUYERS STEPPING IN"?"good":(r.decision==="SELLERS STEPPING IN"||r.decision==="PULLED"?"bad":"warn");
+      const side=r.side?`<span class="${r.side==="BUY"?"good":"bad"}">${r.side}</span>`:"—";
       const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}')">TRADE</button>`:"";
-      return `<tr class="${r.chart===selected?"pick":""}" onclick="selected='${r.chart}';draw();paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${r.target??"—"}</td><td>${r.r??"—"}</td><td>${r.reason}</td><td>${r.higher||"—"}</td><td class="${flow}">${r.decision||"—"}</td><td>${button}</td></tr>`;
+      return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${r.target??"—"}</td><td>${r.harvest||"—"}</td><td>${r.note||r.reason||"—"}</td><td>${button}</td></tr>`;
     }).join("");
   const f=data.flow||{}, ladder=data.ladder||{};
   $("flow").innerHTML=`<div class="muted">ORDER FLOW · THIS PAIR</div>
@@ -294,22 +294,23 @@ function paint(){
   const align=research.alignment||{};
   const alignBits=Object.keys(align).map(k=>k+" "+(align[k].wins||0)+" wins, "+(align[k].losses||0)+" losses");
   $("research").textContent=researchLine("TAKEN", research.taken)+"\n"+researchLine("IF TAKEN", research.if_taken)+"\n"+(openBits.length?("OPEN · "+openBits.join(" · ")+"\n"):"")+(alignBits.length?("NEXT CHART · "+alignBits.join(" · ")+"\n"):"")+"TAKEN is an order this page sent. IF TAKEN was never sent. The second result is the 20-pip scratch.";
-  const row=(data.rows||[]).find(r=>r.chart===selected);
+  const row=(data.rows||[]).find(r=>r.chart===pickedRow);
   const news=data.news||{};
   const feed=data.feed||{};
   const newsLine=news.line||"NO CALENDAR";
-  if(Date.now()>=holdStatusUntil) $("status").textContent=(feed.line?feed.line+"\n":"")+(row&&row.note?row.chart+" · "+row.note:"")+"\n"+newsLine;
+  const market=data.market||(row&&row.market)||"";
+  if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+"\n":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+"\n"+newsLine;
 }
 async function trade(chartName){
   const row=(data.rows||[]).find(r=>r.chart===chartName&&r.tradeable);
   if(!row){setStatus("NOT SENT · this row has no order. A stop that price has already passed stays on the row with no button.", 8000);return}
-  const open=(data.positions||[]).find(p=>p.side&&p.side!==row.side);
-  if(open){setStatus("NOT SENT · this pair already has a "+open.side+". Close it first.", 8000);return}
+  const open=(data.positions||[])[0];
+  if(open){setStatus("NOT SENT · this pair already has a "+open.side+". One trade at a time.", 8000);return}
   const quote=(data&&data.quote)||{};
   const bid=Number(quote.bid), ask=Number(quote.ask);
   if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){setStatus("NOT SENT · a sell stop must be above the live ask, and the target below the bid. Price has already gone through this one.", 12000);return}
   if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){setStatus("NOT SENT · a buy stop must be below the live bid, and the target above the ask. Price has already gone through this one.", 12000);return}
-  const msg="Send a MARKET "+row.side+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThe book says "+row.decision+".\nThis goes to the MT5 account that is logged in.";
+  const msg="Send a MARKET "+row.side+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\n"+row.note+"\nThis goes to the MT5 account that is logged in.";
   if(!confirm(msg))return;
   const risk=Number($("risk").value);
   if(!isFinite(risk)||risk<=0){setStatus("NOT SENT · set the risk percent", 8000);return}
@@ -318,7 +319,7 @@ async function trade(chartName){
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
     const r=await fetch("/api/v19/owner-order/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
-      owner_approved:true,symbol:symbol,timeframe:chartName,order_type:row.side==="BUY"?"MARKET_BUY":"MARKET_SELL",
+      owner_approved:true,symbol:symbol,timeframe:row.chart==="SWING"?"H4":"M1",order_type:row.side==="BUY"?"MARKET_BUY":"MARKET_SELL",
       entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:risk,horizon_lane:"INTRADAY",
       owner_note:"SIGNALS PAGE "+row.reason+" "+row.decision
     })});
@@ -702,6 +703,7 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
         "pools": pools,
         "reaction": reaction(bars_by_chart.get(chart) or [], pools),
         "rows": rows,
+        "market": (rows[0].get("market") if rows else "RANGE"),
         "ladder": align_ladder(symbol, book, bid, ask),
         "flow": {
             "fresh": bool(book.get("fresh")),
