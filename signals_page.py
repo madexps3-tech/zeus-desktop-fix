@@ -267,8 +267,9 @@ function paint(){
   $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
       const side=r.side?`<span class="${r.side==="BUY"?"good":"bad"}">${r.side}</span>`:"—";
+      const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
       const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}')">TRADE</button>`:"";
-      return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${r.target??"—"}</td><td>${r.harvest||"—"}</td><td>${r.note||r.reason||"—"}</td><td>${button}</td></tr>`;
+      return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${r.harvest||"—"}</td><td>${r.note||r.reason||"—"}</td><td>${button}</td></tr>`;
     }).join("");
   const f=data.flow||{}, ladder=data.ladder||{};
   $("flow").innerHTML=`<div class="muted">ORDER FLOW · THIS PAIR</div>

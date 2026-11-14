@@ -785,7 +785,8 @@ def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None) -> Non
     if not row.get("side") or row.get("stop") is None:
         return
     stop = float(row["stop"])
-    target = row.get("target")
+    targets = [float(price) for price in (row.get("targets") or []) if price is not None]
+    target = targets[-1] if targets else row.get("target")
     if row["side"] == "SELL":
         dead = ask is not None and stop <= float(ask)
         passed = bid is not None and target is not None and float(target) >= float(bid)
@@ -862,12 +863,30 @@ def _harvest(symbol: str, entry: float, target: float) -> str:
 
 
 def _nearest_zone(side: str, entry: float, zones: list[dict[str, Any]]) -> float | None:
-    prices = [float(zone["price"]) for zone in zones]
-    if side == "BUY":
-        above = [price for price in prices if price > entry]
-        return min(above) if above else None
-    below = [price for price in prices if price < entry]
-    return max(below) if below else None
+    ahead = _targets_ahead(side, entry, entry, zones)
+    return ahead[0] if ahead else None
+
+
+def _targets_ahead(side: str, entry: float, stop: float, zones: list[dict[str, Any]]) -> list[float]:
+    """Every zone beyond the entry. The first has to be further than the stop."""
+    risk = abs(float(entry) - float(stop))
+    prices = []
+    for zone in zones:
+        price = round(float(zone["price"]), 5)
+        if side == "BUY" and price <= entry:
+            continue
+        if side == "SELL" and price >= entry:
+            continue
+        if any(abs(price - kept) <= max(abs(entry) * 1e-8, 1e-8) for kept in prices):
+            continue
+        prices.append(price)
+    prices.sort(reverse=(side == "SELL"))
+    kept: list[float] = []
+    for price in prices:
+        if not kept and abs(price - entry) <= risk:
+            continue
+        kept.append(price)
+    return kept[:4]
 
 
 def _beyond(side: str, entry: float, prices: list[float], need: float) -> float | None:
@@ -943,7 +962,7 @@ def _break_confirm(closed: list[dict[str, Any]], zones: list[dict[str, Any]], si
     return min(hits, key=lambda zone: abs(float(zone["price"]) - close))
 
 
-def _sentence(state: str, reason: str, side: str, zone: dict[str, Any], stop: float, target: float, harvest: str) -> str:
+def _sentence(state: str, reason: str, side: str, zone: dict[str, Any], entry: float, stop: float, targets: list[float], symbol: str) -> str:
     edge = "buy zone" if side == "BUY" else "sell zone"
     price = round(float(zone["price"]), 5)
     if reason == "RANGE":
@@ -954,9 +973,13 @@ def _sentence(state: str, reason: str, side: str, zone: dict[str, Any], stop: fl
     else:
         what = f"Two 1-minute candles closed through the {edge} at {price}."
     side_word = "below" if side == "BUY" else "above"
+    listed = ", ".join(
+        f"T{index} {round(target, 5)} {_harvest(symbol, entry, target)}"
+        for index, target in enumerate(targets, 1)
+    )
     return (
         f"{reason} {side}. Price is {state.lower()}. {what} "
-        f"Stop {side_word} the wick at {round(stop, 5)}. Target {round(target, 5)}. {harvest}."
+        f"Stop {side_word} the wick at {round(stop, 5)}. {listed}."
     )
 
 
@@ -969,25 +992,28 @@ def _pack(
     zone: dict[str, Any],
     last: dict[str, Any],
     stop: float,
-    target: float,
+    targets: list[float],
     spread: float,
 ) -> dict[str, Any] | None:
     entry = _num(last, "close")
+    target = targets[0]
     if side == "BUY" and not (target > entry > stop):
         return None
     if side == "SELL" and not (stop > entry > target):
         return None
     if abs(target - entry) <= abs(entry - stop):
         return None
-    harvest = _harvest(symbol, entry, target)
     row = _offer(chart, side, reason, entry, stop, target, _time(last), spread, symbol, wick_limit=False)
     if not row.get("tradeable"):
         return None
-    row["harvest"] = harvest
+    row["targets"] = [round(price, 5) for price in targets]
+    row["harvest"] = " · ".join(
+        f"T{index} {_harvest(symbol, entry, price)}" for index, price in enumerate(targets, 1)
+    )
     row["market"] = state
     row["score_on"] = "M1"
     row["zone"] = float(zone["price"])
-    row["note"] = _sentence(state, reason, side, zone, stop, target, harvest)
+    row["note"] = _sentence(state, reason, side, zone, entry, stop, targets, symbol)
     return row
 
 
@@ -1036,10 +1062,10 @@ def _choose(
     stop = _stop_price(side, close, wick, spread, beyond, wider=wider)
     if stop is None:
         return None
-    target = _nearest_zone(side, close, zones)
-    if target is None:
+    targets = _targets_ahead(side, close, stop, zones)
+    if not targets:
         return None
-    return _pack(symbol, chart, reason, side, state, zone, last, stop, target, spread)
+    return _pack(symbol, chart, reason, side, state, zone, last, stop, targets, spread)
 
 
 def _prices(points: list[dict[str, Any]], kind: str, count: int = 6) -> list[float]:
@@ -1049,6 +1075,63 @@ def _prices(points: list[dict[str, Any]], kind: str, count: int = 6) -> list[flo
 def _bars_for(row: dict[str, Any], bars_by_chart: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     name = str(row.get("score_on") or "M1")
     return bars_by_chart.get(name) or bars_by_chart.get(str(row.get("chart"))) or []
+
+
+def _two_closes(closed: list[dict[str, Any]], level: float, side: str) -> bool:
+    if len(closed) < 2:
+        return False
+    first, second = closed[-2], closed[-1]
+    if side == "BUY":
+        return _num(first, "close") > level and _num(second, "close") > level
+    return _num(first, "close") < level and _num(second, "close") < level
+
+
+def _touched(closed: list[dict[str, Any]], level: float, side: str) -> bool:
+    if not closed:
+        return False
+    last = closed[-1]
+    if side == "BUY":
+        return _num(last, "high") >= level
+    return _num(last, "low") <= level
+
+
+def _guide(row: dict[str, Any], book: dict[str, Any] | None, closed: list[dict[str, Any]], symbol: str) -> str:
+    """The 60-second book tells an open trade to hold or to bank. It does not open one."""
+    if not row.get("side") or row.get("entry") is None:
+        return ""
+    targets = [float(price) for price in (row.get("targets") or []) if price is not None]
+    if not targets and row.get("target") is not None:
+        targets = [float(row["target"])]
+    if not targets:
+        return ""
+    side = str(row["side"])
+    entry = float(row["entry"])
+    delta = (book or {}).get("delta_60s")
+    known = isinstance(delta, (int, float)) and not isinstance(delta, bool)
+    with_trade = (delta > 0) if known and side == "BUY" else ((delta < 0) if known else None)
+    passed = [price for price in targets if _two_closes(closed, price, side)]
+    remaining = [price for price in targets if price not in passed]
+    at_zone = any(_touched(closed, price, side) for price in targets)
+    absorption = bool((book or {}).get("absorption")) and at_zone
+    listed = " · ".join(
+        f"T{index} {round(price, 5)} {_harvest(symbol, entry, price)}" for index, price in enumerate(targets, 1)
+    )
+    row["targets"] = [round(price, 5) for price in targets]
+    row["harvest"] = listed
+    if not known:
+        line = "No 60-second delta in this book. The targets stay. Nothing says hold or bank."
+    elif passed and remaining and with_trade and not absorption:
+        line = f"Hold the rest for {round(remaining[0], 5)}. The stop is at the entry."
+    elif at_zone and (absorption or with_trade is False):
+        line = "Bank half. Move the stop to the entry. Do not aim further."
+    elif with_trade:
+        aim = remaining[0] if remaining else targets[-1]
+        line = f"Hold for {round(aim, 5)}."
+    else:
+        line = "60-second delta is against the trade. Bank half. Move the stop to the entry. Do not aim further."
+    row["guide"] = line
+    row["note"] = f"{row.get('reason') or ''} {side}. {listed}. {line}".strip()
+    return line
 
 
 def build_rows(
@@ -1136,47 +1219,54 @@ def build_rows(
     _retain(symbol, rows, bars_by_chart)
     by_name = {row["chart"]: row for row in rows}
     intra = by_name.get("INTRADAY") or {}
+    if intra.get("side"):
+        _guide(intra, book, closed, symbol)
+    swing_row = by_name.get("SWING") or {}
+    if swing_row.get("side"):
+        _guide(swing_row, book, closed, symbol)
     inter = by_name["INTERDAY"]
-    if intra.get("side") and intra.get("target") is not None and intra.get("entry") is not None:
-        side = str(intra["side"])
-        entry = float(intra["entry"])
-        target = float(intra["target"])
-        further = _nearest_zone(side, target, intraday_zones)
-        if further is None or abs(further - entry) <= abs(target - entry):
-            inter.update(_wait("INTERDAY", "Nothing beyond the first zone.", state))
-        else:
-            harvest = _harvest(symbol, entry, further)
-            inter.update({
-                "chart": "INTERDAY",
-                "side": side,
-                "reason": "RUNNER",
-                "entry": entry,
-                "stop": entry,
-                "target": further,
-                "r": None,
-                "harvest": harvest,
-                "tradeable": False,
-                "state": "SHOWN",
-                "market": state,
-                "score_on": "M1",
-                "decision": "—",
-                "higher": "—",
-                "next_vote": "NONE",
-                "note": (
-                    f"Not a new order. The first zone is {round(target, 5)}. "
-                    f"The half left on aims at {round(further, 5)}. {harvest}."
-                ),
-            })
-    else:
+    targets = [float(price) for price in (intra.get("targets") or [])]
+    guide = str(intra.get("guide") or "")
+    rest = targets[1:]
+    if not intra.get("side"):
         inter.update(_wait("INTERDAY", "No intraday trade is still open.", state))
+    elif "Do not aim further" in guide or "against the trade" in guide:
+        inter.update(_wait("INTERDAY", "Not a new order. " + guide, state))
+        inter["side"] = intra.get("side")
+        inter["state"] = "SHOWN"
+    elif not rest:
+        inter.update(_wait("INTERDAY", "Not a new order. Nothing beyond the first zone.", state))
+    else:
+        entry = float(intra["entry"])
+        listed = " · ".join(
+            f"T{index + 2} {round(price, 5)} {_harvest(symbol, entry, price)}" for index, price in enumerate(rest)
+        )
+        inter.update({
+            "chart": "INTERDAY",
+            "side": intra.get("side"),
+            "reason": "RUNNER",
+            "entry": entry,
+            "stop": entry,
+            "target": rest[0],
+            "targets": [round(price, 5) for price in rest],
+            "r": None,
+            "harvest": listed,
+            "tradeable": False,
+            "state": "SHOWN",
+            "market": state,
+            "score_on": "M1",
+            "decision": "—",
+            "higher": "—",
+            "next_vote": "NONE",
+            "guide": guide,
+            "note": f"Not a new order. {listed}. {guide}",
+        })
     inter["market"] = state
+    inter["tradeable"] = False
     for row in rows:
         row["market"] = state
-        if row.get("side"):
+        if row.get("side") and row["chart"] != "INTERDAY":
             _live_stop(row, bid, ask)
-            if row["chart"] == "INTERDAY":
-                row["tradeable"] = False
-                row["state"] = "SHOWN"
     return rows
 
 
@@ -1199,7 +1289,6 @@ def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, li
                 row["mfe"] = mfe
                 row["tradeable"] = bool(held.get("tradeable")) and float(held.get("r") or 0) >= TRADE_R
                 row["state"] = "READY" if row["tradeable"] else "SHOWN"
-                row["note"] = "Held until the stop or the target. " + str(held.get("note") or "")
                 row["decision"] = held.get("decision") or "HELD"
                 continue
             active.pop(key, None)
@@ -1300,7 +1389,8 @@ def _score_path(row: dict[str, Any], bars: list[dict[str, Any]], be_move: float)
     later = [bar for bar in bars if _time(bar) > str(row.get("time"))]
     entry = float(row["entry"])
     stop = float(row["stop"])
-    target = float(row["target"])
+    targets = [float(price) for price in (row.get("targets") or []) if price is not None]
+    target = targets[-1] if targets else float(row["target"])
     buy = row["side"] == "BUY"
     mfe = 0.0
     armed = False
@@ -1327,7 +1417,7 @@ def _score_path(row: dict[str, Any], bars: list[dict[str, Any]], be_move: float)
             if not be_result:
                 be_result = "WIN"
             break
-    if not result and len(later) >= 40:
+    if not result and len(later) >= 40 and len(targets) <= 1:
         result = "EXPIRED"
         if not be_result:
             be_result = "EXPIRED"
