@@ -62,6 +62,13 @@ td{padding:6px;border-top:1px solid #1a2c3c}
 tr.pick{outline:1px solid var(--warn)}
 .good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.muted{color:var(--muted)}
 .flow b{display:block;font-size:16px;margin:2px 0 10px}
+.quotes{display:flex;gap:10px;align-items:stretch;margin:0 0 8px}
+.qbox{border:1px solid #1e3344;border-radius:8px;padding:8px 16px;min-width:140px;background:#071018}
+.qbox .k{font-size:11px;letter-spacing:.08em;color:#8ea3b8}
+.qbox .v{font:700 30px Consolas,monospace;margin-top:2px}
+.qbox.bid .v{color:#e9c66b}
+.qbox.ask .v{color:#56a8ff}
+.qbox.mid .v{color:#e7eef5;font-size:22px}
 #status,#research{font:12px Consolas,monospace;white-space:pre-wrap}
 </style></head><body>
 <header>
@@ -80,6 +87,12 @@ tr.pick{outline:1px solid var(--warn)}
 </div>
 <main>
   <section class="card">
+    <div class="quotes">
+      <div class="qbox mid"><div class="k" id="qsym">PAIR</div><div class="v" id="qpair">—</div></div>
+      <div class="qbox bid"><div class="k">BID</div><div class="v" id="qbid">—</div></div>
+      <div class="qbox ask"><div class="k">ASK</div><div class="v" id="qask">—</div></div>
+      <div class="qbox mid"><div class="k">SPREAD</div><div class="v" id="qspread">—</div></div>
+    </div>
     <canvas id="cv" width="1100" height="520"></canvas>
     <div id="status" class="muted"></div>
     <table id="grid"></table>
@@ -133,6 +146,22 @@ function windowRows(){
   pan=Math.max(0, Math.min(pan, maxPan));
   const end=all.length-pan;
   return all.slice(Math.max(0,end-count), end);
+}
+function px(v){
+  const n=Number(v);
+  if(!isFinite(n))return "—";
+  const a=Math.abs(n);
+  const d=a>=100?2:a>=10?3:a>=1?5:5;
+  return n.toFixed(d);
+}
+function paintQuote(){
+  const q=(data&&data.quote)||{};
+  const bid=Number(q.bid), ask=Number(q.ask);
+  $("qsym").textContent=symbol+" · "+chart;
+  $("qpair").textContent=symbol;
+  $("qbid").textContent=px(bid);
+  $("qask").textContent=px(ask);
+  $("qspread").textContent=(isFinite(bid)&&isFinite(ask))?px(ask-bid):"—";
 }
 function draw(){
   const cv=$("cv"), width=Math.max(700,(cv.parentElement.clientWidth||1100)-8);
@@ -213,9 +242,16 @@ function draw(){
   const picked=(data.rows||[]).find(r=>r.chart===selected)||{};
   const feed=data.feed||{};
   ctx.fillStyle=feed.quote_stale?"#ef7f88":"#e7eef5";
-  ctx.fillText(symbol+"  "+chart+"   BID "+(q.bid??"—")+"   ASK "+(q.ask??"—")+"   SPREAD "+(data.spread??"—")+"   "+(feed.quote_stale?"STALE":"LIVE "+(feed.quote_age??"—")+"s"), 12, 18);
+  ctx.fillText((feed.quote_stale?"STALE":"LIVE "+(feed.quote_age??"—")+"s")+"   "+(feed.session||""), 12, 18);
+  if(isFinite(Number(q.bid))&&Number(q.bid)>=lo&&Number(q.bid)<=hi){
+    const yy=y(Number(q.bid));
+    ctx.strokeStyle="#e9c66b"; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(plotL,yy); ctx.lineTo(plotR,yy); ctx.stroke();
+    ctx.lineWidth=1; ctx.fillStyle="#e9c66b"; ctx.fillText("BID "+px(q.bid), plotR-120, yy-6);
+  }
   ctx.fillStyle="#e9c66b";
   ctx.fillText((picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+"   "+(picked.reason==="POTENTIAL"?(picked.side==="BUY"?"POTENTIAL BUY":"POTENTIAL SELL"):"")+(feed.candles_stale?"   CANDLES OLD":""), 12, 36);
+  paintQuote();
 }
 function researchLine(title, book){
   const bits=Object.keys(book||{}).map(chart=>{
