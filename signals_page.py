@@ -740,7 +740,7 @@ def _positions(host: Any, symbol: str) -> list[dict[str, Any]]:
         broker = str(getattr(row, "broker_symbol", "") or "")
         if not _same_pair(symbol, broker):
             continue
-        side = "BUY" if int(getattr(row, "type_code", 1) or 1) == 0 else "SELL"
+        side = "BUY" if int(getattr(row, "type_code", 1)) == 0 else "SELL"
         found.append(
             {
                 "ticket": int(getattr(row, "ticket", 0) or 0),
