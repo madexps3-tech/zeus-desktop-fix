@@ -496,3 +496,42 @@ elif "raw=raw," not in slip:
 else:
     slip_path.write_text(slip.replace("raw=raw,", "raw=None,", 1), encoding="utf-8")
     print("Broker reply no longer jams the order result.", flush=True)
+
+slip = slip_path.read_text(encoding="utf-8")
+slip_nl = "\r\n" if "\r\n" in slip else "\n"
+old_close = (
+    "        quote = self.quote(symbol)" + slip_nl
+    + "        closing_buy = side.upper() == \"SELL\"" + slip_nl
+    + "        request = {" + slip_nl
+    + "            \"action\": self.mt5.TRADE_ACTION_DEAL," + slip_nl
+    + "            \"position\": int(ticket)," + slip_nl
+    + "            \"symbol\": symbol," + slip_nl
+    + "            \"volume\": float(volume)," + slip_nl
+    + "            \"type\": self.mt5.ORDER_TYPE_BUY if closing_buy else self.mt5.ORDER_TYPE_SELL," + slip_nl
+    + "            \"price\": quote.ask if closing_buy else quote.bid," + slip_nl
+    + "            \"deviation\": int(deviation_points)," + slip_nl
+)
+new_close = (
+    "        quote = self.quote(symbol)" + slip_nl
+    + "        closing_buy = side.upper() == \"SELL\"" + slip_nl
+    + "        info = self.mt5.symbol_info(symbol)" + slip_nl
+    + "        point = float(getattr(info, \"point\", 0.0) or 0.0) if info is not None else 0.0" + slip_nl
+    + "        spread_points = int(round((float(quote.ask) - float(quote.bid)) / point)) if point > 0 else 0" + slip_nl
+    + "        close_slip = max(int(deviation_points), spread_points * 3, 100)" + slip_nl
+    + "        request = {" + slip_nl
+    + "            \"action\": self.mt5.TRADE_ACTION_DEAL," + slip_nl
+    + "            \"position\": int(ticket)," + slip_nl
+    + "            \"symbol\": symbol," + slip_nl
+    + "            \"volume\": float(volume)," + slip_nl
+    + "            \"type\": self.mt5.ORDER_TYPE_BUY if closing_buy else self.mt5.ORDER_TYPE_SELL," + slip_nl
+    + "            \"price\": quote.ask if closing_buy else quote.bid," + slip_nl
+    + "            \"deviation\": int(close_slip)," + slip_nl
+)
+if "close_slip = max" in slip:
+    print("Close orders already cover the spread.", flush=True)
+elif old_close not in slip:
+    print("Could not find the close send.", flush=True)
+    raise SystemExit(1)
+else:
+    slip_path.write_text(slip.replace(old_close, new_close, 1), encoding="utf-8")
+    print("Close and partial orders can move through the spread.", flush=True)

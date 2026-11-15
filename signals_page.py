@@ -436,7 +436,7 @@ function paint(){
     <div class="muted">${f.note||""}</div>`;
   const pos=data.positions||[];
   $("positions").innerHTML=pos.length?pos.map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
-    <button onclick="manage(${p.ticket},'CLOSE_POSITION')">CLOSE</button>
+    <button onclick="manage(${p.ticket},'CLOSE')">CLOSE</button>
     <button onclick="manage(${p.ticket},'BREAK_EVEN',${p.price_open})">BE</button>
     <button onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
     <button onclick="manage(${p.ticket},'PARTIAL',null,50)">50%</button>
@@ -458,7 +458,7 @@ function isProtected(position){
   return position.side==="SELL"?sl<=entry:sl>=entry;
 }
 async function closeTicket(ticket){
-  const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({owner_approved:true,fast_ack:true,ticket:ticket,action:"CLOSE_POSITION",reason:"SIGNALS PAGE"})});
+  const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({owner_approved:true,fast_ack:true,ticket:ticket,action:"CLOSE",reason:"SIGNALS PAGE"})});
   const j=await r.json();
   if(!r.ok||!((j.management||{}).ok)) throw Error(((j.management||{}).reason)||j.message||"the close was rejected");
 }
@@ -515,21 +515,29 @@ async function trade(chartName){
     fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{});
   }
 }
+function brokerLine(j){
+  const m=j.management||{};
+  const nested=(m.broker_result&&(m.broker_result.result||m.broker_result.broker_result))||{};
+  return nested.comment||m.reason||j.message||"";
+}
 async function manage(ticket, action, entry, pct){
   const body={owner_approved:true,fast_ack:true,ticket:ticket,action:action,reason:"SIGNALS PAGE"};
   if(action==="BREAK_EVEN")body.stop_loss=entry;
   if(action==="PARTIAL")body.partial_pct=pct;
-  if(action==="CLOSE_POSITION"&&!confirm("Close ticket "+ticket+" at the market?"))return;
+  if(action==="CLOSE"&&!confirm("Close ticket "+ticket+" at the market?"))return;
   if(action==="PARTIAL"&&!confirm("Close "+pct+"% of ticket "+ticket+"?"))return;
   const started=performance.now();
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
     const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
     const j=await r.json();
-    const ms=Math.round(j.management_server_ms||(performance.now()-started));
-    $("status").textContent=((j.management||{}).ok?"BROKER OK":"BLOCKED")+" · "+((j.management||{}).reason||j.message||"")+" · "+ms+" ms";
+    const ms=Math.round((j.timings_ms&&j.timings_ms.total)||j.management_server_ms||(performance.now()-started));
+    const ok=r.ok&&j.ok!==false&&(j.management||{}).ok;
+    const text=(ok?"BROKER OK":"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
+    setStatus(text, 20000);
+    alert(text);
     load();
-  }catch(e){$("status").textContent="MANAGE ERROR · "+e.message}
+  }catch(e){const text="MANAGE ERROR · "+e.message; setStatus(text, 20000); alert(text)}
   finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
 async function editStop(ticket){
@@ -542,7 +550,9 @@ async function editStop(ticket){
     const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
     const j=await r.json();
     const ms=Math.round(j.management_server_ms||(performance.now()-started));
-    $("status").textContent=((j.management||{}).ok?"STOP SENT":"BLOCKED")+" · "+((j.management||{}).reason||j.message||"")+" · "+ms+" ms";
+    const text=((r.ok&&j.ok!==false&&(j.management||{}).ok)?"STOP SENT":"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
+    setStatus(text, 20000);
+    alert(text);
     load();
   }finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
@@ -558,7 +568,9 @@ async function editR(ticket, entry, stop, side){
     const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
     const j=await r.json();
     const ms=Math.round(j.management_server_ms||(performance.now()-started));
-    $("status").textContent=((j.management||{}).ok?"TARGET SENT "+price:"BLOCKED")+" · "+((j.management||{}).reason||j.message||"")+" · "+ms+" ms";
+    const text=((r.ok&&j.ok!==false&&(j.management||{}).ok)?"TARGET SENT "+price:"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
+    setStatus(text, 20000);
+    alert(text);
     load();
   }finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
