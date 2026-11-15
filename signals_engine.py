@@ -1130,16 +1130,15 @@ def _guide(
     remaining = [price for price in targets if price not in passed]
     at_zone = any(_touched(closed, price, side) for price in remaining or targets)
     absorption = bool((book or {}).get("absorption")) and at_zone
-    listed = " · ".join(
-        f"T{index} {round(price, 5)} {_r_multiple(entry, stop, price) or 0:.2f}R"
-        for index, price in enumerate(targets, 1)
-    )
     row["targets"] = [round(price, 5) for price in targets]
     row["legs"] = [
         {"price": round(price, 5), "r": _r_multiple(entry, stop, price)}
         for price in targets
     ]
-    row["harvest"] = listed
+    row["harvest"] = " · ".join(
+        f"T{index} {_r_multiple(entry, stop, price) or 0:.2f}R"
+        for index, price in enumerate(targets, 1)
+    )
     if passed and not remaining:
         line = f"The last target {round(passed[-1], 5)} is reached."
     elif not known and passed and remaining:
@@ -1159,7 +1158,8 @@ def _guide(
     else:
         line = "60-second delta is against the trade. Bank half. Move the stop to the entry. Do not aim further."
     row["guide"] = line
-    row["note"] = f"{row.get('reason') or ''} {side}. {listed}. {line}".strip()
+    sentence = str(row.get("note") or "").strip()
+    row["note"] = (sentence + " " + line).strip()
     return line
 
 

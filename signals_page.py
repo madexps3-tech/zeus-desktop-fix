@@ -69,7 +69,8 @@ tr.pick{outline:1px solid var(--warn)}
 .qbox.bid .v{color:#e9c66b}
 .qbox.ask .v{color:#56a8ff}
 .qbox.mid .v{color:#e7eef5;font-size:22px}
-#status,#research{font:12px Consolas,monospace;white-space:pre-wrap}
+#status,#research,#alerts{font:12px Consolas,monospace;white-space:pre-wrap}
+#alerts{max-height:88px;overflow:auto;margin:6px 0}
 </style></head><body>
 <header>
   <a href="/v19/chart">CHART</a><a href="/v19/trade-desk">TRADE DESK</a><a href="/v19/shadow">SHADOW</a>
@@ -96,7 +97,8 @@ tr.pick{outline:1px solid var(--warn)}
     </div>
     <canvas id="cv" width="1100" height="520"></canvas>
     <div id="status" class="muted"></div>
-    <div id="alerts" class="muted"></div>
+    <div class="muted">WATCHER</div>
+    <div id="alerts" class="muted">Quiet until a new signal on one of the seven pairs.</div>
     <table id="grid"></table>
     <div id="research" class="muted" style="margin-top:8px"></div>
   </section>
@@ -345,10 +347,10 @@ function consider(payload){
     const coming=row.coming;
     if(coming&&coming.side){
       const same=(payload.rows||[]).some(other=>other.side===coming.side&&other.entry!=null&&Math.abs(Number(other.zone)-Number(coming.zone))<1e-6);
-      const key="C|"+payload.symbol+"|"+row.chart+"|"+coming.side+"|"+coming.zone+"|"+coming.time;
+      const key="C|"+payload.symbol+"|"+row.chart+"|"+coming.side+"|"+coming.zone;
       if(!same&&!bag[key]){
         remember(key);
-        speak(name+" "+row.chart+" "+coming.side+" coming. "+coming.text);
+        speak(name+" "+row.chart+" "+coming.side+" coming into "+coming.zone+". Not a trade yet.");
       }
     }
     let announced=false;
@@ -399,17 +401,14 @@ function paint(){
     <button onclick="editStop(${p.ticket})">EDIT SL</button>
     <button onclick="editR(${p.ticket},${p.price_open},${p.stop_loss},'${p.side}')">EDIT R</button></div>`).join(""):"<div class='muted'>No open broker position on this pair.</div>";
   const research=data.research||{};
-  const openBits=(research.open||[]).map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning, "+(x.next_vote||"NONE"));
-  const align=research.alignment||{};
-  const alignBits=Object.keys(align).map(k=>k+" "+(align[k].wins||0)+" wins, "+(align[k].losses||0)+" losses");
-  $("research").textContent=researchLine("TAKEN", research.taken)+"\n"+researchLine("IF TAKEN", research.if_taken)+"\n"+(openBits.length?("OPEN · "+openBits.join(" · ")+"\n"):"")+(alignBits.length?("NEXT CHART · "+alignBits.join(" · ")+"\n"):"")+"TAKEN is an order this page sent. IF TAKEN was never sent. The second number is the scratch if price comes back to the entry.";
+  const openBits=(research.open||[]).filter(x=>x.chart==="INTRADAY"||x.chart==="SWING"||x.chart==="ICEBERG"||x.chart==="INTERDAY").map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning");
+  $("research").textContent=(openBits.length?("OPEN · "+openBits.join(" · ")):"No open signal on this pair.")+"\nTAKEN is an order this page sent. The win and loss counts stay in the log.";
   const row=(data.rows||[]).find(r=>r.chart===pickedRow);
   const news=data.news||{};
   const feed=data.feed||{};
   const newsLine=news.line||"NO CALENDAR";
   const market=data.market||(row&&row.market)||"";
-  const sized=row&&row.entry!=null?moneyLine(row):"";
-  if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+"\n":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+(sized?"\n"+sized:"")+"\n"+newsLine;
+  if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+" · ":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+(newsLine?"\n"+newsLine:"");
 }
 function isProtected(position){
   const sl=Number(position.stop_loss), entry=Number(position.price_open);
