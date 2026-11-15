@@ -535,3 +535,68 @@ elif old_close not in slip:
 else:
     slip_path.write_text(slip.replace(old_close, new_close, 1), encoding="utf-8")
     print("Close and partial orders can move through the spread.", flush=True)
+
+web_path = Path("src") / "zeus3" / "v19" / "web.py"
+web_text = web_path.read_text(encoding="utf-8")
+web_nl = "\r\n" if "\r\n" in web_text else "\n"
+old_send = (
+    "            payload = await asyncio.to_thread(" + web_nl
+    + "                self.runtime.execute_owner_order_clean," + web_nl
+    + "                symbol=symbol," + web_nl
+    + "                timeframe=timeframe," + web_nl
+    + "                order_type=order_type," + web_nl
+    + "                requested_entry=entry," + web_nl
+    + "                stop=stop," + web_nl
+    + "                targets=targets," + web_nl
+    + "                target_specs=target_specs," + web_nl
+    + "                requested_risk_pct=requested_risk," + web_nl
+    + "                horizon_lane=horizon_lane," + web_nl
+    + "                owner_note=owner_note," + web_nl
+    + "            )"
+)
+new_send = (
+    "            fast_entry = 0.0 if entry is None else entry" + web_nl
+    + "            payload = None" + web_nl
+    + "            try:" + web_nl
+    + "                payload = await asyncio.to_thread(" + web_nl
+    + "                    self.runtime.execute_owner_order_fast," + web_nl
+    + "                    symbol=symbol," + web_nl
+    + "                    timeframe=timeframe," + web_nl
+    + "                    order_type=order_type," + web_nl
+    + "                    requested_entry=fast_entry," + web_nl
+    + "                    stop=stop," + web_nl
+    + "                    targets=targets," + web_nl
+    + "                    target_specs=target_specs," + web_nl
+    + "                    requested_risk_pct=requested_risk," + web_nl
+    + "                    horizon_lane=horizon_lane," + web_nl
+    + "                    owner_note=owner_note," + web_nl
+    + "                )" + web_nl
+    + "            except Exception:" + web_nl
+    + "                payload = None" + web_nl
+    + "            fast_sent = bool(payload) and (" + web_nl
+    + "                payload.get(\"submitted\") or payload.get(\"stage\") == \"BROKER_ACK\"" + web_nl
+    + "                or int(payload.get(\"broker_writes\") or 0) > 0" + web_nl
+    + "            )" + web_nl
+    + "            if not fast_sent:" + web_nl
+    + "                payload = await asyncio.to_thread(" + web_nl
+    + "                    self.runtime.execute_owner_order_clean," + web_nl
+    + "                    symbol=symbol," + web_nl
+    + "                    timeframe=timeframe," + web_nl
+    + "                    order_type=order_type," + web_nl
+    + "                    requested_entry=entry," + web_nl
+    + "                    stop=stop," + web_nl
+    + "                    targets=targets," + web_nl
+    + "                    target_specs=target_specs," + web_nl
+    + "                    requested_risk_pct=requested_risk," + web_nl
+    + "                    horizon_lane=horizon_lane," + web_nl
+    + "                    owner_note=owner_note," + web_nl
+    + "                )"
+)
+if "execute_owner_order_fast," in web_text and "fast_sent" in web_text:
+    print("The trade button already uses the open connection.", flush=True)
+elif old_send not in web_text:
+    print("Could not find the trade send.", flush=True)
+    raise SystemExit(1)
+else:
+    web_path.write_text(web_text.replace(old_send, new_send, 1), encoding="utf-8")
+    print("The trade button uses the open MetaTrader connection.", flush=True)
