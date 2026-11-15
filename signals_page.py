@@ -274,6 +274,13 @@ function researchLine(title, book){
   });
   return bits.length?title+" · "+bits.join(" · "):title+" · none yet";
 }
+function round2(n){return Math.round(n*100)/100}
+function roundDist(n){
+  const a=Math.abs(n);
+  if(a>=50) return String(Math.round(n));
+  if(a>=1) return String(round2(n));
+  return String(Math.round(n*100000)/100000);
+}
 function moneyLine(row, account){
   if(!row||row.entry==null||row.stop==null) return row&&row.harvest||"—";
   const entry=Number(row.entry), stop=Number(row.risk_stop!=null?row.risk_stop:row.stop);
@@ -284,10 +291,14 @@ function moneyLine(row, account){
   const targets=(row.targets&&row.targets.length)?row.targets:(row.target!=null?[row.target]:[]);
   if(!(riskDist>0)||!targets.length) return row.harvest||"—";
   return targets.map((price,i)=>{
-    const mult=Math.abs(Number(price)-entry)/riskDist;
-    const pct=(isFinite(risk)&&risk>0)?risk*mult:null;
+    const reward=Math.abs(Number(price)-entry);
+    const mult=round2(reward/riskDist);
+    const pct=(isFinite(risk)&&risk>0)?round2(risk*mult):null;
     const cash=(pct!=null&&isFinite(balance)&&balance>0)?Math.round(balance*pct/100):null;
-    return "T"+(i+1)+" "+mult.toFixed(2)+"R"+(pct==null?"":" · "+pct.toFixed(1)+"%")+(cash==null?"":" · $"+cash);
+    const ratio=roundDist(reward)+"/"+roundDist(riskDist)+" = "+mult.toFixed(2)+"R";
+    const accountText=pct==null?"":" · "+risk+"% x "+mult.toFixed(2)+" = "+pct.toFixed(2)+"% of the account";
+    const cashText=cash==null?"":" · $"+cash;
+    return "T"+(i+1)+" "+ratio+accountText+cashText;
   }).join(" · ");
 }
 function seenBag(){
@@ -374,13 +385,13 @@ function paint(){
   const openBits=(research.open||[]).map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning, "+(x.next_vote||"NONE"));
   const align=research.alignment||{};
   const alignBits=Object.keys(align).map(k=>k+" "+(align[k].wins||0)+" wins, "+(align[k].losses||0)+" losses");
-  $("research").textContent=researchLine("TAKEN", research.taken)+"\n"+researchLine("IF TAKEN", research.if_taken)+"\n"+(openBits.length?("OPEN · "+openBits.join(" · ")+"\n"):"")+(alignBits.length?("NEXT CHART · "+alignBits.join(" · ")+"\n"):"")+"TAKEN is an order this page sent. IF TAKEN was never sent. The second result is the 20-pip scratch.";
+  $("research").textContent=researchLine("TAKEN", research.taken)+"\n"+researchLine("IF TAKEN", research.if_taken)+"\n"+(openBits.length?("OPEN · "+openBits.join(" · ")+"\n"):"")+(alignBits.length?("NEXT CHART · "+alignBits.join(" · ")+"\n"):"")+"TAKEN is an order this page sent. IF TAKEN was never sent. The second number is the scratch if price comes back to the entry.";
   const row=(data.rows||[]).find(r=>r.chart===pickedRow);
   const news=data.news||{};
   const feed=data.feed||{};
   const newsLine=news.line||"NO CALENDAR";
   const market=data.market||(row&&row.market)||"";
-  const sized=row&&row.entry!=null?moneyLine(row):"";
+  const sized=row&&row.entry!=null?("R is the distance to the target divided by the distance to the stop. The account percent is the risk box times that R.\n"+moneyLine(row)):"";
   if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+"\n":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+(sized?"\n"+sized:"")+"\n"+newsLine;
 }
 function isProtected(position){
