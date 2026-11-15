@@ -53,7 +53,7 @@ h1{font-size:16px;margin:0;letter-spacing:.08em}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 button,select{background:#10202e;color:var(--text);border:1px solid #34506a;border-radius:6px;padding:7px 10px;font-weight:700}
 button.on{border-color:var(--good);color:var(--good)}
-main{display:grid;grid-template-columns:1fr 300px;gap:10px;padding:10px}
+main{display:grid;grid-template-columns:1fr 320px;gap:10px;padding:10px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px}
 canvas{width:100%;height:520px;background:#050b11;border-radius:6px;cursor:grab}
 table{width:100%;border-collapse:collapse;font:12px Consolas,monospace}
@@ -71,6 +71,9 @@ tr.pick{outline:1px solid var(--warn)}
 .qbox.mid .v{color:#e7eef5;font-size:22px}
 #status,#research,#alerts{font:12px Consolas,monospace;white-space:pre-wrap}
 #alerts{max-height:88px;overflow:auto;margin:6px 0}
+.pairq{padding:7px 0;border-top:1px solid #1a2c3c;cursor:pointer}
+.pairq b{display:block;font-size:12px;letter-spacing:.04em}
+.pairq .sub{display:block;color:var(--muted);font:11px Consolas,monospace}
 </style></head><body>
 <header>
   <a href="/v19/chart">CHART</a><a href="/v19/trade-desk">TRADE DESK</a><a href="/v19/shadow">SHADOW</a>
@@ -103,7 +106,11 @@ tr.pick{outline:1px solid var(--warn)}
     <div id="research" class="muted" style="margin-top:8px"></div>
   </section>
   <aside>
-    <section class="card flow" id="flow"></section>
+    <section class="card">
+      <div class="muted">SEVEN PAIRS</div>
+      <div id="board"></div>
+    </section>
+    <section class="card flow" id="flow" style="margin-top:10px"></section>
     <section class="card" style="margin-top:10px">
       <div class="muted">THIS PAIR ON THE BROKER</div>
       <div id="positions"></div>
@@ -339,6 +346,29 @@ function speak(text){
     try{new Notification("ZEUS",{body:text})}catch(e){}
   }
 }
+let board={};
+function boardLine(payload){
+  const rows=(payload&&payload.rows)||[];
+  const rank={INTRADAY:0,SWING:1,ICEBERG:2,INTERDAY:3};
+  const live=rows.filter(r=>rank[r.chart]!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
+  const hit=live.find(r=>r.tradeable&&r.entry!=null);
+  if(hit){
+    const money=String(moneyLine(hit, payload.account)).split(" · ")[0];
+    return {kind:"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
+  }
+  const coming=live.find(r=>r.coming&&r.coming.side);
+  if(coming) return {kind:"INCOMING", side:coming.coming.side, text:coming.chart+" "+coming.coming.side+" into "+px(coming.coming.zone), sub:"not a trade yet"};
+  return {kind:"QUIET", text:"quiet", sub:""};
+}
+function paintBoard(){
+  const box=$("board");
+  if(!box) return;
+  box.innerHTML=PAIRS.map(p=>{
+    const item=board[p[0]]||{kind:"QUIET", text:"reading", sub:""};
+    const tone=item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"?"warn":"muted");
+    return `<div class="pairq" onclick="setPair('${p[0]}')"><b class="${tone}">${p[1]} · ${item.text}</b>${item.sub?`<span class="sub">${item.sub}</span>`:""}</div>`;
+  }).join("");
+}
 function consider(payload){
   if(!payload||!payload.ok) return;
   const name=payload.label||payload.symbol;
@@ -372,6 +402,7 @@ function consider(payload){
   });
 }
 function paint(){
+  if(data&&data.symbol){board[data.symbol]=boardLine(data);paintBoard()}
   const rows=data.rows||[];
   $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
@@ -556,7 +587,7 @@ async function watchOthers(){
   try{
     const r=await fetch("/api/v19/signals?symbol="+pair[0]+"&chart=M1");
     const j=await r.json();
-    if(r.ok&&j.ok) consider(j);
+    if(r.ok&&j.ok){ board[j.symbol]=boardLine(j); paintBoard(); consider(j); }
   }catch(e){}
 }
 setInterval(watchOthers, 4000);
