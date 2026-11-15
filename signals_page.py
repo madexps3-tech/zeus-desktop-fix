@@ -207,40 +207,51 @@ function draw(){
   const step=(plotR-plotL)/Math.max(1,rows.length);
   const zoneButton=$("zones");
   if(zoneButton){zoneButton.textContent=showZones?"ZONES ON":"ZONES OFF";zoneButton.className=showZones?"on":""}
-  if(showZones) levels.forEach(level=>{
-    const topP=level.high!=null?Number(level.high):Number(level.price);
-    const botP=level.low!=null?Number(level.low):Number(level.price);
-    const head=(level.name||"").split(" ")[0];
-    const color=LEVEL_COLOR[head]||(level.kind==="LOW"?"#67d6a3":(level.kind==="HIGH"?"#ef7f88":"#8ea3b8"));
-    if(Math.max(topP,botP)<lo||Math.min(topP,botP)>hi){
+  if(showZones){
+    const view=hi-lo;
+    const bidNow=Number((data.quote||{}).bid);
+    const bandFor=span=>Math.max(view*0.012, Math.min(view*0.04, Math.abs(span)*0.08));
+    const paintZone=(price, height, name, color, x0)=>{
+      const top=price+height/2, bot=price-height/2;
+      if(top<lo||bot>hi) return;
+      const yTop=y(Math.min(hi, top)), yBot=y(Math.max(lo, bot));
+      const boxTop=Math.min(yTop,yBot), boxH=Math.max(3, Math.abs(yBot-yTop));
+      ctx.fillStyle=color; ctx.globalAlpha=0.2;
+      ctx.fillRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
+      ctx.globalAlpha=1; ctx.strokeStyle=color;
+      ctx.strokeRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
       ctx.fillStyle=color;
-      const above=Math.min(topP,botP)>hi;
-      ctx.fillText((above?"↑ ":"↓ ")+level.name, plotL+4, above?plotT+12:plotB-4);
-      return;
-    }
-    let x0=plotL;
-    if(level.time){
-      const stamp=Date.parse(level.time);
-      if(isFinite(stamp)){
-        let idx=0;
-        for(let i=0;i<rows.length;i++){
-          const barTime=Date.parse(rows[i].time);
-          if(!isFinite(barTime)||barTime<stamp) idx=i;
-          else {idx=i; break}
+      ctx.fillText(name, x0+4, Math.max(plotT+11, boxTop-3));
+    };
+    levels.filter(level=>level.kind==="RANGE").forEach(level=>{
+      const high=Number(level.high), lowP=Number(level.low);
+      const color=LEVEL_COLOR[(level.name||"").split(" ")[0]]||"#8ea3b8";
+      const band=bandFor(high-lowP);
+      paintZone(high, band, level.name+" HIGH", color, plotL);
+      paintZone(lowP, band, level.name+" LOW", color, plotL);
+    });
+    const swings=levels.filter(level=>level.kind==="HIGH"||level.kind==="LOW");
+    swings.sort((a,b)=>Math.abs(Number(a.price)-bidNow)-Math.abs(Number(b.price)-bidNow));
+    swings.slice(0,6).forEach(level=>{
+      let x0=plotL;
+      if(level.time){
+        const stamp=Date.parse(level.time);
+        if(isFinite(stamp)){
+          let idx=0;
+          for(let i=0;i<rows.length;i++){
+            const barTime=Date.parse(rows[i].time);
+            if(!isFinite(barTime)||barTime<stamp) idx=i;
+            else {idx=i; break}
+          }
+          x0=plotL+idx*step;
         }
-        x0=plotL+idx*step;
       }
-    }
-    const yTop=y(Math.min(hi, Math.max(topP,botP)));
-    const yBot=y(Math.max(lo, Math.min(topP,botP)));
-    const boxTop=Math.min(yTop,yBot), boxH=Math.max(4, Math.abs(yBot-yTop));
-    ctx.fillStyle=color; ctx.globalAlpha=0.16;
-    ctx.fillRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
-    ctx.globalAlpha=0.85; ctx.strokeStyle=color;
-    ctx.strokeRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
-    ctx.globalAlpha=1; ctx.fillStyle=color;
-    ctx.fillText(level.name, x0+4, boxTop+12);
-  });
+      const span=Math.abs(Number(level.high)-Number(level.low));
+      const color=level.kind==="LOW"?"#67d6a3":"#ef7f88";
+      paintZone(Number(level.price), bandFor(span), level.name, color, x0);
+    });
+    ctx.globalAlpha=1;
+  }
   if(row){
     ctx.setLineDash([4,4]);
     [["#67d6a3",row.entry,"ENTRY"],["#ef7f88",row.stop,"STOP"],["#e9c66b",row.target,"TARGET "+row.r+"R"]].forEach(line=>{
