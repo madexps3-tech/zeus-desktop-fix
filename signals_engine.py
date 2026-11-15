@@ -1112,7 +1112,7 @@ def _guide(
     bid: float | None = None,
     ask: float | None = None,
 ) -> str:
-    """The 60-second book tells an open trade to hold or to bank. It does not open one."""
+    """Hold for the next target unless both clocks are against the trade."""
     if not row.get("side") or row.get("entry") is None:
         return ""
     targets = [float(price) for price in (row.get("targets") or []) if price is not None]
@@ -1123,13 +1123,24 @@ def _guide(
     side = str(row["side"])
     entry = float(row["entry"])
     stop = float(row["stop"]) if row.get("stop") is not None else entry
-    delta = (book or {}).get("delta_60s")
-    known = isinstance(delta, (int, float)) and not isinstance(delta, bool)
-    with_trade = (delta > 0) if known and side == "BUY" else ((delta < 0) if known else None)
+    book = book or {}
+
+    def _signed(name: str) -> bool | None:
+        value = book.get(name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        if side == "BUY":
+            return value > 0
+        return value < 0
+
+    with_60 = _signed("delta_60s")
+    with_5 = _signed("delta_5s")
+    known = with_60 is not None
     passed = [price for price in targets if _reached_target(side, price, bid, ask, closed)]
     remaining = [price for price in targets if price not in passed]
     at_zone = any(_touched(closed, price, side) for price in remaining or targets)
-    absorption = bool((book or {}).get("absorption")) and at_zone
+    absorption = bool(book.get("absorption")) and at_zone
+    both_against = with_60 is False and with_5 is False
     row["targets"] = [round(price, 5) for price in targets]
     row["legs"] = [
         {"price": round(price, 5), "r": _r_multiple(entry, stop, price)}
@@ -1139,6 +1150,7 @@ def _guide(
         f"T{index} {_r_multiple(entry, stop, price) or 0:.2f}R"
         for index, price in enumerate(targets, 1)
     )
+    aim = remaining[0] if remaining else targets[-1]
     if passed and not remaining:
         line = f"The last target {round(passed[-1], 5)} is reached."
     elif not known and passed and remaining:
@@ -1148,15 +1160,16 @@ def _guide(
         )
     elif not known:
         line = "No 60-second delta in this book. The targets stay. Nothing says hold or bank."
-    elif passed and remaining and with_trade and not absorption:
-        line = f"Hold the rest for {round(remaining[0], 5)}. The stop is at the entry."
-    elif (passed or at_zone) and (absorption or with_trade is False):
-        line = "Bank half. Move the stop to the entry. Do not aim further."
-    elif with_trade:
-        aim = remaining[0] if remaining else targets[-1]
-        line = f"Hold for {round(aim, 5)}."
+    elif absorption:
+        line = "Absorption at the target. Bank half. Move the stop to the entry."
+    elif both_against:
+        line = "Both the 5-second and the 60-second book are against the trade. Bank half. Move the stop to the entry."
+    elif with_60 is False and with_5 is not False:
+        line = f"The 60-second book is against the trade. The last 5 seconds are not. Hold for {round(aim, 5)}."
+    elif passed and remaining:
+        line = f"Hold the rest for {round(remaining[0], 5)}."
     else:
-        line = "60-second delta is against the trade. Bank half. Move the stop to the entry. Do not aim further."
+        line = f"Hold for {round(aim, 5)}."
     row["guide"] = line
     sentence = str(row.get("note") or "").strip()
     row["note"] = (sentence + " " + line).strip()
