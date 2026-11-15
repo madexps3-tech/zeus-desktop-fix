@@ -454,3 +454,35 @@ else:
     stage_text = stage_text.replace(old_stage, new_stage, 1).replace(old_page, new_page, 1)
     stage.write_bytes(stage_text.encode("utf-8"))
     print("Startup now shows which step it is on.", flush=True)
+
+slip_path = Path("src") / "zeus2" / "execution" / "mt5_native.py"
+slip = slip_path.read_text(encoding="utf-8")
+slip_nl = "\r\n" if "\r\n" in slip else "\n"
+old_slip = (
+    "            quote = self.quote(broker_symbol)" + slip_nl
+    + "            request.update({" + slip_nl
+    + '                "action": self.mt5.TRADE_ACTION_DEAL,' + slip_nl
+    + '                "price": quote.ask if is_buy else quote.bid,' + slip_nl
+    + '                "deviation": int(deviation_points),' + slip_nl
+    + "            })"
+)
+new_slip = (
+    "            quote = self.quote(broker_symbol)" + slip_nl
+    + "            info = self.mt5.symbol_info(broker_symbol)" + slip_nl
+    + "            point = float(getattr(info, \"point\", 0.0) or 0.0) if info is not None else 0.0" + slip_nl
+    + "            spread_points = int(round((float(quote.ask) - float(quote.bid)) / point)) if point > 0 else 0" + slip_nl
+    + "            slip = max(int(deviation_points), spread_points * 3, 100)" + slip_nl
+    + "            request.update({" + slip_nl
+    + '                "action": self.mt5.TRADE_ACTION_DEAL,' + slip_nl
+    + '                "price": quote.ask if is_buy else quote.bid,' + slip_nl
+    + '                "deviation": int(slip),' + slip_nl
+    + "            })"
+)
+if "spread_points * 3" in slip:
+    print("Market slippage already covers the spread.", flush=True)
+elif old_slip not in slip:
+    print("Could not find the market send.", flush=True)
+    raise SystemExit(1)
+else:
+    slip_path.write_text(slip.replace(old_slip, new_slip, 1), encoding="utf-8")
+    print("Market orders can move through the spread.", flush=True)

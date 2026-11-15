@@ -496,13 +496,21 @@ async function trade(chartName){
     })});
     const j=await r.json();
     const ms=Math.round((j.timings_ms&&j.timings_ms.total)||(performance.now()-started));
-    if(!r.ok||j.ok===false)throw Error((j.message||"rejected")+" · "+ms+" ms");
     const ex=j.execution||j;
-    if(ex.submitted===false){setStatus("NOT SENT · "+((ex.blockers||j.blockers||[]).join(" · ")||ex.message||"the broker did not accept")+" · "+ms+" ms", 15000);return}
+    const broker=ex.broker_result||{};
+    const reason=((ex.blockers||j.blockers||[]).filter(Boolean).join(" · "))||broker.comment||ex.message||j.message||"the broker did not accept";
+    if(!r.ok||j.ok===false||ex.submitted===false||j.submitted===false){
+      const text="NOT SENT · "+reason+" · "+ms+" ms";
+      setStatus(text, 20000);
+      alert(text);
+      return;
+    }
     fetch("/api/v19/signals/taken",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({symbol:symbol,chart:chartName,side:row.side,reason:row.reason,entry:row.entry,stop:row.stop,target:row.target,r:row.r,time:row.time})}).catch(()=>{});
-    setStatus("SENT · "+ms+" ms · the position is on the logged-in MT5 account", 15000);
+    const text="SENT · volume "+(ex.volume??"—")+" · "+(broker.comment||"check the MT5 Trade tab")+" · "+ms+" ms";
+    setStatus(text, 20000);
+    alert(text);
     load();
-  }catch(e){setStatus("NOT SENT · "+e.message, 15000)}
+  }catch(e){const text="NOT SENT · "+e.message; setStatus(text, 20000); alert(text)}
   finally{
     fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{});
   }
