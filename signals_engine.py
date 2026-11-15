@@ -1037,19 +1037,12 @@ def _choose(
         if zone is not None:
             found.append(("BREAK", side, zone))
     if not found:
-        if state == "BULLISH":
-            zone = _turn(last, zones, "BUY")
-            if zone is not None:
-                found.append(("PULLBACK", "BUY", zone))
-        elif state == "BEARISH":
-            zone = _turn(last, zones, "SELL")
-            if zone is not None:
-                found.append(("PULLBACK", "SELL", zone))
-        else:
-            for side in ("BUY", "SELL"):
-                zone = _turn(last, zones, side)
-                if zone is not None:
-                    found.append(("RANGE", side, zone))
+        for side in ("BUY", "SELL"):
+            zone = _turn(last, zones, side)
+            if zone is None:
+                continue
+            with_trend = (state == "BULLISH" and side == "BUY") or (state == "BEARISH" and side == "SELL")
+            found.append(("PULLBACK" if with_trend else "RANGE", side, zone))
     if not found:
         return None
     close = _num(last, "close")
@@ -1227,17 +1220,48 @@ def build_rows(
     inter = by_name["INTERDAY"]
     targets = [float(price) for price in (intra.get("targets") or [])]
     guide = str(intra.get("guide") or "")
-    rest = targets[1:]
-    if not intra.get("side"):
+    carrier = intra
+    opposite = intra.get("opposite") if isinstance(intra.get("opposite"), dict) else None
+    if not (opposite and opposite.get("side") and opposite.get("side") != intra.get("side")):
+        swing_opp = swing_row.get("opposite") if isinstance(swing_row.get("opposite"), dict) else None
+        if swing_opp and swing_opp.get("side") and swing_opp.get("side") != swing_row.get("side"):
+            carrier = swing_row
+            opposite = swing_opp
+            guide = str(swing_row.get("guide") or "")
+    if opposite and opposite.get("side") and opposite.get("side") != carrier.get("side"):
+        protected = "stop is at the entry" in guide
+        held_side = str(carrier.get("side"))
+        close = (
+            f"Get ready to close the open {held_side}. The stop is at the entry, so closing it is not a loss."
+            if protected
+            else f"Get ready to close the open {held_side}. The stop is not at the entry, so closing it can still lose."
+        )
+        inter.update(opposite)
+        inter["chart"] = "INTERDAY"
+        inter["market"] = state
+        inter["score_on"] = "M1"
+        inter["tradeable"] = True
+        inter["state"] = "READY"
+        inter["decision"] = "—"
+        inter["higher"] = "—"
+        inter["next_vote"] = "NONE"
+        inter["note"] = f"{close} {opposite.get('note') or ''}".strip()
+        inter["signal_note"] = str(opposite.get("note") or "")
+        inter["closes"] = held_side
+    elif not intra.get("side"):
         inter.update(_wait("INTERDAY", "No intraday trade is still open.", state))
+        inter["tradeable"] = False
     elif "Do not aim further" in guide or "against the trade" in guide:
         inter.update(_wait("INTERDAY", "Not a new order. " + guide, state))
         inter["side"] = intra.get("side")
         inter["state"] = "SHOWN"
-    elif not rest:
+        inter["tradeable"] = False
+    elif len(targets) < 2:
         inter.update(_wait("INTERDAY", "Not a new order. Nothing beyond the first zone.", state))
+        inter["tradeable"] = False
     else:
         entry = float(intra["entry"])
+        rest = targets[1:]
         listed = " · ".join(
             f"T{index + 2} {round(price, 5)} {_harvest(symbol, entry, price)}" for index, price in enumerate(rest)
         )
@@ -1262,16 +1286,15 @@ def build_rows(
             "note": f"Not a new order. {listed}. {guide}",
         })
     inter["market"] = state
-    inter["tradeable"] = False
     for row in rows:
         row["market"] = state
-        if row.get("side") and row["chart"] != "INTERDAY":
+        if row.get("side") and (row["chart"] != "INTERDAY" or row.get("tradeable")):
             _live_stop(row, bid, ask)
     return rows
 
 
 def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, list[dict[str, Any]]]) -> None:
-    """Keep a priced signal until its stop or its target. The next one waits until this one is finished."""
+    """Keep a priced signal until its stop or its target. An opposite signal stays visible beside it."""
     state = _load_state()
     active: dict[str, dict[str, Any]] = state.setdefault("active", {})
     changed = False
@@ -1281,9 +1304,35 @@ def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, li
             continue
         key = symbol + "|" + chart
         held = active.get(key)
+        fresh = dict(row) if row.get("side") and row.get("entry") is not None and row.get("tradeable") else None
         if held and held.get("reason") in MANUAL and held.get("entry") is not None:
             result, _be, mfe = _score_path(held, _bars_for(held, bars_by_chart), float(BE_MOVE.get(symbol, 0.0)))
             if result not in ("WIN", "LOSS"):
+                if fresh and fresh.get("side") != held.get("side"):
+                    clean = {k: v for k, v in fresh.items() if k != "opposite"}
+                    previous = held.get("opposite") if isinstance(held.get("opposite"), dict) else None
+                    same = (
+                        isinstance(previous, dict)
+                        and previous.get("side") == clean.get("side")
+                        and previous.get("entry") == clean.get("entry")
+                        and str(previous.get("time")) == str(clean.get("time"))
+                    )
+                    if not same:
+                        held["opposite"] = clean
+                        changed = True
+                stored = held.get("opposite") if isinstance(held.get("opposite"), dict) else None
+                if stored and stored.get("side") != held.get("side") and stored.get("entry") is not None:
+                    opp_result, _, opp_mfe = _score_path(
+                        stored, _bars_for(stored, bars_by_chart), float(BE_MOVE.get(symbol, 0.0))
+                    )
+                    if opp_result in ("WIN", "LOSS"):
+                        held.pop("opposite", None)
+                        changed = True
+                    else:
+                        stored["mfe"] = opp_mfe
+                elif stored:
+                    held.pop("opposite", None)
+                    changed = True
                 row.clear()
                 row.update(held)
                 row["mfe"] = mfe
@@ -1318,17 +1367,17 @@ def liquidity(levels: dict[str, Any], bars_by_chart: dict[str, list[dict[str, An
         label = "PREVIOUS " + name if name == previous else name
         pools.append({"name": label + " HIGH", "price": float(level["high"]), "kind": "HIGH"})
         pools.append({"name": label + " LOW", "price": float(level["low"]), "kind": "LOW"})
-    for chart in ("H4", "D1"):
+    for chart, count in (("M15", 6), ("H1", 4), ("H4", 4), ("D1", 2)):
         bars = bars_by_chart.get(chart) or []
         if len(bars) < 20:
             continue
         points = swings(bars[:-1])
-        highs = [point for point in points if point["kind"] == "HIGH"]
-        lows = [point for point in points if point["kind"] == "LOW"]
-        if highs:
-            pools.append({"name": chart + " SWING HIGH", "price": float(highs[-1]["price"]), "kind": "HIGH"})
-        if lows:
-            pools.append({"name": chart + " SWING LOW", "price": float(lows[-1]["price"]), "kind": "LOW"})
+        highs = [point for point in points if point["kind"] == "HIGH"][-count:]
+        lows = [point for point in points if point["kind"] == "LOW"][-count:]
+        for point in highs:
+            pools.append({"name": chart + " SWING HIGH", "price": float(point["price"]), "kind": "HIGH"})
+        for point in lows:
+            pools.append({"name": chart + " SWING LOW", "price": float(point["price"]), "kind": "LOW"})
     return pools
 
 

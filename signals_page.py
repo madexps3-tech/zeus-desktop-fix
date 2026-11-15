@@ -82,6 +82,7 @@ tr.pick{outline:1px solid var(--warn)}
   <button onclick="zoom(-20)">ZOOM IN</button>
   <button onclick="zoom(20)">ZOOM OUT</button>
   <button onclick="fit()">FIT</button>
+  <button id="zones" onclick="toggleZones()">ZONES ON</button>
   <label>RISK % <input id="risk" value="2" style="width:52px"></label>
   <span class="muted">A signal is a confirmed 1-minute candle. The stop must clear 10 times the spread. TRADE sends one market order to the logged-in MT5 account.</span>
 </div>
@@ -114,6 +115,7 @@ let symbol=localStorage.getItem("sig_symbol")||"XAUUSD";
 let chart=localStorage.getItem("sig_chart")||"M5";
 let data=null, visible=80, pan=0, drag=null, selected=chart, pickedRow="INTRADAY";
 let busy=false, timer=null, control=null, holdStatusUntil=0;
+let showZones=localStorage.getItem("sig_zones")!=="0";
 function $(id){return document.getElementById(id)}
 function setStatus(text, holdMs){$("status").textContent=text; holdStatusUntil=Date.now()+(holdMs||0)}
 function buttons(){
@@ -124,6 +126,13 @@ function setPair(s){symbol=s;localStorage.setItem("sig_symbol",s);load()}
 function setChart(c){chart=c;selected=c;localStorage.setItem("sig_chart",c);load()}
 function zoom(d){visible=Math.max(30,Math.min(240,visible+d));draw()}
 function fit(){visible=Math.max(30,(data&&data.candles||[]).length||80);pan=0;draw()}
+function toggleZones(){
+  showZones=!showZones;
+  localStorage.setItem("sig_zones", showZones?"1":"0");
+  const button=$("zones");
+  if(button){button.textContent=showZones?"ZONES ON":"ZONES OFF";button.className=showZones?"on":""}
+  draw();
+}
 async function load(){
   if(busy||document.visibilityState==="hidden")return;
   busy=true;
@@ -187,7 +196,9 @@ function draw(){
   const pad=(hi-lo)*0.08||span*0.08; lo-=pad; hi+=pad;
   const y=p=>plotT+((hi-p)/(hi-lo))*(plotB-plotT);
   const step=(plotR-plotL)/Math.max(1,rows.length);
-  levels.forEach(level=>{
+  const zoneButton=$("zones");
+  if(zoneButton){zoneButton.textContent=showZones?"ZONES ON":"ZONES OFF";zoneButton.className=showZones?"on":""}
+  if(showZones) levels.forEach(level=>{
     const price=level.price;
     const taken=mark.taken&&mark.taken.name===level.name;
     const next=mark.next&&mark.next.name===level.name;
@@ -302,23 +313,43 @@ function paint(){
   const market=data.market||(row&&row.market)||"";
   if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+"\n":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+"\n"+newsLine;
 }
+function isProtected(position){
+  const sl=Number(position.stop_loss), entry=Number(position.price_open);
+  if(!(sl>0)||!(entry>0)) return false;
+  return position.side==="SELL"?sl<=entry:sl>=entry;
+}
+async function closeTicket(ticket){
+  const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({owner_approved:true,fast_ack:true,ticket:ticket,action:"CLOSE_POSITION",reason:"SIGNALS PAGE"})});
+  const j=await r.json();
+  if(!r.ok||!((j.management||{}).ok)) throw Error(((j.management||{}).reason)||j.message||"the close was rejected");
+}
 async function trade(chartName){
   const row=(data.rows||[]).find(r=>r.chart===chartName&&r.tradeable);
   if(!row){setStatus("NOT SENT · this row has no order. A stop that price has already passed stays on the row with no button.", 8000);return}
-  const open=(data.positions||[])[0];
-  if(open){setStatus("NOT SENT · this pair already has a "+open.side+". One trade at a time.", 8000);return}
   const quote=(data&&data.quote)||{};
   const bid=Number(quote.bid), ask=Number(quote.ask);
   if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){setStatus("NOT SENT · a sell stop must be above the live ask, and the target below the bid. Price has already gone through this one.", 12000);return}
   if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){setStatus("NOT SENT · a buy stop must be below the live bid, and the target above the ask. Price has already gone through this one.", 12000);return}
-  const msg="Send a MARKET "+row.side+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\n"+row.note+"\nThis goes to the MT5 account that is logged in.";
-  if(!confirm(msg))return;
   const risk=Number($("risk").value);
   if(!isFinite(risk)||risk<=0){setStatus("NOT SENT · set the risk percent", 8000);return}
+  const opens=data.positions||[];
+  const same=opens.filter(p=>p.side===row.side);
+  const opposite=opens.filter(p=>p.side!==row.side);
+  if(same.length){setStatus("NOT SENT · a "+row.side+" is already open on this pair. This button will not add another.", 12000);return}
+  let msg="Send a MARKET "+row.side+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\n"+row.note+"\nThis goes to the MT5 account that is logged in.";
+  if(opposite.length){
+    const protected=opposite.every(isProtected);
+    msg=(protected
+      ?"The open "+opposite[0].side+" is protected. Closing it is not a loss."
+      :"The open "+opposite[0].side+" is not protected. Closing it can still lose.")
+      +"\nClose it, then send this "+row.side+"?\nStop "+row.stop+"\nTarget "+row.target;
+  }
+  if(!confirm(msg))return;
   setStatus("SENDING...", 20000);
   const started=performance.now();
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
+    for(const position of opposite) await closeTicket(position.ticket);
     const r=await fetch("/api/v19/owner-order/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
       owner_approved:true,symbol:symbol,timeframe:row.chart==="SWING"?"H4":"M1",order_type:row.side==="BUY"?"MARKET_BUY":"MARKET_SELL",
       entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:risk,horizon_lane:"INTRADAY",
@@ -328,7 +359,7 @@ async function trade(chartName){
     const ms=Math.round((j.timings_ms&&j.timings_ms.total)||(performance.now()-started));
     if(!r.ok||j.ok===false)throw Error((j.message||"rejected")+" · "+ms+" ms");
     const ex=j.execution||j;
-    if(ex.submitted===false){setStatus("NOT SENT · "+((ex.blockers||[]).join(" · ")||ex.message||"the broker did not accept")+" · "+ms+" ms", 15000);return}
+    if(ex.submitted===false){setStatus("NOT SENT · "+((ex.blockers||j.blockers||[]).join(" · ")||ex.message||"the broker did not accept")+" · "+ms+" ms", 15000);return}
     fetch("/api/v19/signals/taken",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({symbol:symbol,chart:chartName,side:row.side,reason:row.reason,entry:row.entry,stop:row.stop,target:row.target,r:row.r,time:row.time})}).catch(()=>{});
     setStatus("SENT · "+ms+" ms · the position is on the logged-in MT5 account", 15000);
     load();
@@ -652,6 +683,39 @@ def _news(symbol: str) -> dict[str, Any]:
     return {"line": line, "state": snap.get("state")}
 
 
+def _broker_protected(position: dict[str, Any]) -> bool:
+    try:
+        stop = float(position.get("stop_loss") or 0)
+        entry = float(position.get("price_open") or 0)
+    except (TypeError, ValueError):
+        return False
+    if stop <= 0 or entry <= 0:
+        return False
+    if str(position.get("side")) == "SELL":
+        return stop <= entry
+    return stop >= entry
+
+
+def _broker_protection(rows: list[dict[str, Any]], positions: list[dict[str, Any]]) -> None:
+    """The broker stop, not the signal note, decides whether closing the open trade loses."""
+    by_name = {row.get("chart"): row for row in rows}
+    inter = by_name.get("INTERDAY") or {}
+    held_side = str(inter.get("closes") or "")
+    if held_side not in {"BUY", "SELL"}:
+        return
+    matched = [row for row in positions if str(row.get("side")) == held_side]
+    if not matched:
+        return
+    protected = all(_broker_protected(row) for row in matched)
+    close = (
+        f"Get ready to close the open {held_side}. The stop is at the entry, so closing it is not a loss."
+        if protected
+        else f"Get ready to close the open {held_side}. The stop is not at the entry, so closing it can still lose."
+    )
+    detail = str(inter.get("signal_note") or "")
+    inter["note"] = f"{close} {detail}".strip()
+
+
 def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
     core = host.runtime.projection.market_data
     try:
@@ -684,6 +748,8 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
     levels = session_levels(bars_by_chart.get("M15") or bars_by_chart.get("M5") or [])
     pools = liquidity(levels, bars_by_chart)
     rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)
+    positions = _positions(host, symbol)
+    _broker_protection(rows, positions)
     try:
         research = record(symbol, rows, bars_by_chart)
     except Exception:
@@ -719,7 +785,7 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
             "stepping": stepping,
             "note": str(book.get("reason") or ""),
         },
-        "positions": _positions(host, symbol),
+        "positions": positions,
         "research": research,
         "feed": _feed(quote, ((bars_by_chart.get(chart) or [None])[-1] or {}).get("time", ""), chart),
         "news": _news(symbol),
