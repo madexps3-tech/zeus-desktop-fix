@@ -486,3 +486,13 @@ elif old_slip not in slip:
 else:
     slip_path.write_text(slip.replace(old_slip, new_slip, 1), encoding="utf-8")
     print("Market orders can move through the spread.", flush=True)
+
+slip = slip_path.read_text(encoding="utf-8")
+if "raw=None," in slip and "raw=raw," not in slip:
+    print("Broker reply is already plain text.", flush=True)
+elif "raw=raw," not in slip:
+    print("Could not find the broker reply.", flush=True)
+    raise SystemExit(1)
+else:
+    slip_path.write_text(slip.replace("raw=raw,", "raw=None,", 1), encoding="utf-8")
+    print("Broker reply no longer jams the order result.", flush=True)
