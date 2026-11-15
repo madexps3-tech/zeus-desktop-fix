@@ -1466,10 +1466,6 @@ def _score_path(row: dict[str, Any], bars: list[dict[str, Any]], be_move: float)
             if not be_result:
                 be_result = "WIN"
             break
-    if not result and len(later) >= 40 and len(targets) <= 1:
-        result = "EXPIRED"
-        if not be_result:
-            be_result = "EXPIRED"
     return result, be_result, round(mfe, 5)
 
 
