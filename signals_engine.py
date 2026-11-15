@@ -1446,19 +1446,33 @@ def liquidity(levels: dict[str, Any], bars_by_chart: dict[str, list[dict[str, An
     for level in levels.get("levels") or []:
         name = str(level.get("name"))
         label = "PREVIOUS " + name if name == previous else name
-        pools.append({"name": label + " HIGH", "price": float(level["high"]), "kind": "HIGH"})
-        pools.append({"name": label + " LOW", "price": float(level["low"]), "kind": "LOW"})
+        high = float(level["high"])
+        low = float(level["low"])
+        pools.append({
+            "name": label,
+            "price": (high + low) / 2.0,
+            "high": high,
+            "low": low,
+            "kind": "RANGE",
+        })
     for chart, count in (("M15", 6), ("H1", 4), ("H4", 4), ("D1", 2)):
         bars = bars_by_chart.get(chart) or []
         if len(bars) < 20:
             continue
-        points = swings(bars[:-1])
+        closed = bars[:-1]
+        points = swings(closed)
         highs = [point for point in points if point["kind"] == "HIGH"][-count:]
         lows = [point for point in points if point["kind"] == "LOW"][-count:]
-        for point in highs:
-            pools.append({"name": chart + " SWING HIGH", "price": float(point["price"]), "kind": "HIGH"})
-        for point in lows:
-            pools.append({"name": chart + " SWING LOW", "price": float(point["price"]), "kind": "LOW"})
+        for point in highs + lows:
+            bar = closed[int(point["index"])]
+            pools.append({
+                "name": chart + " SWING " + point["kind"],
+                "price": float(point["price"]),
+                "high": _num(bar, "high"),
+                "low": _num(bar, "low"),
+                "kind": point["kind"],
+                "time": point.get("time"),
+            })
     return pools
 
 

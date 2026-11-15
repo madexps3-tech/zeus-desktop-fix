@@ -193,26 +193,44 @@ function draw(){
     lo=Math.min(lo,row.stop,row.target,row.entry);hi=Math.max(hi,row.stop,row.target,row.entry)
   }
   const levels=(data.pools)||[];
-  const mark=(data.reaction)||{};
   const pad=(hi-lo)*0.08||span*0.08; lo-=pad; hi+=pad;
   const y=p=>plotT+((hi-p)/(hi-lo))*(plotB-plotT);
   const step=(plotR-plotL)/Math.max(1,rows.length);
   const zoneButton=$("zones");
   if(zoneButton){zoneButton.textContent=showZones?"ZONES ON":"ZONES OFF";zoneButton.className=showZones?"on":""}
   if(showZones) levels.forEach(level=>{
-    const price=level.price;
-    const taken=mark.taken&&mark.taken.name===level.name;
-    const next=mark.next&&mark.next.name===level.name;
-    const color=taken?"#e9c66b":(next?"#67d6a3":(LEVEL_COLOR[(level.name.split(" ")[0])]||"#8ea3b8"));
-    if(price<lo||price>hi){
+    const topP=level.high!=null?Number(level.high):Number(level.price);
+    const botP=level.low!=null?Number(level.low):Number(level.price);
+    const head=(level.name||"").split(" ")[0];
+    const color=LEVEL_COLOR[head]||(level.kind==="LOW"?"#67d6a3":(level.kind==="HIGH"?"#ef7f88":"#8ea3b8"));
+    if(Math.max(topP,botP)<lo||Math.min(topP,botP)>hi){
       ctx.fillStyle=color;
-      ctx.fillText((price>hi?"↑ ":"↓ ")+level.name+" "+price, plotL+4, price>hi?plotT+12:plotB-4);
+      const above=Math.min(topP,botP)>hi;
+      ctx.fillText((above?"↑ ":"↓ ")+level.name, plotL+4, above?plotT+12:plotB-4);
       return;
     }
-    ctx.strokeStyle=color; ctx.globalAlpha=0.85; ctx.setLineDash(level.name.indexOf("YESTERDAY")>=0?[2,4]:[6,4]);
-    ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
-    ctx.setLineDash([]); ctx.globalAlpha=1; ctx.fillStyle=color;
-    ctx.fillText((taken?"TAKEN ":(next?"NEXT ":""))+level.name, plotL+4, y(price)-3);
+    let x0=plotL;
+    if(level.time){
+      const stamp=Date.parse(level.time);
+      if(isFinite(stamp)){
+        let idx=0;
+        for(let i=0;i<rows.length;i++){
+          const barTime=Date.parse(rows[i].time);
+          if(!isFinite(barTime)||barTime<stamp) idx=i;
+          else {idx=i; break}
+        }
+        x0=plotL+idx*step;
+      }
+    }
+    const yTop=y(Math.min(hi, Math.max(topP,botP)));
+    const yBot=y(Math.max(lo, Math.min(topP,botP)));
+    const boxTop=Math.min(yTop,yBot), boxH=Math.max(4, Math.abs(yBot-yTop));
+    ctx.fillStyle=color; ctx.globalAlpha=0.16;
+    ctx.fillRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
+    ctx.globalAlpha=0.85; ctx.strokeStyle=color;
+    ctx.strokeRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
+    ctx.globalAlpha=1; ctx.fillStyle=color;
+    ctx.fillText(level.name, x0+4, boxTop+12);
   });
   if(row){
     ctx.setLineDash([4,4]);
@@ -295,10 +313,9 @@ function moneyLine(row, account){
     const mult=round2(reward/riskDist);
     const pct=(isFinite(risk)&&risk>0)?round2(risk*mult):null;
     const cash=(pct!=null&&isFinite(balance)&&balance>0)?Math.round(balance*pct/100):null;
-    const ratio=roundDist(reward)+"/"+roundDist(riskDist)+" = "+mult.toFixed(2)+"R";
-    const accountText=pct==null?"":" · "+risk+"% x "+mult.toFixed(2)+" = "+pct.toFixed(2)+"% of the account";
-    const cashText=cash==null?"":" · $"+cash;
-    return "T"+(i+1)+" "+ratio+accountText+cashText;
+    const ratio=mult.toFixed(2)+"R";
+    const cashText=cash==null?"":" $"+cash;
+    return "T"+(i+1)+" "+ratio+cashText;
   }).join(" · ");
 }
 function seenBag(){
@@ -391,7 +408,7 @@ function paint(){
   const feed=data.feed||{};
   const newsLine=news.line||"NO CALENDAR";
   const market=data.market||(row&&row.market)||"";
-  const sized=row&&row.entry!=null?("R is the distance to the target divided by the distance to the stop. The account percent is the risk box times that R.\n"+moneyLine(row)):"";
+  const sized=row&&row.entry!=null?moneyLine(row):"";
   if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+"\n":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+(sized?"\n"+sized:"")+"\n"+newsLine;
 }
 function isProtected(position){
