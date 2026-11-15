@@ -83,7 +83,7 @@ tr.pick{outline:1px solid var(--warn)}
   <button onclick="zoom(20)">ZOOM OUT</button>
   <button onclick="fit()">FIT</button>
   <button id="zones" onclick="toggleZones()">ZONES ON</button>
-  <label>RISK % <input id="risk" value="2" style="width:52px"></label>
+  <label>RISK % <input id="risk" value="2" style="width:52px" oninput="if(data)paint()"></label>
   <span class="muted">A signal is a confirmed 1-minute candle. The stop must clear 10 times the spread. TRADE sends one market order to the logged-in MT5 account.</span>
 </div>
 <main>
@@ -96,6 +96,7 @@ tr.pick{outline:1px solid var(--warn)}
     </div>
     <canvas id="cv" width="1100" height="520"></canvas>
     <div id="status" class="muted"></div>
+    <div id="alerts" class="muted"></div>
     <table id="grid"></table>
     <div id="research" class="muted" style="margin-top:8px"></div>
   </section>
@@ -144,7 +145,7 @@ async function load(){
     const j=await r.json();
     if(!r.ok||!j.ok)throw Error(j.message||("HTTP "+r.status));
     data=j; $("clock").textContent=j.server_time||"";
-    draw(); paint();
+    draw(); paint(); consider(j);
   }catch(e){
     if(e.name!=="AbortError")$("status").textContent="CHART ERROR · "+e.message;
   }finally{busy=false}
@@ -273,14 +274,82 @@ function researchLine(title, book){
   });
   return bits.length?title+" · "+bits.join(" · "):title+" · none yet";
 }
+function moneyLine(row, account){
+  if(!row||row.entry==null||row.stop==null) return row&&row.harvest||"—";
+  const entry=Number(row.entry), stop=Number(row.risk_stop!=null?row.risk_stop:row.stop);
+  const riskDist=Math.abs(entry-stop);
+  const risk=Number($("risk").value);
+  const acct=account||(data&&data.account)||{};
+  const balance=Number(acct.equity||acct.balance);
+  const targets=(row.targets&&row.targets.length)?row.targets:(row.target!=null?[row.target]:[]);
+  if(!(riskDist>0)||!targets.length) return row.harvest||"—";
+  return targets.map((price,i)=>{
+    const mult=Math.abs(Number(price)-entry)/riskDist;
+    const pct=(isFinite(risk)&&risk>0)?risk*mult:null;
+    const cash=(pct!=null&&isFinite(balance)&&balance>0)?Math.round(balance*pct/100):null;
+    return "T"+(i+1)+" "+mult.toFixed(2)+"R"+(pct==null?"":" · "+pct.toFixed(1)+"%")+(cash==null?"":" · $"+cash);
+  }).join(" · ");
+}
+function seenBag(){
+  try{return JSON.parse(sessionStorage.getItem("sig_seen_alerts")||"{}")}catch(e){return {}}
+}
+function remember(key){
+  const bag=seenBag();
+  bag[key]=Date.now();
+  const keys=Object.keys(bag);
+  if(keys.length>200) delete bag[keys[0]];
+  sessionStorage.setItem("sig_seen_alerts", JSON.stringify(bag));
+}
+function speak(text){
+  const box=$("alerts");
+  const line=new Date().toISOString().slice(11,19)+" "+text;
+  const prior=(box.textContent||"").split("\n").filter(Boolean);
+  box.textContent=[line].concat(prior).slice(0,8).join("\n");
+  if(window.Notification&&Notification.permission==="granted"){
+    try{new Notification("ZEUS",{body:text})}catch(e){}
+  }
+}
+function consider(payload){
+  if(!payload||!payload.ok) return;
+  const name=payload.label||payload.symbol;
+  const bag=seenBag();
+  (payload.rows||[]).forEach(row=>{
+    const coming=row.coming;
+    if(coming&&coming.side){
+      const same=(payload.rows||[]).some(other=>other.side===coming.side&&other.entry!=null&&Math.abs(Number(other.zone)-Number(coming.zone))<1e-6);
+      const key="C|"+payload.symbol+"|"+row.chart+"|"+coming.side+"|"+coming.zone+"|"+coming.time;
+      if(!same&&!bag[key]){
+        remember(key);
+        speak(name+" "+row.chart+" "+coming.side+" coming. "+coming.text);
+      }
+    }
+    let announced=false;
+    if(row.tradeable&&row.entry!=null){
+      const key="R|"+payload.symbol+"|"+row.chart+"|"+row.side+"|"+row.entry+"|"+row.time;
+      if(!bag[key]){
+        remember(key);
+        announced=true;
+        speak(name+" "+row.chart+" "+row.side+" confirmed. Entry "+row.entry+" stop "+row.stop+" next "+((row.targets&&row.targets[0])||row.target)+". "+moneyLine(row, payload.account));
+      }
+    }
+    if(row.guide&&!announced&&!(row.chart==="INTERDAY"&&!row.tradeable)){
+      const key="G|"+payload.symbol+"|"+row.chart+"|"+row.guide;
+      if(!bag[key]){
+        remember(key);
+        speak(name+" "+row.chart+" "+(row.side||"")+". "+row.guide);
+      }
+    }
+  });
+}
 function paint(){
   const rows=data.rows||[];
   $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
       const side=r.side?`<span class="${r.side==="BUY"?"good":"bad"}">${r.side}</span>`:"—";
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
+      const harvest=moneyLine(r);
       const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}')">TRADE</button>`:"";
-      return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${r.harvest||"—"}</td><td>${r.note||r.reason||"—"}</td><td>${button}</td></tr>`;
+      return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${harvest}</td><td>${r.note||r.reason||"—"}</td><td>${button}</td></tr>`;
     }).join("");
   const f=data.flow||{}, ladder=data.ladder||{};
   $("flow").innerHTML=`<div class="muted">ORDER FLOW · THIS PAIR</div>
@@ -311,7 +380,8 @@ function paint(){
   const feed=data.feed||{};
   const newsLine=news.line||"NO CALENDAR";
   const market=data.market||(row&&row.market)||"";
-  if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+"\n":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+"\n"+newsLine;
+  const sized=row&&row.entry!=null?moneyLine(row):"";
+  if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+"\n":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+(sized?"\n"+sized:"")+"\n"+newsLine;
 }
 function isProtected(position){
   const sl=Number(position.stop_loss), entry=Number(position.price_open);
@@ -450,6 +520,20 @@ async function fastQuote(){
   }catch(e){}
 }
 setInterval(fastQuote,100);
+let watchAt=0;
+async function watchOthers(){
+  if(document.visibilityState==="hidden"||busy) return;
+  const pair=PAIRS[watchAt%PAIRS.length];
+  watchAt++;
+  if(pair[0]===symbol){ if(data) consider(data); return; }
+  try{
+    const r=await fetch("/api/v19/signals?symbol="+pair[0]+"&chart=M1");
+    const j=await r.json();
+    if(r.ok&&j.ok) consider(j);
+  }catch(e){}
+}
+setInterval(watchOthers, 4000);
+if(window.Notification&&Notification.permission==="default") Notification.requestPermission().catch(()=>{});
 </script></body></html>"""
 
 
@@ -683,6 +767,23 @@ def _news(symbol: str) -> dict[str, Any]:
     return {"line": line, "state": snap.get("state")}
 
 
+def _account(host: Any) -> dict[str, Any]:
+    """The logged-in MT5 balance. The risk box turns that into a target amount."""
+    try:
+        truth = host.runtime.core.broker_truth.get(host.runtime.worker.profile_id)
+    except Exception:
+        return {}
+    account = getattr(truth, "account", None)
+    if account is None:
+        return {}
+    balance = getattr(account, "balance", None)
+    equity = getattr(account, "equity", None)
+    return {
+        "balance": None if balance is None else float(balance),
+        "equity": None if equity is None else float(equity),
+    }
+
+
 def _broker_protected(position: dict[str, Any]) -> bool:
     try:
         stop = float(position.get("stop_loss") or 0)
@@ -786,6 +887,7 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
             "note": str(book.get("reason") or ""),
         },
         "positions": positions,
+        "account": _account(host),
         "research": research,
         "feed": _feed(quote, ((bars_by_chart.get(chart) or [None])[-1] or {}).get("time", ""), chart),
         "news": _news(symbol),

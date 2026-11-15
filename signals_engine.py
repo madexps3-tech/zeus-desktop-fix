@@ -1088,7 +1088,30 @@ def _touched(closed: list[dict[str, Any]], level: float, side: str) -> bool:
     return _num(last, "low") <= level
 
 
-def _guide(row: dict[str, Any], book: dict[str, Any] | None, closed: list[dict[str, Any]], symbol: str) -> str:
+def _reached_target(side: str, price: float, bid: float | None, ask: float | None, closed: list[dict[str, Any]]) -> bool:
+    """The bid through a sell target counts. So does the ask through a buy target. Two closes count as well."""
+    if side == "SELL" and isinstance(bid, (int, float)) and not isinstance(bid, bool) and float(bid) <= price:
+        return True
+    if side == "BUY" and isinstance(ask, (int, float)) and not isinstance(ask, bool) and float(ask) >= price:
+        return True
+    return _two_closes(closed, price, side)
+
+
+def _r_multiple(entry: float, stop: float, price: float) -> float | None:
+    risk = abs(float(entry) - float(stop))
+    if risk <= 0:
+        return None
+    return round(abs(float(price) - float(entry)) / risk, 2)
+
+
+def _guide(
+    row: dict[str, Any],
+    book: dict[str, Any] | None,
+    closed: list[dict[str, Any]],
+    symbol: str,
+    bid: float | None = None,
+    ask: float | None = None,
+) -> str:
     """The 60-second book tells an open trade to hold or to bank. It does not open one."""
     if not row.get("side") or row.get("entry") is None:
         return ""
@@ -1099,23 +1122,36 @@ def _guide(row: dict[str, Any], book: dict[str, Any] | None, closed: list[dict[s
         return ""
     side = str(row["side"])
     entry = float(row["entry"])
+    stop = float(row["stop"]) if row.get("stop") is not None else entry
     delta = (book or {}).get("delta_60s")
     known = isinstance(delta, (int, float)) and not isinstance(delta, bool)
     with_trade = (delta > 0) if known and side == "BUY" else ((delta < 0) if known else None)
-    passed = [price for price in targets if _two_closes(closed, price, side)]
+    passed = [price for price in targets if _reached_target(side, price, bid, ask, closed)]
     remaining = [price for price in targets if price not in passed]
-    at_zone = any(_touched(closed, price, side) for price in targets)
+    at_zone = any(_touched(closed, price, side) for price in remaining or targets)
     absorption = bool((book or {}).get("absorption")) and at_zone
     listed = " · ".join(
-        f"T{index} {round(price, 5)} {_harvest(symbol, entry, price)}" for index, price in enumerate(targets, 1)
+        f"T{index} {round(price, 5)} {_r_multiple(entry, stop, price) or 0:.2f}R"
+        for index, price in enumerate(targets, 1)
     )
     row["targets"] = [round(price, 5) for price in targets]
+    row["legs"] = [
+        {"price": round(price, 5), "r": _r_multiple(entry, stop, price)}
+        for price in targets
+    ]
     row["harvest"] = listed
-    if not known:
+    if passed and not remaining:
+        line = f"The last target {round(passed[-1], 5)} is reached."
+    elif not known and passed and remaining:
+        line = (
+            f"{round(passed[-1], 5)} is reached. No 60-second delta in this book. "
+            f"The next target is {round(remaining[0], 5)}. Nothing says hold or bank."
+        )
+    elif not known:
         line = "No 60-second delta in this book. The targets stay. Nothing says hold or bank."
     elif passed and remaining and with_trade and not absorption:
         line = f"Hold the rest for {round(remaining[0], 5)}. The stop is at the entry."
-    elif at_zone and (absorption or with_trade is False):
+    elif (passed or at_zone) and (absorption or with_trade is False):
         line = "Bank half. Move the stop to the entry. Do not aim further."
     elif with_trade:
         aim = remaining[0] if remaining else targets[-1]
@@ -1125,6 +1161,41 @@ def _guide(row: dict[str, Any], book: dict[str, Any] | None, closed: list[dict[s
     row["guide"] = line
     row["note"] = f"{row.get('reason') or ''} {side}. {listed}. {line}".strip()
     return line
+
+
+def _coming(live: dict[str, Any] | None, zones: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The live candle is in a zone. That is not an order until the candle closes."""
+    if not live or not zones:
+        return None
+    low = _num(live, "low")
+    high = _num(live, "high")
+    close = _num(live, "close")
+    open_ = _num(live, "open")
+    hits: list[tuple[float, str, dict[str, Any], bool]] = []
+    for zone in zones:
+        price = float(zone["price"])
+        if zone.get("kind") == "LOW" and low <= price:
+            hits.append((abs(price - close), "BUY", zone, close > price and close >= open_))
+        if zone.get("kind") == "HIGH" and high >= price:
+            hits.append((abs(price - close), "SELL", zone, close < price and close <= open_))
+    if not hits:
+        return None
+    _distance, side, zone, back = min(hits, key=lambda item: item[0])
+    price = round(float(zone["price"]), 5)
+    if back:
+        text = f"The 1-minute candle has closed back out of {price}. It is a trade when that candle finishes."
+        state = "CLOSING BACK"
+    else:
+        text = f"Price is trading into {price}. Not a trade until the 1-minute candle closes back out."
+        state = "COMING"
+    return {
+        "side": side,
+        "zone": price,
+        "name": zone.get("name"),
+        "state": state,
+        "time": _time(live),
+        "text": text,
+    }
 
 
 def build_rows(
@@ -1213,10 +1284,10 @@ def build_rows(
     by_name = {row["chart"]: row for row in rows}
     intra = by_name.get("INTRADAY") or {}
     if intra.get("side"):
-        _guide(intra, book, closed, symbol)
+        _guide(intra, book, closed, symbol, bid, ask)
     swing_row = by_name.get("SWING") or {}
     if swing_row.get("side"):
-        _guide(swing_row, book, closed, symbol)
+        _guide(swing_row, book, closed, symbol, bid, ask)
     inter = by_name["INTERDAY"]
     targets = [float(price) for price in (intra.get("targets") or [])]
     guide = str(intra.get("guide") or "")
@@ -1261,9 +1332,13 @@ def build_rows(
         inter["tradeable"] = False
     else:
         entry = float(intra["entry"])
+        original = float(intra["stop"])
+        risk = abs(entry - original)
         rest = targets[1:]
         listed = " · ".join(
-            f"T{index + 2} {round(price, 5)} {_harvest(symbol, entry, price)}" for index, price in enumerate(rest)
+            f"T{index + 2} {round(price, 5)} {abs(price - entry) / risk:.2f}R"
+            if risk > 0 else f"T{index + 2} {round(price, 5)}"
+            for index, price in enumerate(rest)
         )
         inter.update({
             "chart": "INTERDAY",
@@ -1271,6 +1346,7 @@ def build_rows(
             "reason": "RUNNER",
             "entry": entry,
             "stop": entry,
+            "risk_stop": original,
             "target": rest[0],
             "targets": [round(price, 5) for price in rest],
             "r": None,
@@ -1286,8 +1362,13 @@ def build_rows(
             "note": f"Not a new order. {listed}. {guide}",
         })
     inter["market"] = state
+    live = m1[-1] if m1 else None
     for row in rows:
         row["market"] = state
+        if row["chart"] == "INTRADAY":
+            row["coming"] = _coming(live, intraday_zones)
+        elif row["chart"] == "SWING":
+            row["coming"] = _coming(live, swing_zones)
         if row.get("side") and (row["chart"] != "INTERDAY" or row.get("tradeable")):
             _live_stop(row, bid, ask)
     return rows
