@@ -125,7 +125,8 @@ const LEVEL_COLOR={ASIA:"#7aa2d6",LONDON:"#e9c66b",NEW_YORK:"#67d6a3",YESTERDAY:
 let symbol=localStorage.getItem("sig_symbol")||"XAUUSD";
 let chart=localStorage.getItem("sig_chart")||"M5";
 let data=null, visible=80, pan=0, drag=null, selected=chart, pickedRow="INTRADAY";
-let busy=false, timer=null, control=null, holdStatusUntil=0;
+let busy=false, timer=null, control=null, holdStatusUntil=0, loadId=0;
+const saved={};
 let showZones=localStorage.getItem("sig_zones")!=="0";
 function $(id){return document.getElementById(id)}
 function setStatus(text, holdMs){$("status").textContent=text; holdStatusUntil=Date.now()+(holdMs||0)}
@@ -133,8 +134,19 @@ function buttons(){
   $("pairs").innerHTML=PAIRS.map(p=>`<button class="${p[0]===symbol?"on":""}" onclick="setPair('${p[0]}')">${p[1]}</button>`).join("");
   $("charts").innerHTML=CHARTS.map(c=>`<button class="${c===chart?"on":""}" onclick="setChart('${c}')">${c}</button>`).join("");
 }
-function setPair(s){symbol=s;localStorage.setItem("sig_symbol",s);load()}
-function setChart(c){chart=c;selected=c;localStorage.setItem("sig_chart",c);load()}
+function remember(j){ if(j&&j.symbol)saved[j.symbol+"|"+(j.chart||chart)]=j; }
+function setPair(s){
+  symbol=s; localStorage.setItem("sig_symbol",s); pan=0;
+  const kept=saved[s+"|"+chart];
+  if(kept){ data=kept; draw(); paint(); }
+  load(true);
+}
+function setChart(c){
+  chart=c; selected=c; localStorage.setItem("sig_chart",c); pan=0;
+  const kept=saved[symbol+"|"+c];
+  if(kept){ data=kept; draw(); paint(); }
+  load(true);
+}
 function zoom(d){visible=Math.max(30,Math.min(240,visible+d));draw()}
 function fit(){visible=Math.max(30,(data&&data.candles||[]).length||80);pan=0;draw()}
 function toggleZones(){
@@ -144,21 +156,25 @@ function toggleZones(){
   if(button){button.textContent=showZones?"ZONES ON":"ZONES OFF";button.className=showZones?"on":""}
   draw();
 }
-async function load(){
-  if(busy||document.visibilityState==="hidden")return;
-  busy=true;
-  buttons();
+async function load(force){
+  if(document.visibilityState==="hidden")return;
+  if(busy && !force)return;
+  const id=++loadId;
+  const want=symbol, wantChart=chart;
   if(control)control.abort();
   control=new AbortController();
+  busy=true;
+  buttons();
   try{
-    const r=await fetch("/api/v19/signals?symbol="+symbol+"&chart="+chart,{signal:control.signal});
+    const r=await fetch("/api/v19/signals?symbol="+want+"&chart="+wantChart,{signal:control.signal});
     const j=await r.json();
+    if(id!==loadId || want!==symbol || wantChart!==chart)return;
     if(!r.ok||!j.ok)throw Error(j.message||("HTTP "+r.status));
-    data=j; $("clock").textContent=j.server_time||"";
+    data=j; remember(j); $("clock").textContent=j.server_time||"";
     draw(); paint(); consider(j);
   }catch(e){
-    if(e.name!=="AbortError")$("status").textContent="CHART ERROR · "+e.message;
-  }finally{busy=false}
+    if(e.name!=="AbortError" && id===loadId)$("status").textContent="CHART ERROR · "+e.message;
+  }finally{ if(id===loadId)busy=false }
 }
 function windowRows(){
   const all=(data&&data.candles)||[];
@@ -749,14 +765,14 @@ def _oil_feed(host: Any, chart: str, scan: bool) -> tuple[Any, dict[str, list[di
     return quote, bars_by_chart, chosen
 
 
-def _bars(host: Any, symbol: str, chart: str, max_age: float) -> list[dict[str, Any]]:
+def _bars(host: Any, symbol: str, chart: str, max_age: float, count: int = 160) -> list[dict[str, Any]]:
     key = symbol + "|" + chart
     cached = _CACHE.get(key)
     if _ORDER_BUSY.is_set():
         return cached[1] if cached else []
     if cached and monotonic() - cached[0] < max_age:
         return cached[1]
-    rows = host.runtime.projection.market_data.bars(symbol, Timeframe(chart), count=400)
+    rows = host.runtime.projection.market_data.bars(symbol, Timeframe(chart), count=count)
     found = [
         {
             "time": row.open_time_utc.isoformat(),
@@ -768,6 +784,31 @@ def _bars(host: Any, symbol: str, chart: str, max_age: float) -> list[dict[str, 
         for row in rows
     ]
     _CACHE[key] = (monotonic(), found)
+    return found
+
+
+_FILLED: dict[str, float] = {}
+
+
+def _chart_bars(host: Any, symbol: str, chart: str, scan: bool) -> dict[str, list[dict[str, Any]]]:
+    """One MetaTrader history on a click. The other timeframes stay cached, and only one missing one is filled."""
+    found: dict[str, list[dict[str, Any]]] = {}
+    missing: list[str] = []
+    for name in CHARTS:
+        key = symbol + "|" + name
+        cached = _CACHE.get(key)
+        fresh = cached is not None and monotonic() - cached[0] < (25.0 if name == chart else 90.0)
+        if fresh:
+            found[name] = cached[1]
+        elif name == chart and not scan:
+            found[name] = _bars(host, symbol, name, 25.0, 200)
+        else:
+            found[name] = cached[1] if cached else []
+            if not cached:
+                missing.append(name)
+    if missing and not _ORDER_BUSY.is_set():
+        name = missing[0]
+        found[name] = _bars(host, symbol, name, 90.0, 80 if scan else 120)
     return found
 
 
@@ -1030,10 +1071,6 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
                 quote = core.quote(symbol)
             except Exception:
                 quote = None
-        try:
-            core.refresh_bars(symbol, Timeframe(chart), count=4, replace_cache=False)
-        except Exception:
-            pass
     else:
         try:
             quote = core.quote(symbol)
@@ -1049,10 +1086,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     elif quote is None:
         raise RuntimeError(f"quote is not cached: {symbol}")
     if direct is None:
-        bars_by_chart = {}
-        for name in CHARTS:
-            age = 20.0 if scan else (2.0 if name == chart else 12.0)
-            bars_by_chart[name] = _bars(host, symbol, name, age)
+        bars_by_chart = _chart_bars(host, symbol, chart, scan)
     bid = float(quote.bid)
     ask = float(quote.ask)
     mid = (bid + ask) / 2
@@ -1067,13 +1101,15 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)
     positions = _positions(host, symbol)
     _broker_protection(rows, positions)
-    if scan:
+    if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:
         research = {"taken": {}, "if_taken": {}}
     else:
         try:
             research = record(symbol, rows, bars_by_chart)
         except Exception:
             research = {"taken": {}, "if_taken": {}}
+        else:
+            _FILLED[symbol] = monotonic()
     delta = book.get("delta_5s")
     stepping = "BUYERS" if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta > 0 else (
         "SELLERS" if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta < 0 else "QUIET"
