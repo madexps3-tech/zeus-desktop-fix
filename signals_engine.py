@@ -1488,30 +1488,20 @@ def _gate(rows: list[dict[str, Any]], book: dict[str, Any] | None) -> None:
             close = float(row["entry"])
             band = (vah - val) * 0.10
             if (val + band) < close < (vah - band):
-                row["tradeable"] = False
-                row["state"] = "SHOWN"
-                _say(row, "Price is in the middle of the value area. Not an entry.")
+                _say(row, "Price is in the middle of the value area.")
         if primary and str(row["side"]) != primary:
-            row["tradeable"] = False
-            row["state"] = "SHOWN"
-            _say(row, "The other side is on the page. It does not send.")
+            _say(row, "The other side is also on the page.")
         if bool((book or {}).get("absorption")):
-            row["tradeable"] = False
-            row["state"] = "SHOWN"
-            _say(row, "Absorption is on. Not an entry.")
+            _say(row, "Absorption is on.")
         agreed = _book_agrees(str(row["side"]), book)
         if agreed is None:
-            row["tradeable"] = False
-            row["state"] = "SHOWN"
-            _say(row, "No 5-second and 60-second book, so this is not an order.")
+            _say(row, "No 5-second and 60-second book.")
         elif not agreed:
             longer = (book or {}).get("delta_60s")
-            row["tradeable"] = False
-            row["state"] = "SHOWN"
             if isinstance(longer, (int, float)) and not isinstance(longer, bool) and abs(float(longer)) < 10:
-                _say(row, f"The 60-second book is only {longer}. That is not size, so this is not an order.")
+                _say(row, f"The 60-second book is only {longer}.")
             else:
-                _say(row, "The book does not agree with this side, so this is not an order.")
+                _say(row, "The book does not agree with this side.")
 
 
 def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, list[dict[str, Any]]]) -> None:

@@ -369,7 +369,7 @@ function boardLine(payload){
   const rows=(payload&&payload.rows)||[];
   const rank={INTRADAY:0,SWING:1,ICEBERG:2,INTERDAY:3};
   const live=rows.filter(r=>rank[r.chart]!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
-  const hit=live.find(r=>r.tradeable&&r.entry!=null);
+  const hit=live.find(r=>(r.tradeable||r.entry!=null)&&r.side);
   if(hit){
     const money=String(moneyLine(hit, payload.account)).split(" · ")[0];
     return {kind:"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
@@ -484,21 +484,14 @@ async function trade(chartName){
   const opens=data.positions||[];
   const same=opens.filter(p=>p.side===row.side);
   const opposite=opens.filter(p=>p.side!==row.side);
-  if(same.length){setStatus("NOT SENT · a "+row.side+" is already open on this pair. This button will not add another.", 12000);return}
   let msg="Send a MARKET "+row.side+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\n"+row.note+"\nThis goes to the MT5 account that is logged in.";
-  if(opposite.length){
-    const protected=opposite.every(isProtected);
-    msg=(protected
-      ?"The open "+opposite[0].side+" is protected. Closing it is not a loss."
-      :"The open "+opposite[0].side+" is not protected. Closing it can still lose.")
-      +"\nClose it, then send this "+row.side+"?\nStop "+row.stop+"\nTarget "+row.target;
-  }
+  if(same.length) msg="A "+row.side+" is already open. Send another?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
+  else if(opposite.length) msg="A "+opposite[0].side+" is still open. Send this "+row.side+" as well?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
   if(!confirm(msg))return;
   setStatus("SENDING...", 20000);
   const started=performance.now();
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
-    for(const position of opposite) await closeTicket(position.ticket);
     const r=await fetch("/api/v19/owner-order/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
       owner_approved:true,symbol:symbol,timeframe:row.chart==="SWING"?"H4":"M1",order_type:row.side==="BUY"?"MARKET_BUY":"MARKET_SELL",
       entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:risk,horizon_lane:"INTRADAY",
@@ -619,19 +612,25 @@ async function fastQuote(){
   }catch(e){}
 }
 setInterval(fastQuote,100);
-let watchAt=0;
+let watchAt=0, scanning=false;
 async function watchOthers(){
-  if(document.visibilityState==="hidden"||busy) return;
+  if(document.visibilityState==="hidden"||scanning) return;
   const pair=PAIRS[watchAt%PAIRS.length];
   watchAt++;
-  if(pair[0]===symbol){ if(data) consider(data); return; }
+  if(pair[0]===symbol){
+    if(data){ board[data.symbol]=boardLine(data); paintBoard(); consider(data); }
+    return;
+  }
+  scanning=true;
   try{
     const r=await fetch("/api/v19/signals?symbol="+pair[0]+"&chart=M1");
     const j=await r.json();
-    if(r.ok&&j.ok){ board[j.symbol]=boardLine(j); paintBoard(); consider(j); }
+    if(r.ok&&j.ok&&j.symbol!==symbol){ board[j.symbol]=boardLine(j); paintBoard(); consider(j); }
   }catch(e){}
+  finally{ scanning=false; }
 }
-setInterval(watchOthers, 4000);
+setInterval(watchOthers, 3000);
+watchOthers();
 if(window.Notification&&Notification.permission==="default") Notification.requestPermission().catch(()=>{});
 </script></body></html>"""
 
@@ -1010,7 +1009,7 @@ async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
         cached = _LAST.get(symbol)
         if cached:
             return web.json_response(cached)
-    if not _LOCK.acquire(blocking=False):
+    if not _LOCK.acquire(timeout=20):
         cached = _LAST.get(symbol)
         if cached:
             return web.json_response(cached)
