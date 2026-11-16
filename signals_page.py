@@ -367,7 +367,7 @@ function speak(text){
 let board={};
 function boardLine(payload){
   const rows=(payload&&payload.rows)||[];
-  const rank={INTRADAY:0,SWING:1,ICEBERG:2,INTERDAY:3};
+  const rank={INTRADAY:0,INTERDAY:1,SCALP:2,SWING:3,ICEBERG:4};
   const live=rows.filter(r=>rank[r.chart]!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
   const hit=live.find(r=>(r.tradeable||r.entry!=null)&&r.side);
   if(hit){
@@ -447,7 +447,7 @@ function paint(){
   const pos=data.positions||[];
   $("positions").innerHTML=positionBox(pos);
   const research=data.research||{};
-  const openBits=(research.open||[]).filter(x=>x.chart==="INTRADAY"||x.chart==="SWING"||x.chart==="ICEBERG"||x.chart==="INTERDAY").map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning");
+  const openBits=(research.open||[]).filter(x=>x.chart==="INTRADAY"||x.chart==="SWING"||x.chart==="ICEBERG"||x.chart==="INTERDAY"||x.chart==="SCALP").map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning");
   $("research").textContent=(openBits.length?("OPEN · "+openBits.join(" · ")):"No open signal on this pair.")+"\nTAKEN is an order this page sent. The win and loss counts stay in the log.";
   const row=(data.rows||[]).find(r=>r.chart===pickedRow);
   const news=data.news||{};
