@@ -22,6 +22,7 @@ from zeus3.v19.signals_engine import (
     build_rows,
     liquidity,
     mark_taken,
+    place_yen,
     reaction,
     record,
     session_levels,
@@ -743,6 +744,7 @@ def _book(symbol: str) -> dict[str, Any]:
             "icebergs": raw.get("icebergs") or [],
             "futures_bid": raw.get("bid"),
             "futures_ask": raw.get("ask"),
+            "last": raw.get("last"),
         })
         for name in ("poc", "vah", "val"):
             value = raw.get(name)
@@ -971,6 +973,8 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         bars_by_chart[name] = _live_candles(bars_by_chart.get(name) or [], mid, name)
     spread = round(ask - bid, 5)
     book = _book(symbol)
+    if symbol == "USDJPY":
+        place_yen(book, bid, ask)
     levels = session_levels(bars_by_chart.get("M15") or bars_by_chart.get("M5") or [])
     pools = liquidity(levels, bars_by_chart)
     rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)

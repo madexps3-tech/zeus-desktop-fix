@@ -438,14 +438,19 @@ def align_ladder(symbol: str, book: dict[str, Any] | None, bid: float, ask: floa
         futures = (float(book.get("futures_bid")) + float(book.get("futures_ask"))) / 2.0
     except (TypeError, ValueError):
         return {"shown": False, "reason": "NO_FUTURES_QUOTE", "levels": [], "icebergs": []}
+    if symbol == "USDJPY":
+        futures = _yen_spot(futures)
     shift = ((bid + ask) / 2.0) - futures
     if abs(shift) > MAX_BASIS.get(symbol, 0.0):
         return {"shown": False, "reason": "BASIS_TOO_WIDE", "shift": round(shift, 5), "levels": [], "icebergs": []}
     moved_levels = []
     for level in levels:
         try:
+            price = float(level.get("price"))
+            if symbol == "USDJPY":
+                price = _yen_spot(price)
             moved_levels.append({
-                "price": round(float(level.get("price")) + shift, 5),
+                "price": round(price + shift, 5),
                 "bid_contracts": level.get("bid_contracts"),
                 "ask_contracts": level.get("ask_contracts"),
             })
@@ -454,9 +459,12 @@ def align_ladder(symbol: str, book: dict[str, Any] | None, bid: float, ask: floa
     moved_ice = []
     for item in icebergs:
         try:
+            price = float(item.get("price"))
+            if symbol == "USDJPY":
+                price = _yen_spot(price)
             moved_ice.append({
                 "side": str(item.get("side") or ""),
-                "price": round(float(item.get("price")) + shift, 5),
+                "price": round(price + shift, 5),
                 "executed": item.get("executed"),
                 "hidden": item.get("hidden"),
                 "shown": item.get("shown"),
@@ -1656,6 +1664,41 @@ def build_rows(
             _silence(row, "Not a new order. This zone already has one.")
     _gate(rows, book)
     return rows
+
+
+def _yen_spot(price: float) -> float:
+    """6J is quoted as dollars per 100 yen. The chart is yen per dollar."""
+    if 0.3 < price < 1.5:
+        return 100.0 / price
+    if 0.004 < price < 0.02:
+        return 1.0 / price
+    return price
+
+
+def place_yen(book: dict[str, Any] | None, bid: float | None, ask: float | None) -> None:
+    """Move the yen future onto the 159 chart. A higher future is a lower yen price."""
+    if not isinstance(book, dict):
+        return
+    converted: dict[str, float] = {}
+    for name in ("poc", "vah", "val"):
+        value = book.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) <= 0:
+            return
+        converted[name] = _yen_spot(float(value))
+    if converted["vah"] < converted["val"]:
+        converted["vah"], converted["val"] = converted["val"], converted["vah"]
+    last = book.get("last")
+    if not isinstance(last, (int, float)) or isinstance(last, bool):
+        last = book.get("futures_bid")
+    shift = 0.0
+    if isinstance(last, (int, float)) and not isinstance(last, bool) and isinstance(bid, (int, float)) and isinstance(ask, (int, float)):
+        anchor = _yen_spot(float(last))
+        if anchor > 10:
+            shift = ((float(bid) + float(ask)) / 2.0) - anchor
+            if abs(shift) > float(MAX_BASIS.get("USDJPY", 2.0)):
+                shift = 0.0
+    for name, value in converted.items():
+        book[name] = round(value + shift, 5)
 
 
 def _band(symbol: str, pips: float = 5.0) -> float:

@@ -175,7 +175,7 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
     const ValueArea area = SessionValue(sc);
     if (area.have)
     {
-        std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0, area.poc, area.vah, area.val);
+        std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g,\"last\":%.10g}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0, area.poc, area.vah, area.val, tradePrice);
     }
     else
     {
