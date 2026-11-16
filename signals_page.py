@@ -679,6 +679,76 @@ def _live_candles(bars: list[dict[str, Any]], bid: float, chart: str) -> list[di
     return [*bars[:-1], last]
 
 
+_OIL_SKIP = ("BRENT", "UKOIL", "XBRUSD", "UKOUSD")
+_OIL_HINT = ("USOIL", "USOUSD", "XTIUSD", "WTICOUSD", "WTIUSD", "SPOTCRUDE", "CRUDE", "WTI", "XTI")
+
+
+def _worker(host: Any) -> Any:
+    return getattr(getattr(host, "runtime", None), "worker", None)
+
+
+def _candles_from_rows(rows: Any) -> list[dict[str, Any]]:
+    found = []
+    for row in rows or ():
+        data = row if isinstance(row, dict) else {}
+        raw_time = data.get("time")
+        if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
+            stamp = datetime.fromtimestamp(int(raw_time), timezone.utc).isoformat()
+        else:
+            stamp = str(raw_time or "")
+        try:
+            found.append({
+                "time": stamp,
+                "open": float(data["open"]),
+                "high": float(data["high"]),
+                "low": float(data["low"]),
+                "close": float(data["close"]),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    return found
+
+
+def _oil_feed(host: Any, chart: str, scan: bool) -> tuple[Any, dict[str, list[dict[str, Any]]], str] | None:
+    """The feed has no symbol named WTI. Use the broker's crude name, and only if the price is oil."""
+    worker = _worker(host)
+    if worker is None:
+        return None
+    try:
+        names = tuple(worker.symbol_catalog())
+    except Exception:
+        return None
+    chosen = None
+    quote = None
+    for name in names:
+        flat = str(name).upper().replace(".", "").replace("+", "").replace("-", "").replace(" ", "")
+        if any(skip in flat for skip in _OIL_SKIP):
+            continue
+        if not any(hint in flat for hint in _OIL_HINT):
+            continue
+        try:
+            got = worker.quote(str(name))
+        except Exception:
+            continue
+        bid = float(getattr(got, "bid", 0) or 0)
+        if 20 <= bid <= 200:
+            chosen = str(name)
+            quote = got
+            break
+    if quote is None or chosen is None:
+        return None
+    bars_by_chart: dict[str, list[dict[str, Any]]] = {}
+    for name in CHARTS:
+        if scan and name != "M1":
+            bars_by_chart[name] = []
+            continue
+        try:
+            bars_by_chart[name] = _candles_from_rows(worker.bars(chosen, Timeframe(name), count=120 if scan else 400))
+        except Exception:
+            bars_by_chart[name] = []
+    return quote, bars_by_chart, chosen
+
+
 def _bars(host: Any, symbol: str, chart: str, max_age: float) -> list[dict[str, Any]]:
     key = symbol + "|" + chart
     cached = _CACHE.get(key)
@@ -951,21 +1021,38 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         )
     except Exception:
         pass
+    quote = None
     if not scan:
         try:
             quote = core.refresh_quote(symbol)
         except Exception:
-            quote = core.quote(symbol)
+            try:
+                quote = core.quote(symbol)
+            except Exception:
+                quote = None
         try:
             core.refresh_bars(symbol, Timeframe(chart), count=4, replace_cache=False)
         except Exception:
             pass
     else:
-        quote = core.quote(symbol)
-    bars_by_chart = {}
-    for name in CHARTS:
-        age = 20.0 if scan else (2.0 if name == chart else 12.0)
-        bars_by_chart[name] = _bars(host, symbol, name, age)
+        try:
+            quote = core.quote(symbol)
+        except Exception:
+            quote = None
+    direct = None
+    bid_now = float(getattr(quote, "bid", 0) or 0) if quote is not None else 0.0
+    if symbol == "WTI" and not (20 <= bid_now <= 200):
+        direct = _oil_feed(host, chart, scan)
+        if direct is None:
+            raise RuntimeError("quote is not cached: WTI")
+        quote, bars_by_chart, _broker = direct
+    elif quote is None:
+        raise RuntimeError(f"quote is not cached: {symbol}")
+    if direct is None:
+        bars_by_chart = {}
+        for name in CHARTS:
+            age = 20.0 if scan else (2.0 if name == chart else 12.0)
+            bars_by_chart[name] = _bars(host, symbol, name, age)
     bid = float(quote.bid)
     ask = float(quote.ask)
     mid = (bid + ask) / 2
