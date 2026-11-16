@@ -1295,11 +1295,14 @@ def build_rows(
         rows.append(row)
     _retain(symbol, rows, bars_by_chart)
     by_name = {row["chart"]: row for row in rows}
+    area = _value_area(book)
     intra = by_name.get("INTRADAY") or {}
     if intra.get("side"):
+        _use_value_target(intra, area)
         _guide(intra, book, closed, symbol, bid, ask)
     swing_row = by_name.get("SWING") or {}
     if swing_row.get("side"):
+        _use_value_target(swing_row, area)
         _guide(swing_row, book, closed, symbol, bid, ask)
     inter = by_name["INTERDAY"]
     targets = [float(price) for price in (intra.get("targets") or [])]
@@ -1384,7 +1387,131 @@ def build_rows(
             row["coming"] = _coming(live, swing_zones)
         if row.get("side") and (row["chart"] != "INTERDAY" or row.get("tradeable")):
             _live_stop(row, bid, ask)
+    _gate(rows, book)
     return rows
+
+
+def _price_field(book: dict[str, Any] | None, name: str) -> float | None:
+    value = (book or {}).get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number <= 0:
+        return None
+    return number
+
+
+def _value_area(book: dict[str, Any] | None) -> tuple[float, float, float] | None:
+    """Session prices from Sierra. Missing stays missing. Nothing is invented."""
+    val = _price_field(book, "val")
+    poc = _price_field(book, "poc")
+    vah = _price_field(book, "vah")
+    if val is None or poc is None or vah is None or not (val <= poc <= vah) or vah <= val:
+        return None
+    return val, poc, vah
+
+
+def _use_value_target(row: dict[str, Any], area: tuple[float, float, float] | None) -> None:
+    """The other side of value is the first target only when it is closer than the next old level."""
+    if area is None or not row.get("side") or row.get("entry") is None or row.get("stop") is None:
+        return
+    val, _poc, vah = area
+    side = str(row["side"])
+    entry = float(row["entry"])
+    risk = abs(entry - float(row["stop"]))
+    other = vah if side == "BUY" else val
+    if side == "BUY" and other <= entry:
+        return
+    if side == "SELL" and other >= entry:
+        return
+    if risk > 0 and abs(other - entry) <= risk:
+        return
+    targets = [float(price) for price in (row.get("targets") or [])]
+    if not targets and row.get("target") is not None:
+        targets = [float(row["target"])]
+    other = round(other, 5)
+    if targets:
+        first = targets[0]
+        closer = (other < first) if side == "BUY" else (other > first)
+        if not closer:
+            return
+        targets = [other] + [price for price in targets if abs(price - other) > 1e-6]
+    else:
+        targets = [other]
+    row["targets"] = [round(price, 5) for price in targets[:4]]
+    row["target"] = row["targets"][0]
+    if risk > 0:
+        row["r"] = round(abs(float(row["target"]) - entry) / risk, 2)
+
+
+def _say(row: dict[str, Any], text: str) -> None:
+    note = str(row.get("note") or "").strip()
+    if text not in note:
+        row["note"] = (note + " " + text).strip()
+
+
+def _book_agrees(side: str, book: dict[str, Any] | None) -> bool | None:
+    """Both clocks, and the 60-second number has to be more than noise."""
+    def signed(name: str) -> float | None:
+        value = (book or {}).get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    short = signed("delta_5s")
+    longer = signed("delta_60s")
+    if short is None or longer is None:
+        return None
+    if abs(longer) < 10:
+        return False
+    if side == "BUY":
+        return short > 0 and longer > 0
+    return short < 0 and longer < 0
+
+
+def _gate(rows: list[dict[str, Any]], book: dict[str, Any] | None) -> None:
+    """One side. The middle of value does not send. The book has to agree."""
+    area = _value_area(book)
+    primary = None
+    for chart in ("INTRADAY", "SWING", "ICEBERG"):
+        found = next((row for row in rows if row.get("chart") == chart and row.get("side")), None)
+        if found is not None:
+            primary = str(found["side"])
+            break
+    for row in rows:
+        if not row.get("side") or row.get("entry") is None:
+            continue
+        if area is None:
+            _say(row, "Value area is not in the Sierra file yet.")
+        else:
+            val, _poc, vah = area
+            close = float(row["entry"])
+            band = (vah - val) * 0.10
+            if (val + band) < close < (vah - band):
+                row["tradeable"] = False
+                row["state"] = "SHOWN"
+                _say(row, "Price is in the middle of the value area. Not an entry.")
+        if primary and str(row["side"]) != primary:
+            row["tradeable"] = False
+            row["state"] = "SHOWN"
+            _say(row, "The other side is on the page. It does not send.")
+        if bool((book or {}).get("absorption")):
+            row["tradeable"] = False
+            row["state"] = "SHOWN"
+            _say(row, "Absorption is on. Not an entry.")
+        agreed = _book_agrees(str(row["side"]), book)
+        if agreed is None:
+            row["tradeable"] = False
+            row["state"] = "SHOWN"
+            _say(row, "No 5-second and 60-second book, so this is not an order.")
+        elif not agreed:
+            longer = (book or {}).get("delta_60s")
+            row["tradeable"] = False
+            row["state"] = "SHOWN"
+            if isinstance(longer, (int, float)) and not isinstance(longer, bool) and abs(float(longer)) < 10:
+                _say(row, f"The 60-second book is only {longer}. That is not size, so this is not an order.")
+            else:
+                _say(row, "The book does not agree with this side, so this is not an order.")
 
 
 def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, list[dict[str, Any]]]) -> None:

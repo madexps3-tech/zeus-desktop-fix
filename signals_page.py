@@ -252,6 +252,13 @@ function draw(){
     });
     ctx.globalAlpha=1;
   }
+  const flowNow=data.flow||{};
+  [["#f0c956", flowNow.poc, "POC"], ["#8ea3b8", flowNow.vah, "VALUE HIGH"], ["#8ea3b8", flowNow.val, "VALUE LOW"]].forEach(line=>{
+    const price=Number(line[1]);
+    if(!isFinite(price)||price<lo||price>hi) return;
+    ctx.setLineDash([2,4]); ctx.strokeStyle=line[0]; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle=line[0]; ctx.fillText(line[2]+" "+price, plotL+4, y(price)-4);
+  });
   if(row){
     ctx.setLineDash([4,4]);
     [["#67d6a3",row.entry,"ENTRY"],["#ef7f88",row.stop,"STOP"],["#e9c66b",row.target,"TARGET "+row.r+"R"]].forEach(line=>{
@@ -428,6 +435,9 @@ function paint(){
     <div>DELTA 5s</div><b>${f.delta_5s??"not in this book"}</b>
     <div>DELTA 60s</div><b>${f.delta_60s??"not in this book"}</b>
     <div>WHO IS HITTING</div><b class="${f.stepping==="BUYERS"?"good":(f.stepping==="SELLERS"?"bad":"")}">${f.stepping||"—"}</b>
+    <div>VALUE HIGH</div><b>${f.vah??"not in the file"}</b>
+    <div>POC</div><b>${f.poc??"not in the file"}</b>
+    <div>VALUE LOW</div><b>${f.val??"not in the file"}</b>
     <div>ABSORPTION</div><b>${f.absorption?"YES":"no"}</b>
     <div>ICEBERG</div><b>${f.iceberg_price!=null?("YES · "+f.iceberg_side+" "+f.iceberg_price):(f.iceberg?"YES · no price":"no")}</b>
     <div>PULLED</div><b>${f.pulled?"YES · no price":"no"}</b>
@@ -718,6 +728,10 @@ def _book(symbol: str) -> dict[str, Any]:
             "futures_bid": raw.get("bid"),
             "futures_ask": raw.get("ask"),
         })
+        for name in ("poc", "vah", "val"):
+            value = raw.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0:
+                book[name] = float(value)
         ice = raw.get("iceberg")
         if isinstance(ice, dict) and ice.get("price") is not None:
             book["iceberg"] = {
@@ -972,6 +986,9 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
             "sweep_consumed": bool(book.get("sweep_consumed")),
             "delta_5s": book.get("delta_5s"),
             "delta_60s": book.get("delta_60s"),
+            "poc": book.get("poc"),
+            "vah": book.get("vah"),
+            "val": book.get("val"),
             "stepping": stepping,
             "note": str(book.get("reason") or ""),
         },
