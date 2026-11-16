@@ -780,24 +780,43 @@ def _wait(chart: str, note: str, trend: str) -> dict[str, Any]:
     }
 
 
-def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None) -> None:
-    """A market order uses the live price. A stop already through that price cannot be sent."""
+def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None, symbol: str = "") -> None:
+    """A market order uses the live price. Once the first target is traded, it is late."""
     if not row.get("side") or row.get("stop") is None:
         return
     stop = float(row["stop"])
     targets = [float(price) for price in (row.get("targets") or []) if price is not None]
-    target = targets[-1] if targets else row.get("target")
+    target = row.get("target")
+    if target is None and targets:
+        target = targets[0]
     if row["side"] == "SELL":
         dead = ask is not None and stop <= float(ask)
-        passed = bid is not None and target is not None and float(target) >= float(bid)
+        passed = bid is not None and target is not None and float(bid) <= float(target)
     else:
         dead = bid is not None and stop >= float(bid)
-        passed = ask is not None and target is not None and float(target) <= float(ask)
-    if dead or passed:
-        row["tradeable"] = False
-        row["state"] = "SHOWN"
-        reason = "Price is already through this stop, so the broker will not take it." if dead else "Price is already through this target."
-        row["note"] = reason + " " + str(row.get("note") or "")
+        passed = ask is not None and target is not None and float(ask) >= float(target)
+    zone = row.get("zone")
+    entry = row.get("entry")
+    limit = float(MAX_WICK.get(symbol, 0.0) or 0.0)
+    left = (
+        zone is not None
+        and entry is not None
+        and limit > 0
+        and abs(float(entry) - float(zone)) > limit
+    )
+    if not (dead or passed or left):
+        return
+    row["tradeable"] = False
+    row["state"] = "SHOWN"
+    if dead:
+        reason = "Price is already through this stop, so the broker will not take it."
+    elif passed:
+        reason = "The first target is already reached. Not a new order."
+    else:
+        reason = "The close was already too far from the zone. Not a market entry."
+    note = str(row.get("note") or "")
+    if reason not in note:
+        row["note"] = (reason + " " + note).strip()
 
 
 def _headline(points: list[dict[str, Any]]) -> str:
@@ -1014,6 +1033,16 @@ def _pack(
     row["score_on"] = "M1"
     row["zone"] = float(zone["price"])
     row["note"] = _sentence(state, reason, side, zone, entry, stop, targets, symbol)
+    limit = float(MAX_WICK.get(symbol, 0.0) or 0.0)
+    if limit and abs(entry - float(zone["price"])) > limit:
+        row["tradeable"] = False
+        row["state"] = "SHOWN"
+        late = (
+            f"The close is {round(abs(entry - float(zone['price'])), 5)} from the zone at {round(float(zone['price']), 5)}. "
+            "The move has already left. Not a market entry."
+        )
+        if late not in str(row.get("note") or ""):
+            row["note"] = (late + " " + str(row.get("note") or "")).strip()
     return row
 
 
@@ -1386,7 +1415,7 @@ def build_rows(
         elif row["chart"] == "SWING":
             row["coming"] = _coming(live, swing_zones)
         if row.get("side") and (row["chart"] != "INTERDAY" or row.get("tradeable")):
-            _live_stop(row, bid, ask)
+            _live_stop(row, bid, ask, symbol)
     _gate(rows, book)
     return rows
 
