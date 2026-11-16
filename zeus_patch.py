@@ -126,6 +126,32 @@ if "/api/v19/signals/priority" not in text:
     )
     print("Priority route added.", flush=True)
 
+if "def signals_positions" not in text:
+    positions_method = (
+        "    async def signals_positions(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import signals_positions" + newline
+        + "        return await signals_positions(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the positions handler.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, positions_method + marker, 1)
+    print("Positions handler added.", flush=True)
+
+if "/api/v19/signals/positions" not in text:
+    old_priority = 'app.router.add_post("/api/v19/signals/priority", self.signals_priority)'
+    if old_priority not in text:
+        print("Could not find the priority route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_priority,
+        old_priority + newline + '        app.router.add_get("/api/v19/signals/positions", self.signals_positions)',
+        1,
+    )
+    print("Positions route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
 
 shell = Path("src") / "zeus3" / "v19" / "shell.py"

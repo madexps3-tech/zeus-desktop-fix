@@ -445,13 +445,7 @@ function paint(){
     <div class="muted">${ladder.shown?"Ladder shifted by "+ladder.shift+". Not an entry.":(ladder.reason==="NO_LADDER"?"Ladder is not in the file yet.":"Ladder not drawn. "+(ladder.reason||""))}</div>
     <div class="muted">${f.note||""}</div>`;
   const pos=data.positions||[];
-  $("positions").innerHTML=pos.length?pos.map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
-    <button onclick="manage(${p.ticket},'CLOSE')">CLOSE</button>
-    <button onclick="manage(${p.ticket},'BREAK_EVEN',${p.price_open})">BE</button>
-    <button onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
-    <button onclick="manage(${p.ticket},'PARTIAL',null,50)">50%</button>
-    <button onclick="editStop(${p.ticket})">EDIT SL</button>
-    <button onclick="editR(${p.ticket},${p.price_open},${p.stop_loss},'${p.side}')">EDIT R</button></div>`).join(""):"<div class='muted'>No open broker position on this pair.</div>";
+  $("positions").innerHTML=positionBox(pos);
   const research=data.research||{};
   const openBits=(research.open||[]).filter(x=>x.chart==="INTRADAY"||x.chart==="SWING"||x.chart==="ICEBERG"||x.chart==="INTERDAY").map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning");
   $("research").textContent=(openBits.length?("OPEN · "+openBits.join(" · ")):"No open signal on this pair.")+"\nTAKEN is an order this page sent. The win and loss counts stay in the log.";
@@ -584,8 +578,8 @@ cv.addEventListener("pointerup",()=>{drag=null});
 cv.addEventListener("pointermove",e=>{if(drag==null)return;const dx=e.clientX-drag;drag=e.clientX;pan+=dx<0?-2:2;draw()});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
 window.addEventListener("pagehide",()=>{clearInterval(timer);if(control)control.abort()});
-buttons();load();timer=setInterval(load,1000);
-let fastBid=null,fastAsk=null;
+buttons();load();timer=setInterval(load,2000);
+let fastBid=null,fastAsk=null,drawnAt=0;
 async function fastQuote(){
   if(document.visibilityState==="hidden"||!data)return;
   try{
@@ -608,10 +602,11 @@ async function fastQuote(){
       last.low=Math.min(Number(last.low),mid);
     }
     if(data.feed){data.feed.quote_stale=false;data.feed.quote_age=0;}
-    draw();
+    const now=performance.now();
+    if(now-drawnAt>300){drawnAt=now;draw();}
   }catch(e){}
 }
-setInterval(fastQuote,100);
+setInterval(fastQuote,250);
 let watchAt=0, scanning=false;
 async function watchOthers(){
   if(document.visibilityState==="hidden"||scanning) return;
@@ -623,13 +618,35 @@ async function watchOthers(){
   }
   scanning=true;
   try{
-    const r=await fetch("/api/v19/signals?symbol="+pair[0]+"&chart=M1");
+    const r=await fetch("/api/v19/signals?symbol="+pair[0]+"&chart=M1&scan=1");
     const j=await r.json();
     if(r.ok&&j.ok&&j.symbol!==symbol){ board[j.symbol]=boardLine(j); paintBoard(); consider(j); }
   }catch(e){}
   finally{ scanning=false; }
 }
-setInterval(watchOthers, 3000);
+setInterval(watchOthers, 12000);
+function positionBox(list){
+  return (list||[]).length?(list||[]).map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
+    <button onclick="manage(${p.ticket},'CLOSE')">CLOSE</button>
+    <button onclick="manage(${p.ticket},'BREAK_EVEN',${p.price_open})">BE</button>
+    <button onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
+    <button onclick="manage(${p.ticket},'PARTIAL',null,50)">50%</button>
+    <button onclick="editStop(${p.ticket})">EDIT SL</button>
+    <button onclick="editR(${p.ticket},${p.price_open},${p.stop_loss},'${p.side}')">EDIT R</button></div>`).join(""):"<div class='muted'>No open broker position on this pair.</div>";
+}
+async function livePositions(){
+  if(document.visibilityState==="hidden"||!symbol)return;
+  try{
+    const r=await fetch("/api/v19/signals/positions?symbol="+encodeURIComponent(symbol));
+    const j=await r.json();
+    if(!r.ok||!j.ok)return;
+    if(data) data.positions=j.positions||[];
+    const box=$("positions");
+    if(box) box.innerHTML=positionBox(j.positions||[]);
+  }catch(e){}
+}
+setInterval(livePositions, 500);
+livePositions();
 watchOthers();
 if(window.Notification&&Notification.permission==="default") Notification.requestPermission().catch(()=>{});
 </script></body></html>"""
@@ -919,7 +936,7 @@ def _broker_protection(rows: list[dict[str, Any]], positions: list[dict[str, Any
     inter["note"] = f"{close} {detail}".strip()
 
 
-def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
+def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str, Any]:
     core = host.runtime.projection.market_data
     try:
         from zeus3.market_data.subscriptions import SubscriptionPriority
@@ -932,15 +949,21 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
         )
     except Exception:
         pass
-    try:
-        quote = core.refresh_quote(symbol)
-    except Exception:
+    if not scan:
+        try:
+            quote = core.refresh_quote(symbol)
+        except Exception:
+            quote = core.quote(symbol)
+        try:
+            core.refresh_bars(symbol, Timeframe(chart), count=4, replace_cache=False)
+        except Exception:
+            pass
+    else:
         quote = core.quote(symbol)
-    try:
-        core.refresh_bars(symbol, Timeframe(chart), count=4, replace_cache=False)
-    except Exception:
-        pass
-    bars_by_chart = {name: _bars(host, symbol, name, 0) for name in CHARTS}
+    bars_by_chart = {}
+    for name in CHARTS:
+        age = 20.0 if scan else (2.0 if name == chart else 12.0)
+        bars_by_chart[name] = _bars(host, symbol, name, age)
     bid = float(quote.bid)
     ask = float(quote.ask)
     mid = (bid + ask) / 2
@@ -953,10 +976,13 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
     rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)
     positions = _positions(host, symbol)
     _broker_protection(rows, positions)
-    try:
-        research = record(symbol, rows, bars_by_chart)
-    except Exception:
+    if scan:
         research = {"taken": {}, "if_taken": {}}
+    else:
+        try:
+            research = record(symbol, rows, bars_by_chart)
+        except Exception:
+            research = {"taken": {}, "if_taken": {}}
     delta = book.get("delta_5s")
     stepping = "BUYERS" if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta > 0 else (
         "SELLERS" if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta < 0 else "QUIET"
@@ -966,7 +992,7 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
         "symbol": symbol,
         "label": LABELS.get(symbol, symbol),
         "chart": chart,
-        "candles": bars_by_chart.get(chart) or [],
+        "candles": [] if scan else (bars_by_chart.get(chart) or []),
         "quote": {"bid": bid, "ask": ask},
         "spread": spread,
         "sessions": levels,
@@ -1000,22 +1026,35 @@ def _payload(symbol: str, chart: str, host: Any) -> dict[str, Any]:
     }
 
 
+async def signals_positions(host: Any, request: web.Request) -> web.Response:
+    """Profit from the broker snapshot already in memory. No chart rebuild."""
+    symbol = str(request.query.get("symbol") or "").upper()
+    if symbol not in PAIRS:
+        return web.json_response({"ok": False, "message": "unknown pair"}, status=400)
+    return web.json_response({"ok": True, "positions": _positions(host, symbol)})
+
+
 async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
     symbol = str(request.query.get("symbol") or "XAUUSD").upper()
     chart = str(request.query.get("chart") or "M5").upper()
+    scan = str(request.query.get("scan") or "") == "1"
     if symbol not in PAIRS or chart not in CHARTS:
         return web.json_response({"ok": False, "message": "unknown pair or chart"}, status=400)
     if _ORDER_BUSY.is_set():
         cached = _LAST.get(symbol)
         if cached:
             return web.json_response(cached)
-    if not _LOCK.acquire(timeout=20):
+    if scan:
+        locked = _LOCK.acquire(blocking=False)
+    else:
+        locked = _LOCK.acquire(timeout=4)
+    if not locked:
         cached = _LAST.get(symbol)
         if cached:
             return web.json_response(cached)
         return web.json_response({"ok": False, "message": "Still reading MetaTrader."}, status=503)
     try:
-        payload = await asyncio.to_thread(_payload, symbol, chart, host)
+        payload = await asyncio.to_thread(_payload, symbol, chart, host, scan)
     except Exception as exc:
         return web.json_response(
             {"ok": False, "message": f"{symbol} is not on this MetaTrader feed. {exc}"},
