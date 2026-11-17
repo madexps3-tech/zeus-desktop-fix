@@ -246,6 +246,7 @@ def announce(payload: dict[str, Any]) -> None:
                     "symbol": symbol,
                     "chart": chart,
                     "side": str(row.get("side")),
+                    "entry": float(row["entry"]),
                     "stop": float(row["stop"]),
                     "target": float(target),
                     "reason": str(row.get("reason") or ""),
@@ -268,6 +269,7 @@ def announce(payload: dict[str, Any]) -> None:
             if guide:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
+            text += "\nType /risk 1 or /tp 3900 or /sl 3830 to change this trade. The message itself does not edit."
             if chart == "SCALP" and auto:
                 with _LOCK:
                     row_offer = _OFFERS.pop(offer)
@@ -380,6 +382,12 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
             _send(token, chat, "Risk must be above 0 and no more than 100.")
             return
         _write(token, chat, nxt_risk, auto)
+        pending = _pending()
+        if pending is not None:
+            _touch(pending[0], risk=nxt_risk)
+            _send(token, chat, f"This trade now risks {nxt_risk:g} percent.")
+            _confirm(token, chat, pending[0])
+            return
         _send(token, chat, f"Next Telegram order risks {nxt_risk:g} percent.")
         return
     query = update.get("callback_query") if isinstance(update.get("callback_query"), dict) else None
@@ -463,17 +471,79 @@ def _parse_edit(text: str) -> tuple[str, str, float] | None:
     return None
 
 
+def _pending() -> tuple[str, dict[str, Any]] | None:
+    now = time()
+    best: tuple[str, dict[str, Any]] | None = None
+    with _LOCK:
+        for key, offer in _OFFERS.items():
+            if offer.get("kind") == "manage" or "symbol" not in offer:
+                continue
+            if now - float(offer.get("at") or 0) > 600:
+                continue
+            if best is None or float(offer.get("at") or 0) >= float(best[1].get("at") or 0):
+                best = (key, offer)
+    return best
+
+
+def _offer_money(offer: dict[str, Any]) -> str:
+    account: dict[str, Any] = {}
+    truth = _truth()
+    row = getattr(truth, "account", None)
+    if row is not None:
+        account = {"equity": getattr(row, "equity", None), "balance": getattr(row, "balance", None)}
+    return _money(
+        {"entry": offer.get("entry"), "stop": offer.get("stop"), "target": offer.get("target"), "targets": [offer.get("target")]},
+        account,
+        float(offer.get("risk") or 0),
+    )
+
+
+def _touch(offer_id: str, **changes: Any) -> None:
+    with _LOCK:
+        offer = _OFFERS.get(offer_id)
+        if offer is None:
+            return
+        offer.update(changes)
+        offer["at"] = time()
+        offer["money"] = _offer_money(offer)
+
+
 def _command(token: str, chat: str, text: str) -> bool:
-    parsed = _parse_edit(text)
+    raw = text.strip()
+    if raw[:1] != "/":
+        raw = "/" + raw
+    parsed = _parse_edit(raw)
     if parsed is None:
-        lower = text.lower()
+        lower = raw.lower()
         if lower.startswith("/sl") or lower.startswith("/tp") or lower.startswith("/r"):
-            _send(token, chat, "Send /sl 3832.46, /tp 3881.1, or /r 2. Add the pair if more than one trade is open, for example /sl GOLD 3832.46.")
+            _send(token, chat, "Send /sl 3832.46, /tp 3881.1, or /r 2. That changes the trade waiting for CONFIRM. If none is waiting, it changes the open ticket.")
             return True
         return False
     cmd, symbol, number = parsed
     if number <= 0:
         _send(token, chat, "That number has to be above 0.")
+        return True
+    pending = _pending()
+    named = len(raw.split()) == 3
+    if pending is not None and (not named or symbol == pending[1].get("symbol")):
+        offer_id, offer = pending
+        if cmd == "/sl":
+            _touch(offer_id, stop=number)
+            _send(token, chat, f"Stop on this {_LABELS.get(offer['symbol'], offer['symbol'])} {offer['side']} is now {number}.")
+        elif cmd == "/tp":
+            _touch(offer_id, target=number)
+            _send(token, chat, f"Target on this {_LABELS.get(offer['symbol'], offer['symbol'])} {offer['side']} is now {number}.")
+        else:
+            entry = float(offer.get("entry") or 0)
+            stop = float(offer.get("stop") or 0)
+            span = abs(entry - stop)
+            if entry <= 0 or span <= 0:
+                _send(token, chat, "No R on this trade. Send /tp and the price.")
+                return True
+            price = entry + span * number if offer.get("side") == "BUY" else entry - span * number
+            _touch(offer_id, target=price)
+            _send(token, chat, f"Target is now {price}, which is {number:g}R.")
+        _confirm(token, chat, offer_id)
         return True
     position = _one_position(symbol)
     if position is None:
@@ -640,8 +710,32 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
         return
     execution = result.get("execution") if isinstance(result.get("execution"), dict) else result
     blockers = [str(item) for item in (execution.get("blockers") or result.get("blockers") or []) if item]
-    if result.get("ok") is False or execution.get("submitted") is False or result.get("submitted") is False:
-        _send(token, chat, prefix + "Not sent. " + (" · ".join(blockers) or str(result.get("message") or "the broker did not accept")))
+    blocked = " ".join(blockers)
+    if (result.get("submitted") is False or execution.get("submitted") is False) and ("CACHE" in blocked or "UNRESOLVED" in blocked):
+        try:
+            with _charts_aside():
+                result = host.runtime.execute_owner_order_clean(
+                    symbol=str(offer["symbol"]),
+                    timeframe=Timeframe("H4" if offer["chart"] == "SWING" else "M1"),
+                    order_type="MARKET_BUY" if offer["side"] == "BUY" else "MARKET_SELL",
+                    requested_entry=None,
+                    stop=float(offer["stop"]),
+                    targets=(float(offer["target"]),),
+                    target_specs=(),
+                    requested_risk_pct=float(offer["risk"]),
+                    horizon_lane="INTRADAY",
+                    owner_note=f"TELEGRAM {offer['chart']} {offer['reason']}",
+                )
+        except Exception as exc:
+            _send(token, chat, prefix + f"Not sent. {exc}")
+            return
+        execution = result.get("execution") if isinstance(result, dict) and isinstance(result.get("execution"), dict) else result
+        blockers = [str(item) for item in ((execution or {}).get("blockers") or (result or {}).get("blockers") or []) if item]
+    if not isinstance(result, dict) or result.get("ok") is False or (execution or {}).get("submitted") is False or result.get("submitted") is False:
+        reason = "the broker did not accept"
+        if isinstance(result, dict):
+            reason = str(result.get("message") or reason)
+        _send(token, chat, prefix + "Not sent. " + (" · ".join(blockers) or reason))
         return
     timings = result.get("timings_ms") if isinstance(result.get("timings_ms"), dict) else {}
     ms = f"\n{timings.get('total')} ms" if timings.get("total") is not None else ""
