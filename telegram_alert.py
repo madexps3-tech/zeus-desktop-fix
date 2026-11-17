@@ -35,10 +35,10 @@ def _file() -> Path:
     return Path.cwd() / "telegram.txt"
 
 
-def _read() -> tuple[str, str, float]:
+def _read() -> tuple[str, str, float, bool]:
     path = _file()
     if not path.is_file():
-        return "", "", 2.0
+        return "", "", 2.0, False
     lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
     token = lines[0] if lines else ""
     chat = lines[1] if len(lines) > 1 else ""
@@ -50,11 +50,12 @@ def _read() -> tuple[str, str, float]:
             risk = 2.0
     if not 0 < risk <= 5:
         risk = 2.0
-    return token, chat, risk
+    auto = len(lines) > 3 and lines[3].lower() == "on"
+    return token, chat, risk, auto
 
 
-def _write(token: str, chat: str, risk: float) -> None:
-    _file().write_text(f"{token}\n{chat}\n{risk}\n", encoding="utf-8")
+def _write(token: str, chat: str, risk: float, auto: bool) -> None:
+    _file().write_text(f"{token}\n{chat}\n{risk}\n{'on' if auto else 'off'}\n", encoding="utf-8")
 
 
 def _api(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -81,7 +82,7 @@ def _send(token: str, chat: str, text: str, buttons: list[tuple[str, str]] | Non
 def start(host: Any) -> None:
     global _STARTED, _HOST
     _HOST = host
-    token, _, _ = _read()
+    token, _, _, _ = _read()
     if not token or _STARTED:
         return
     _STARTED = True
@@ -89,8 +90,8 @@ def start(host: Any) -> None:
 
 
 def announce(payload: dict[str, Any]) -> None:
-    """A tradeable row gets one message with TRADE. A changed hold or bank line gets a message and no button."""
-    token, chat, risk = _read()
+    """A tradeable row gets one message with TRADE. A scalp with auto on is sent without the tap."""
+    token, chat, risk, auto = _read()
     if not token or not chat or not payload.get("ok"):
         return
     symbol = str(payload.get("symbol") or "")
@@ -132,6 +133,11 @@ def announce(payload: dict[str, Any]) -> None:
             if guide:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
+            if chart == "SCALP" and auto:
+                with _LOCK:
+                    row_offer = _OFFERS.pop(offer)
+                _submit(token, chat, row_offer, "Scalp auto. ")
+                continue
             try:
                 _send(token, chat, text, [("TRADE", f"t{offer}")])
             except Exception:
@@ -166,7 +172,7 @@ def _fresh(key: str) -> bool:
 def _poll() -> None:
     global _OFFSET
     while True:
-        token, chat, risk = _read()
+        token, chat, risk, auto = _read()
         if not token:
             return
         try:
@@ -179,39 +185,55 @@ def _poll() -> None:
                 continue
             _OFFSET = int(update.get("update_id") or _OFFSET) + 1
             try:
-                _handle(token, chat, risk, update)
+                _handle(token, chat, risk, auto, update)
             except Exception:
                 continue
 
 
-def _handle(token: str, chat: str, risk: float, update: dict[str, Any]) -> None:
+def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, Any]) -> None:
     message = update.get("message") if isinstance(update.get("message"), dict) else None
     if message is not None:
         incoming = str(message.get("chat", {}).get("id") or "")
         text = str(message.get("text") or "").strip()
         if text.startswith("/start") and incoming:
             if not chat:
-                _write(token, incoming, risk)
+                _write(token, incoming, risk, auto)
                 chat = incoming
             if incoming != chat:
                 return
-            _send(token, chat, "Zeus will message this chat when a row is a trade. Tap TRADE, then CONFIRM. A price walking toward a zone is not a message.")
+            state = "on" if auto else "off"
+            _send(token, chat, f"Zeus will message this chat when a row is a trade. Tap TRADE, then CONFIRM. Scalp auto is {state}. Send /scalp on to send a scalp without the tap. A price walking toward a zone is not a message.")
             return
-        if incoming != chat or not text.lower().startswith("/risk"):
+        if incoming != chat:
+            return
+        lower = text.lower()
+        if lower.startswith("/scalp"):
+            parts = lower.split()
+            if len(parts) != 2 or parts[1] not in {"on", "off"}:
+                _send(token, chat, f"Scalp auto is {'on' if auto else 'off'}. Send /scalp on or /scalp off.")
+                return
+            nxt = parts[1] == "on"
+            _write(token, chat, risk, nxt)
+            if nxt:
+                _send(token, chat, "Scalp auto is on. A scalp that is already a trade is sent. Intraday, interday, and swing still need a tap.")
+            else:
+                _send(token, chat, "Scalp auto is off. A scalp needs a tap again.")
+            return
+        if not lower.startswith("/risk"):
             return
         parts = text.split()
         if len(parts) != 2:
-            _send(token, chat, "Send /risk 2 to risk 2 percent of the account on the next tap.")
+            _send(token, chat, "Send /risk 2 to risk 2 percent of the account on the next order.")
             return
         try:
-            nxt = float(parts[1])
+            nxt_risk = float(parts[1])
         except ValueError:
-            nxt = 0
-        if not 0 < nxt <= 5:
+            nxt_risk = 0
+        if not 0 < nxt_risk <= 5:
             _send(token, chat, "Risk must be above 0 and no more than 5.")
             return
-        _write(token, chat, nxt)
-        _send(token, chat, f"Next Telegram order risks {nxt:g} percent.")
+        _write(token, chat, nxt_risk, auto)
+        _send(token, chat, f"Next Telegram order risks {nxt_risk:g} percent.")
         return
     query = update.get("callback_query") if isinstance(update.get("callback_query"), dict) else None
     if query is None:
@@ -273,18 +295,22 @@ def _place(token: str, chat: str, offer_id: str) -> None:
     if not offer or time() - float(offer["at"]) > 600:
         _send(token, chat, "Not sent. That trade has expired.")
         return
+    _submit(token, chat, offer, "")
+
+
+def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
     live = _quote(str(offer["symbol"]))
     if live is not None:
         bid, ask = live
         if offer["side"] == "BUY" and not (offer["stop"] < bid and offer["target"] > ask):
-            _send(token, chat, "Not sent. Price has already gone through this buy.")
+            _send(token, chat, prefix + "Not sent. Price has already gone through this buy.")
             return
         if offer["side"] == "SELL" and not (offer["stop"] > ask and offer["target"] < bid):
-            _send(token, chat, "Not sent. Price has already gone through this sell.")
+            _send(token, chat, prefix + "Not sent. Price has already gone through this sell.")
             return
     host = _HOST
     if host is None:
-        _send(token, chat, "Not sent. Zeus is not ready.")
+        _send(token, chat, prefix + "Not sent. Zeus is not ready.")
         return
     try:
         from zeus3.contracts.market_data import Timeframe
@@ -302,14 +328,15 @@ def _place(token: str, chat: str, offer_id: str) -> None:
             owner_note=f"TELEGRAM {offer['chart']} {offer['reason']}",
         )
     except Exception as exc:
-        _send(token, chat, f"Not sent. {exc}")
+        _send(token, chat, prefix + f"Not sent. {exc}")
         return
+    label = _LABELS.get(offer["symbol"], offer["symbol"])
     if not isinstance(result, dict):
-        _send(token, chat, "Sent.")
+        _send(token, chat, prefix + f"Sent. {offer['side']} {label}.")
         return
     execution = result.get("execution") if isinstance(result.get("execution"), dict) else result
     blockers = [str(item) for item in (execution.get("blockers") or result.get("blockers") or []) if item]
     if result.get("ok") is False or execution.get("submitted") is False or result.get("submitted") is False:
-        _send(token, chat, "Not sent. " + (" · ".join(blockers) or str(result.get("message") or "the broker did not accept")))
+        _send(token, chat, prefix + "Not sent. " + (" · ".join(blockers) or str(result.get("message") or "the broker did not accept")))
         return
-    _send(token, chat, f"Sent. {offer['side']} { _LABELS.get(offer['symbol'], offer['symbol']) } is on its way to MT5.")
+    _send(token, chat, prefix + f"Sent. {offer['side']} {label} is on its way to MT5.")
