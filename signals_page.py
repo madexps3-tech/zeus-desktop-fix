@@ -56,7 +56,7 @@ button,select{background:#10202e;color:var(--text);border:1px solid #34506a;bord
 button.on{border-color:var(--good);color:var(--good)}
 main{display:grid;grid-template-columns:1fr 320px;gap:10px;padding:10px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px}
-canvas{width:100%;height:520px;background:#050b11;border-radius:6px;cursor:grab}
+canvas{width:100%;height:520px;background:#050b11;border-radius:6px;cursor:crosshair}
 table{width:100%;border-collapse:collapse;font:12px Consolas,monospace}
 th{color:var(--muted);text-align:left;font-size:11px;padding:6px}
 td{padding:6px;border-top:1px solid #1a2c3c}
@@ -124,7 +124,7 @@ const CHARTS=["M1","M5","M15","M30","H1","H4","D1"];
 const LEVEL_COLOR={ASIA:"#7aa2d6",LONDON:"#e9c66b",NEW_YORK:"#67d6a3",YESTERDAY:"#c084fc",LATE:"#8ea3b8"};
 let symbol=localStorage.getItem("sig_symbol")||"XAUUSD";
 let chart=localStorage.getItem("sig_chart")||"M5";
-let data=null, visible=80, pan=0, drag=null, selected=chart, pickedRow="INTRADAY";
+let data=null, visible=80, pan=0, drag=null, cursor=null, selected=chart, pickedRow="INTRADAY";
 let busy=false, timer=null, control=null, holdStatusUntil=0, loadId=0;
 const saved={};
 let showZones=localStorage.getItem("sig_zones")!=="0";
@@ -327,6 +327,23 @@ function draw(){
   }
   ctx.fillStyle="#e9c66b";
   ctx.fillText((market||"")+"   "+(picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+(feed.candles_stale?"   CANDLES OLD":""), 12, 36);
+  if(cursor && cursor.x>=plotL && cursor.x<=plotR && cursor.y>=plotT && cursor.y<=plotB){
+    const price=hi-((cursor.y-plotT)/(plotB-plotT))*(hi-lo);
+    const index=Math.max(0, Math.min(rows.length-1, Math.floor((cursor.x-plotL)/step)));
+    const bar=rows[index];
+    ctx.strokeStyle="#9fb3c8"; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(plotL, cursor.y); ctx.lineTo(plotR, cursor.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cursor.x, plotT); ctx.lineTo(cursor.x, plotB); ctx.stroke();
+    ctx.setLineDash([]);
+    const label=px(price);
+    ctx.fillStyle="#102033"; ctx.fillRect(plotR+2, cursor.y-9, 74, 18);
+    ctx.fillStyle="#e9c66b"; ctx.fillText(label, plotR+6, cursor.y+4);
+    if(bar){
+      const when=String(bar.time||"").slice(5,16).replace("T"," ");
+      const info=when+"   O "+px(bar.open)+"  H "+px(bar.high)+"  L "+px(bar.low)+"  C "+px(bar.close);
+      ctx.fillStyle="#e7eef5"; ctx.fillText(info, plotL, plotB+16);
+    }
+  }
   paintQuote();
 }
 function researchLine(title, book){
@@ -592,7 +609,13 @@ const cv=$("cv");
 cv.addEventListener("wheel",e=>{e.preventDefault();zoom(e.deltaY>0?15:-15)},{passive:false});
 cv.addEventListener("pointerdown",e=>{drag=e.clientX});
 cv.addEventListener("pointerup",()=>{drag=null});
-cv.addEventListener("pointermove",e=>{if(drag==null)return;const dx=e.clientX-drag;drag=e.clientX;pan+=dx<0?-2:2;draw()});
+cv.addEventListener("pointermove",e=>{
+  const rect=cv.getBoundingClientRect();
+  cursor={x:(e.clientX-rect.left)*(cv.width/rect.width), y:(e.clientY-rect.top)*(cv.height/rect.height)};
+  if(drag!=null){const dx=e.clientX-drag;drag=e.clientX;pan+=dx<0?-2:2}
+  draw();
+});
+cv.addEventListener("pointerleave",()=>{cursor=null;draw()});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
 window.addEventListener("pagehide",()=>{clearInterval(timer);if(control)control.abort()});
 buttons();load();timer=setInterval(load,2000);
