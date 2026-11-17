@@ -289,7 +289,7 @@ def announce(payload: dict[str, Any]) -> None:
             if guide:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
-            text += "\nTap EDIT, then reply with risk 1, tp 63400, or sl 64600."
+            text += "\nTap EDIT. It shows the risk, target, and stop. Reply with only the line you want to change."
             if chart == "SCALP" and auto:
                 with _LOCK:
                     row_offer = _OFFERS.pop(offer)
@@ -448,7 +448,15 @@ def _ask_edit(token: str, chat: str, offer_id: str) -> None:
     message_id = _send(
         token,
         chat,
-        f"Reply to this message with the change for the {label} {offer['side']}.\nrisk 1\ntp 63400\nsl 64600\nOne of those is enough. All three can go on one line.",
+        (
+            f"{label} {offer['side']}\n"
+            f"risk {float(offer.get('risk') or 0):g}\n"
+            f"tp {offer.get('target')}\n"
+            f"sl {offer.get('stop')}\n"
+            "Reply to this message with only the line you want to change.\n"
+            "risk 1\n"
+            "The other two stay as they are."
+        ),
         reply=True,
     )
     if message_id is None:
