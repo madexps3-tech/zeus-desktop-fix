@@ -6,6 +6,7 @@ The bot token stays in telegram.txt next to this install. A coming-into line is 
 from __future__ import annotations
 
 import json
+import re
 import threading
 import urllib.request
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ _HOST: Any = None
 _OFFSET = 0
 _SENT: dict[str, float] = {}
 _OFFERS: dict[str, dict[str, Any]] = {}
+_REPLIES: dict[int, str] = {}
 _FOCUS = ""
 _LABELS = {
     "XAUUSD": "GOLD",
@@ -71,13 +73,31 @@ def _api(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _send(token: str, chat: str, text: str, buttons: list[tuple[str, str]] | None = None) -> None:
+def _send(
+    token: str,
+    chat: str,
+    text: str,
+    buttons: list[tuple[str, str]] | None = None,
+    *,
+    one_row: bool = False,
+    reply: bool = False,
+) -> int | None:
     payload: dict[str, Any] = {"chat_id": chat, "text": text[:4000]}
     if buttons:
+        cells = [{"text": label, "callback_data": data} for label, data in buttons]
+        rows = [cells] if one_row else [[cell] for cell in cells]
+        payload["reply_markup"] = {"inline_keyboard": rows}
+    elif reply:
         payload["reply_markup"] = {
-            "inline_keyboard": [[{"text": label, "callback_data": data}] for label, data in buttons]
+            "force_reply": True,
+            "selective": True,
+            "input_field_placeholder": "risk 1, tp 63400, sl 64600",
         }
-    _api(token, "sendMessage", payload)
+    data = _api(token, "sendMessage", payload)
+    try:
+        return int(data["result"]["message_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _money(row: dict[str, Any], account: Any, risk: float) -> str:
@@ -269,14 +289,14 @@ def announce(payload: dict[str, Any]) -> None:
             if guide:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
-            text += "\nType /risk 1 or /tp 3900 or /sl 3830 to change this trade. The message itself does not edit."
+            text += "\nTap EDIT, then reply with risk 1, tp 63400, or sl 64600."
             if chart == "SCALP" and auto:
                 with _LOCK:
                     row_offer = _OFFERS.pop(offer)
                 _submit(token, chat, row_offer, "Scalp auto. ")
                 continue
             try:
-                _send(token, chat, text, [("TRADE", f"t{offer}")])
+                _send(token, chat, text, [("TRADE", f"t{offer}"), ("EDIT", f"z{offer}")], one_row=True)
             except Exception:
                 with _LOCK:
                     _OFFERS.pop(offer, None)
@@ -350,6 +370,11 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
             return
         if incoming != chat:
             return
+        reply_to = message.get("reply_to_message") if isinstance(message.get("reply_to_message"), dict) else None
+        reply_id = int(reply_to.get("message_id") or 0) if reply_to else 0
+        if reply_id and reply_id in _REPLIES:
+            _apply_reply(token, chat, _REPLIES[reply_id], text)
+            return
         lower = text.lower()
         if lower in {"/pnl", "/balance"}:
             _send(token, chat, _stamp() or "No broker read yet.")
@@ -401,6 +426,8 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
     _api(token, "answerCallbackQuery", {"callback_query_id": query.get("id")})
     if data.startswith("t"):
         _confirm(token, chat, data[1:])
+    elif data.startswith("z"):
+        _ask_edit(token, chat, data[1:])
     elif data.startswith("y"):
         _place(token, chat, data[1:])
     elif data.startswith("n"):
@@ -409,6 +436,73 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
         _send(token, chat, "Not sent.")
     elif data[:1] in {"e", "h", "x", "H", "X"}:
         _manage_tap(token, chat, data[:1], data[1:])
+
+
+def _ask_edit(token: str, chat: str, offer_id: str) -> None:
+    with _LOCK:
+        offer = _OFFERS.get(offer_id)
+    if not offer or "symbol" not in offer or time() - float(offer.get("at") or 0) > 600:
+        _send(token, chat, "That trade has expired. Wait for the next one.")
+        return
+    label = _LABELS.get(str(offer["symbol"]), str(offer["symbol"]))
+    message_id = _send(
+        token,
+        chat,
+        f"Reply to this message with the change for the {label} {offer['side']}.\nrisk 1\ntp 63400\nsl 64600\nOne of those is enough. All three can go on one line.",
+        reply=True,
+    )
+    if message_id is None:
+        return
+    _REPLIES[message_id] = offer_id
+    if len(_REPLIES) > 40:
+        for key in list(_REPLIES)[:10]:
+            _REPLIES.pop(key, None)
+
+
+def _apply_reply(token: str, chat: str, offer_id: str, text: str) -> None:
+    with _LOCK:
+        offer = _OFFERS.get(offer_id)
+    if not offer or "symbol" not in offer or time() - float(offer.get("at") or 0) > 600:
+        _send(token, chat, "That trade has expired. Wait for the next one.")
+        return
+    lower = text.lower()
+    found: dict[str, float] = {}
+    for key, pattern in (
+        ("risk", r"risk\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)"),
+        ("tp", r"(?:tp|target)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)"),
+        ("sl", r"(?:sl|stop)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)"),
+        ("r", r"(?<![a-z])r\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)"),
+    ):
+        match = re.search(pattern, lower)
+        if match:
+            found[key] = float(match.group(1))
+    if not found:
+        _send(token, chat, "Reply to that message with risk 1, tp 63400, or sl 64600.")
+        return
+    if "risk" in found and not 0 < found["risk"] <= 100:
+        _send(token, chat, "Risk must be above 0 and no more than 100.")
+        return
+    changes: dict[str, Any] = {}
+    if "risk" in found:
+        changes["risk"] = found["risk"]
+    if "sl" in found:
+        changes["stop"] = found["sl"]
+    if "tp" in found:
+        changes["target"] = found["tp"]
+    elif "r" in found:
+        entry = float(offer.get("entry") or 0)
+        stop = float(changes.get("stop", offer.get("stop") or 0))
+        span = abs(entry - stop)
+        if entry <= 0 or span <= 0:
+            _send(token, chat, "No R on this trade. Reply with tp and the price.")
+            return
+        changes["target"] = entry + span * found["r"] if offer.get("side") == "BUY" else entry - span * found["r"]
+    _touch(offer_id, **changes)
+    if "risk" in changes:
+        _, _, _, auto = _read()
+        _write(token, chat, float(changes["risk"]), auto)
+    _send(token, chat, "Updated. Confirm this one.")
+    _confirm(token, chat, offer_id)
 
 
 def _positions(symbol: str) -> list[dict[str, Any]]:
