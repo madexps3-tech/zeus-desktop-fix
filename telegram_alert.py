@@ -80,6 +80,40 @@ def _send(token: str, chat: str, text: str, buttons: list[tuple[str, str]] | Non
     _api(token, "sendMessage", payload)
 
 
+def _money(row: dict[str, Any], account: Any, risk: float) -> str:
+    """Same line as the desk: each target in R, and the dollar value of that R at the chosen risk."""
+    entry = row.get("entry")
+    stop = row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop")
+    if entry is None or stop is None:
+        return ""
+    try:
+        risk_dist = abs(float(entry) - float(stop))
+    except (TypeError, ValueError):
+        return ""
+    targets = row.get("targets") if isinstance(row.get("targets"), list) else []
+    if not targets and row.get("target") is not None:
+        targets = [row.get("target")]
+    if risk_dist <= 0 or not targets:
+        return ""
+    balance = 0.0
+    if isinstance(account, dict):
+        raw = account.get("equity") if account.get("equity") not in (None, 0) else account.get("balance")
+        try:
+            balance = float(raw or 0)
+        except (TypeError, ValueError):
+            balance = 0.0
+    bits = []
+    for index, price in enumerate(targets, 1):
+        try:
+            reward = abs(float(price) - float(entry))
+        except (TypeError, ValueError):
+            continue
+        mult = round(reward / risk_dist, 2)
+        cash = f" ${round(balance * risk * mult / 100)}" if risk > 0 and balance > 0 else ""
+        bits.append(f"T{index} {mult:.2f}R{cash}")
+    return " · ".join(bits)
+
+
 def start(host: Any) -> None:
     global _STARTED, _HOST
     _HOST = host
@@ -115,6 +149,7 @@ def announce(payload: dict[str, Any]) -> None:
         key = f"T|{symbol}|{chart}|{row.get('side')}|{row.get('entry')}|{row.get('stop')}|{target}"
         if row.get("tradeable") and _fresh(key):
             offer = token_hex(4)
+            money = _money(row, payload.get("account"), risk)
             with _LOCK:
                 _OFFERS[offer] = {
                     "symbol": symbol,
@@ -124,6 +159,7 @@ def announce(payload: dict[str, Any]) -> None:
                     "target": float(target),
                     "reason": str(row.get("reason") or ""),
                     "risk": risk,
+                    "money": money,
                     "at": time(),
                 }
             text = (
@@ -133,6 +169,8 @@ def announce(payload: dict[str, Any]) -> None:
                 f"Next {target}\n"
                 f"Risk {risk:g}%"
             )
+            if money:
+                text += f"\n{money}"
             if guide:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
@@ -426,7 +464,8 @@ def _confirm(token: str, chat: str, offer_id: str) -> None:
             f"Stop {offer['stop']}\n"
             f"Target {offer['target']}\n"
             f"Risk {float(offer['risk']):g}%\n"
-            "This goes to the MT5 account that is logged in."
+            + (str(offer.get("money") or "") + "\n" if offer.get("money") else "")
+            + "This goes to the MT5 account that is logged in."
         ),
         [("CONFIRM", f"y{offer_id}"), ("CANCEL", f"n{offer_id}")],
     )
