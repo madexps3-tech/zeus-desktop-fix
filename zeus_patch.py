@@ -626,3 +626,109 @@ elif old_send not in web_text:
 else:
     web_path.write_text(web_text.replace(old_send, new_send, 1), encoding="utf-8")
     print("The trade button uses the open MetaTrader connection.", flush=True)
+
+
+risk_runtime = Path("src") / "zeus3" / "chart" / "runtime.py"
+risk_text = risk_runtime.read_text(encoding="utf-8")
+risk_nl = "\r\n" if "\r\n" in risk_text else "\n"
+old_clean_cap = (
+    "        if (" + risk_nl
+    + "            risk_pct <= 0" + risk_nl
+    + "            or risk_pct > float(controls[\"max_single_trade_risk_pct\"])" + risk_nl
+    + "        ):" + risk_nl
+    + "            raise ValueError(" + risk_nl
+    + "                \"requested risk must be >0 and <= max single-trade risk\"" + risk_nl
+    + "            )"
+)
+new_clean_cap = (
+    "        if risk_pct <= 0:" + risk_nl
+    + "            raise ValueError(\"requested risk must be >0\")" + risk_nl
+    + "        if requested_risk_pct is not None:" + risk_nl
+    + "            controls[\"max_single_trade_risk_pct\"] = max(" + risk_nl
+    + "                float(controls[\"max_single_trade_risk_pct\"]), risk_pct" + risk_nl
+    + "            )" + risk_nl
+    + "            controls[\"max_total_open_unprotected_risk_pct\"] = max(" + risk_nl
+    + "                float(controls[\"max_total_open_unprotected_risk_pct\"])," + risk_nl
+    + "                float(controls[\"max_single_trade_risk_pct\"]) + risk_pct," + risk_nl
+    + "            )"
+)
+old_fast_cap = (
+    "        if (" + risk_nl
+    + "            risk_pct <= 0" + risk_nl
+    + "            or risk_pct > float(policy.max_single_trade_risk_pct)" + risk_nl
+    + "        ):" + risk_nl
+    + "            raise ValueError(" + risk_nl
+    + "                \"V3 requested risk must be >0 and <= the owner-configured \"" + risk_nl
+    + "                f\"single-trade cap ({policy.max_single_trade_risk_pct:g}%)\"" + risk_nl
+    + "            )"
+)
+new_fast_cap = (
+    "        if risk_pct <= 0:" + risk_nl
+    + "            raise ValueError(\"V3 requested risk must be >0\")" + risk_nl
+    + "        if requested_risk_pct is None and risk_pct > float(policy.max_single_trade_risk_pct):" + risk_nl
+    + "            raise ValueError(" + risk_nl
+    + "                \"V3 requested risk must be >0 and <= the owner-configured \"" + risk_nl
+    + "                f\"single-trade cap ({policy.max_single_trade_risk_pct:g}%)\"" + risk_nl
+    + "            )"
+)
+old_fast_total = (
+    "        if (" + risk_nl
+    + "            float(current_open_risk) + float(risk_pct)" + risk_nl
+    + "            > float(policy.max_total_open_unprotected_risk_pct) + 1e-9" + risk_nl
+    + "        ):"
+)
+new_fast_total = (
+    "        if (" + risk_nl
+    + "            requested_risk_pct is None" + risk_nl
+    + "            and float(current_open_risk) + float(risk_pct)" + risk_nl
+    + "            > float(policy.max_total_open_unprotected_risk_pct) + 1e-9" + risk_nl
+    + "        ):"
+)
+old_fast_pass = (
+    "            max_single_trade_risk_pct=float(policy.max_single_trade_risk_pct)," + risk_nl
+    + "            max_total_open_risk_pct=float(" + risk_nl
+    + "                policy.max_total_open_unprotected_risk_pct" + risk_nl
+    + "            ),"
+)
+new_fast_pass = (
+    "            max_single_trade_risk_pct=max(float(policy.max_single_trade_risk_pct), float(risk_pct))," + risk_nl
+    + "            max_total_open_risk_pct=max(" + risk_nl
+    + "                float(policy.max_total_open_unprotected_risk_pct)," + risk_nl
+    + "                float(current_open_risk) + float(risk_pct)," + risk_nl
+    + "            ),"
+)
+if "controls[\"max_single_trade_risk_pct\"] = max(" in risk_text and "requested_risk_pct is None and risk_pct >" in risk_text:
+    print("A typed risk is already sent as typed.", flush=True)
+else:
+    missing = [
+        name for name, block in (
+            ("desk cap", old_clean_cap),
+            ("fast cap", old_fast_cap),
+            ("fast total", old_fast_total),
+            ("fast pass", old_fast_pass),
+        ) if block not in risk_text
+    ]
+    if missing:
+        print("Could not free the typed risk: " + ", ".join(missing), flush=True)
+        raise SystemExit(1)
+    risk_text = risk_text.replace(old_clean_cap, new_clean_cap, 1)
+    risk_text = risk_text.replace(old_fast_cap, new_fast_cap, 1)
+    risk_text = risk_text.replace(old_fast_total, new_fast_total, 1)
+    risk_text = risk_text.replace(old_fast_pass, new_fast_pass, 1)
+    risk_runtime.write_bytes(risk_text.encode("utf-8"))
+    print("A typed risk is sent as typed.", flush=True)
+
+desk_path = Path("src") / "zeus2" / "execution" / "commercial_trade_desk.py"
+desk_text = desk_path.read_text(encoding="utf-8")
+old_hundred = "            if approved_cap <= 0 or approved_cap > 100:"
+new_hundred = "            if approved_cap <= 0:"
+old_hundred_msg = "                    \"Stage6 owner single-trade risk cap must be >0 and <=100\""
+new_hundred_msg = "                    \"Stage6 owner single-trade risk cap must be >0\""
+if old_hundred not in desk_text:
+    print("The order path already accepts the typed risk.", flush=True)
+else:
+    desk_path.write_text(
+        desk_text.replace(old_hundred, new_hundred, 1).replace(old_hundred_msg, new_hundred_msg, 1),
+        encoding="utf-8",
+    )
+    print("The order path accepts the typed risk.", flush=True)

@@ -88,7 +88,7 @@ tr.pick{outline:1px solid var(--warn)}
   <button onclick="zoom(20)">ZOOM OUT</button>
   <button onclick="fit()">FIT</button>
   <button id="zones" onclick="toggleZones()">ZONES ON</button>
-  <label>RISK % <input id="risk" value="2" style="width:52px" oninput="if(data)paint()"></label>
+  <label>RISK % <input id="risk" value="2" style="width:72px" oninput="if(data)paint()"></label>
   <span class="muted">A signal is a confirmed 1-minute candle. The stop must clear 10 times the spread. TRADE sends one market order to the logged-in MT5 account.</span>
 </div>
 <main>

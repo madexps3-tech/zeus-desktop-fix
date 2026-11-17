@@ -51,7 +51,7 @@ def _read() -> tuple[str, str, float, bool]:
             risk = float(lines[2])
         except ValueError:
             risk = 2.0
-    if not 0 < risk <= 100:
+    if not 0 < risk:
         risk = 2.0
     auto = len(lines) > 3 and lines[3].lower() == "on"
     return token, chat, risk, auto
@@ -397,14 +397,14 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
             return
         parts = text.split()
         if len(parts) != 2:
-            _send(token, chat, "Send /risk and the percent. The next order uses that. Up to 100.")
+            _send(token, chat, "Send /risk and the percent. The next order uses that number.")
             return
         try:
             nxt_risk = float(parts[1])
         except ValueError:
             nxt_risk = 0
-        if not 0 < nxt_risk <= 100:
-            _send(token, chat, "Risk must be above 0 and no more than 100.")
+        if not 0 < nxt_risk:
+            _send(token, chat, "Risk must be above 0.")
             return
         _write(token, chat, nxt_risk, auto)
         pending = _pending()
@@ -487,8 +487,8 @@ def _apply_reply(token: str, chat: str, offer_id: str, text: str) -> None:
     if not found:
         _send(token, chat, "Reply to that message with risk 1, tp 63400, or sl 64600.")
         return
-    if "risk" in found and not 0 < found["risk"] <= 100:
-        _send(token, chat, "Risk must be above 0 and no more than 100.")
+    if "risk" in found and not 0 < found["risk"]:
+        _send(token, chat, "Risk must be above 0.")
         return
     changes: dict[str, Any] = {}
     if "risk" in found:
