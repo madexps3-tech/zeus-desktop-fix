@@ -1190,6 +1190,13 @@ async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
     finally:
         _LOCK.release()
     _LAST[symbol] = payload
+    try:
+        from zeus3.v19.telegram_alert import announce, start
+
+        start(host)
+        announce(payload)
+    except Exception:
+        pass
     return web.json_response(payload)
 
 
