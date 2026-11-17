@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import json
 import threading
-import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from secrets import token_hex
 from time import monotonic, time
@@ -114,6 +114,97 @@ def _money(row: dict[str, Any], account: Any, risk: float) -> str:
     return " · ".join(bits)
 
 
+def _truth() -> Any:
+    host = _HOST
+    if host is None:
+        return None
+    try:
+        return host.runtime.core.broker_truth.get(host.runtime.worker.profile_id)
+    except Exception:
+        return None
+
+
+def _balance_text() -> str:
+    account = getattr(_truth(), "account", None)
+    if account is None:
+        return ""
+    bits = []
+    balance = getattr(account, "balance", None)
+    equity = getattr(account, "equity", None)
+    if balance is not None:
+        bits.append(f"Balance {balance}")
+    if equity is not None:
+        bits.append(f"Equity {equity}")
+    return " · ".join(bits)
+
+
+def _rows(symbol: str = "") -> list[dict[str, Any]]:
+    truth = _truth()
+    if truth is None:
+        return []
+    try:
+        from zeus3.v19.signals_page import PAIRS, _same_pair
+    except Exception:
+        return []
+    found = []
+    for row in getattr(truth, "positions", ()) or ():
+        broker = str(getattr(row, "broker_symbol", "") or "")
+        matched = next((name for name in PAIRS if _same_pair(name, broker)), "")
+        if symbol and matched != symbol:
+            continue
+        if not symbol and not matched:
+            continue
+        try:
+            profit = f"{float(getattr(row, 'profit', None)):.2f}"
+        except (TypeError, ValueError):
+            profit = "—"
+        found.append(
+            {
+                "label": _LABELS.get(matched, matched or broker),
+                "broker": broker or matched,
+                "side": "BUY" if int(getattr(row, "type_code", 1) or 1) == 0 else "SELL",
+                "volume": getattr(row, "volume", None),
+                "price_open": getattr(row, "price_open", None),
+                "stop": getattr(row, "stop_loss", None),
+                "target": getattr(row, "take_profit", None),
+                "profit": profit,
+            }
+        )
+    return found
+
+
+def _position_text(symbol: str = "", side: str = "") -> str:
+    rows = _rows(symbol)
+    if side:
+        same = [row for row in rows if row["side"] == side]
+        if same:
+            rows = same
+    return "\n".join(
+        f"{row['broker']}  {row['side']} {row['volume']} @ {row['price_open']}  P/L {row['profit']}  SL {row['stop']}  TP {row['target']}"
+        for row in rows
+    )
+
+
+def _stamp(symbol: str = "", side: str = "") -> str:
+    lines = [line for line in (_position_text(symbol, side), _balance_text()) if line]
+    return "\n".join(lines)
+
+
+@contextmanager
+def _charts_aside():
+    """Keep a chart history from holding MetaTrader while the order is going out."""
+    try:
+        from zeus3.v19.signals_page import _ORDER_BUSY
+    except Exception:
+        yield
+        return
+    _ORDER_BUSY.set()
+    try:
+        yield
+    finally:
+        _ORDER_BUSY.clear()
+
+
 def start(host: Any) -> None:
     global _STARTED, _HOST
     _HOST = host
@@ -171,6 +262,9 @@ def announce(payload: dict[str, Any]) -> None:
             )
             if money:
                 text += f"\n{money}"
+            held = _stamp(symbol, str(row.get("side") or ""))
+            if held:
+                text += f"\n{held}"
             if guide:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
@@ -190,6 +284,9 @@ def announce(payload: dict[str, Any]) -> None:
             buttons = _manage_buttons(symbol, str(row.get("side") or ""))
             if buttons:
                 text += "\nBE moves the stop to the entry. 50% banks half. Or send /sl, /tp, or /r."
+            held = _stamp(symbol, str(row.get("side") or ""))
+            if held:
+                text += f"\n{held}"
             try:
                 _send(token, chat, text, buttons or None)
             except Exception:
@@ -252,6 +349,9 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
         if incoming != chat:
             return
         lower = text.lower()
+        if lower in {"/pnl", "/balance"}:
+            _send(token, chat, _stamp() or "No broker read yet.")
+            return
         if lower.startswith("/scalp"):
             parts = lower.split()
             if len(parts) != 2 or parts[1] not in {"on", "off"}:
@@ -429,15 +529,16 @@ def _apply(token: str, chat: str, ticket: int, action: str, **kwargs: Any) -> No
         _send(token, chat, "Not sent. Zeus is not ready.")
         return
     try:
-        result = host.runtime.manage_physical_trade(
-            ticket=ticket,
-            action=action,
-            partial_pct=kwargs.get("partial_pct"),
-            stop_loss=kwargs.get("stop_loss"),
-            take_profits=tuple(kwargs.get("take_profits") or ()),
-            reason="TELEGRAM",
-            include_physical_snapshot=False,
-        )
+        with _charts_aside():
+            result = host.runtime.manage_physical_trade(
+                ticket=ticket,
+                action=action,
+                partial_pct=kwargs.get("partial_pct"),
+                stop_loss=kwargs.get("stop_loss"),
+                take_profits=tuple(kwargs.get("take_profits") or ()),
+                reason="TELEGRAM",
+                include_physical_snapshot=False,
+            )
     except Exception as exc:
         _send(token, chat, f"Not changed. {exc}")
         return
@@ -446,7 +547,8 @@ def _apply(token: str, chat: str, ticket: int, action: str, **kwargs: Any) -> No
         _send(token, chat, "Not changed. " + str(management.get("reason") or "the broker did not accept"))
         return
     done = {"BREAK_EVEN": "Stop moved to the entry.", "PARTIAL": "50% closed.", "CLOSE": "Closed.", "MODIFY_POSITION": "Sent to MT5."}
-    _send(token, chat, done.get(action, "Sent to MT5."))
+    held = _stamp()
+    _send(token, chat, done.get(action, "Sent to MT5.") + (("\n" + held) if held else ""))
 
 
 def _confirm(token: str, chat: str, offer_id: str) -> None:
@@ -465,6 +567,7 @@ def _confirm(token: str, chat: str, offer_id: str) -> None:
             f"Target {offer['target']}\n"
             f"Risk {float(offer['risk']):g}%\n"
             + (str(offer.get("money") or "") + "\n" if offer.get("money") else "")
+            + (_stamp(str(offer.get("symbol") or ""), str(offer.get("side") or "")) + "\n" if _stamp(str(offer.get("symbol") or ""), str(offer.get("side") or "")) else "")
             + "This goes to the MT5 account that is logged in."
         ),
         [("CONFIRM", f"y{offer_id}"), ("CANCEL", f"n{offer_id}")],
@@ -508,31 +611,39 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
     if host is None:
         _send(token, chat, prefix + "Not sent. Zeus is not ready.")
         return
+    entry_ref = float(offer["stop"])
+    if live is not None:
+        bid, ask = live
+        entry_ref = bid if offer["side"] == "SELL" else ask
     try:
         from zeus3.contracts.market_data import Timeframe
 
-        result = host.runtime.execute_owner_order_clean(
-            symbol=str(offer["symbol"]),
-            timeframe=Timeframe("H4" if offer["chart"] == "SWING" else "M1"),
-            order_type="MARKET_BUY" if offer["side"] == "BUY" else "MARKET_SELL",
-            requested_entry=None,
-            stop=float(offer["stop"]),
-            targets=(float(offer["target"]),),
-            target_specs=(),
-            requested_risk_pct=float(offer["risk"]),
-            horizon_lane="INTRADAY",
-            owner_note=f"TELEGRAM {offer['chart']} {offer['reason']}",
-        )
+        with _charts_aside():
+            result = host.runtime.execute_owner_order_fast(
+                symbol=str(offer["symbol"]),
+                timeframe=Timeframe("H4" if offer["chart"] == "SWING" else "M1"),
+                order_type="MARKET_BUY" if offer["side"] == "BUY" else "MARKET_SELL",
+                requested_entry=float(entry_ref),
+                stop=float(offer["stop"]),
+                targets=(float(offer["target"]),),
+                target_specs=(),
+                requested_risk_pct=float(offer["risk"]),
+                horizon_lane="INTRADAY",
+                owner_note=f"TELEGRAM {offer['chart']} {offer['reason']}",
+            )
     except Exception as exc:
         _send(token, chat, prefix + f"Not sent. {exc}")
         return
     label = _LABELS.get(offer["symbol"], offer["symbol"])
     if not isinstance(result, dict):
-        _send(token, chat, prefix + f"Sent. {offer['side']} {label}.")
+        _send(token, chat, prefix + f"Sent. {offer['side']} {label}.\n" + _stamp(str(offer["symbol"]), str(offer["side"])))
         return
     execution = result.get("execution") if isinstance(result.get("execution"), dict) else result
     blockers = [str(item) for item in (execution.get("blockers") or result.get("blockers") or []) if item]
     if result.get("ok") is False or execution.get("submitted") is False or result.get("submitted") is False:
         _send(token, chat, prefix + "Not sent. " + (" · ".join(blockers) or str(result.get("message") or "the broker did not accept")))
         return
-    _send(token, chat, prefix + f"Sent. {offer['side']} {label} is on its way to MT5.")
+    timings = result.get("timings_ms") if isinstance(result.get("timings_ms"), dict) else {}
+    ms = f"\n{timings.get('total')} ms" if timings.get("total") is not None else ""
+    held = _stamp(str(offer["symbol"]), str(offer["side"]))
+    _send(token, chat, prefix + f"Sent. {offer['side']} {label}.\n" + (held + "\n" if held else "") + ms.strip())
