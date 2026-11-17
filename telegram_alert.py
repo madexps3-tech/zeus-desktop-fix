@@ -20,6 +20,7 @@ _HOST: Any = None
 _OFFSET = 0
 _SENT: dict[str, float] = {}
 _OFFERS: dict[str, dict[str, Any]] = {}
+_FOCUS = ""
 _LABELS = {
     "XAUUSD": "GOLD",
     "XAGUSD": "SILVER",
@@ -48,7 +49,7 @@ def _read() -> tuple[str, str, float, bool]:
             risk = float(lines[2])
         except ValueError:
             risk = 2.0
-    if not 0 < risk <= 5:
+    if not 0 < risk <= 100:
         risk = 2.0
     auto = len(lines) > 3 and lines[3].lower() == "on"
     return token, chat, risk, auto
@@ -91,10 +92,12 @@ def start(host: Any) -> None:
 
 def announce(payload: dict[str, Any]) -> None:
     """A tradeable row gets one message with TRADE. A scalp with auto on is sent without the tap."""
+    global _FOCUS
     token, chat, risk, auto = _read()
     if not token or not chat or not payload.get("ok"):
         return
     symbol = str(payload.get("symbol") or "")
+    _FOCUS = symbol
     label = _LABELS.get(symbol, payload.get("label") or symbol)
     for row in payload.get("rows") or []:
         if not isinstance(row, dict) or not row.get("side") or row.get("entry") is None or row.get("stop") is None:
@@ -145,8 +148,12 @@ def announce(payload: dict[str, Any]) -> None:
                     _OFFERS.pop(offer, None)
                 _SENT.pop(key, None)
         if guide and _fresh(f"G|{symbol}|{chart}|{row.get('side')}|{guide}"):
+            text = f"{label} {chart} {row.get('side')}\n{guide}"
+            buttons = _manage_buttons(symbol, str(row.get("side") or ""))
+            if buttons:
+                text += "\nBE moves the stop to the entry. 50% banks half. Or send /sl, /tp, or /r."
             try:
-                _send(token, chat, f"{label} {chart} {row.get('side')}\n{guide}")
+                _send(token, chat, text, buttons or None)
             except Exception:
                 _SENT.pop(f"G|{symbol}|{chart}|{row.get('side')}|{guide}", None)
 
@@ -202,7 +209,7 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
             if incoming != chat:
                 return
             state = "on" if auto else "off"
-            _send(token, chat, f"Zeus will message this chat when a row is a trade. Tap TRADE, then CONFIRM. Scalp auto is {state}. Send /scalp on to send a scalp without the tap. A price walking toward a zone is not a message.")
+            _send(token, chat, f"Zeus will message this chat when a row is a trade. Tap TRADE, then CONFIRM. Scalp auto is {state}. Send /scalp on to send a scalp without the tap. /risk sets the percent. /sl, /tp, and /r edit the open trade. A price walking toward a zone is not a message.")
             return
         if incoming != chat:
             return
@@ -220,17 +227,19 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
                 _send(token, chat, "Scalp auto is off. A scalp needs a tap again.")
             return
         if not lower.startswith("/risk"):
+            if _command(token, chat, text):
+                return
             return
         parts = text.split()
         if len(parts) != 2:
-            _send(token, chat, "Send /risk 2 to risk 2 percent of the account on the next order.")
+            _send(token, chat, "Send /risk and the percent. The next order uses that. Up to 100.")
             return
         try:
             nxt_risk = float(parts[1])
         except ValueError:
             nxt_risk = 0
-        if not 0 < nxt_risk <= 5:
-            _send(token, chat, "Risk must be above 0 and no more than 5.")
+        if not 0 < nxt_risk <= 100:
+            _send(token, chat, "Risk must be above 0 and no more than 100.")
             return
         _write(token, chat, nxt_risk, auto)
         _send(token, chat, f"Next Telegram order risks {nxt_risk:g} percent.")
@@ -252,6 +261,154 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
         with _LOCK:
             _OFFERS.pop(data[1:], None)
         _send(token, chat, "Not sent.")
+    elif data[:1] in {"e", "h", "x", "H", "X"}:
+        _manage_tap(token, chat, data[:1], data[1:])
+
+
+def _positions(symbol: str) -> list[dict[str, Any]]:
+    host = _HOST
+    if host is None or not symbol:
+        return []
+    try:
+        from zeus3.v19.signals_page import _positions as listed
+    except Exception:
+        return []
+    try:
+        return [row for row in listed(host, symbol) if int(row.get("ticket") or 0) > 0]
+    except Exception:
+        return []
+
+
+def _one_position(symbol: str, side: str = "") -> dict[str, Any] | None:
+    rows = _positions(symbol)
+    if side:
+        same = [row for row in rows if row.get("side") == side]
+        if len(same) == 1:
+            return same[0]
+    return rows[0] if len(rows) == 1 else None
+
+
+def _manage_buttons(symbol: str, side: str) -> list[tuple[str, str]]:
+    position = _one_position(symbol, side)
+    if position is None:
+        return []
+    offer = token_hex(4)
+    with _LOCK:
+        _OFFERS[offer] = {
+            "kind": "manage",
+            "ticket": int(position["ticket"]),
+            "entry": float(position.get("price_open") or 0),
+            "at": time(),
+        }
+    return [("BE", f"e{offer}"), ("50%", f"h{offer}"), ("CLOSE", f"x{offer}")]
+
+
+def _parse_edit(text: str) -> tuple[str, str, float] | None:
+    parts = text.split()
+    if not parts or not parts[0].startswith("/"):
+        return None
+    cmd = parts[0].lower()
+    if cmd not in {"/sl", "/tp", "/r"}:
+        return None
+    names = {name.lower(): key for key, name in _LABELS.items()}
+    names.update({key.lower(): key for key in _LABELS})
+    if len(parts) == 3 and parts[1].lower() in names:
+        try:
+            return cmd, names[parts[1].lower()], float(parts[2])
+        except ValueError:
+            return None
+    if len(parts) == 2 and _FOCUS:
+        try:
+            return cmd, _FOCUS, float(parts[1])
+        except ValueError:
+            return None
+    return None
+
+
+def _command(token: str, chat: str, text: str) -> bool:
+    parsed = _parse_edit(text)
+    if parsed is None:
+        lower = text.lower()
+        if lower.startswith("/sl") or lower.startswith("/tp") or lower.startswith("/r"):
+            _send(token, chat, "Send /sl 3832.46, /tp 3881.1, or /r 2. Add the pair if more than one trade is open, for example /sl GOLD 3832.46.")
+            return True
+        return False
+    cmd, symbol, number = parsed
+    if number <= 0:
+        _send(token, chat, "That number has to be above 0.")
+        return True
+    position = _one_position(symbol)
+    if position is None:
+        rows = _positions(symbol)
+        if not rows:
+            _send(token, chat, f"No open {_LABELS.get(symbol, symbol)} trade to edit.")
+        else:
+            listed = ", ".join(f"{row['side']} {row['ticket']}" for row in rows)
+            _send(token, chat, f"More than one {_LABELS.get(symbol, symbol)} trade is open ({listed}). Close one on the desk first.")
+        return True
+    entry = float(position.get("price_open") or 0)
+    stop = float(position.get("stop_loss") or 0)
+    if cmd == "/sl":
+        _apply(token, chat, int(position["ticket"]), "MODIFY_POSITION", stop_loss=number)
+    elif cmd == "/tp":
+        _apply(token, chat, int(position["ticket"]), "MODIFY_POSITION", take_profits=(number,))
+    else:
+        risk = abs(entry - stop)
+        if entry <= 0 or stop <= 0 or risk <= 0:
+            _send(token, chat, "No R. The open trade has no stop, so send /tp and the price.")
+            return True
+        price = entry + risk * number if position.get("side") == "BUY" else entry - risk * number
+        _apply(token, chat, int(position["ticket"]), "MODIFY_POSITION", take_profits=(price,))
+    return True
+
+
+def _manage_tap(token: str, chat: str, kind: str, offer_id: str) -> None:
+    with _LOCK:
+        offer = _OFFERS.get(offer_id)
+    if not offer or offer.get("kind") != "manage" or time() - float(offer.get("at") or 0) > 3600:
+        _send(token, chat, "That management button has expired.")
+        return
+    ticket = int(offer["ticket"])
+    if kind == "e":
+        entry = float(offer.get("entry") or 0)
+        if entry <= 0:
+            _send(token, chat, "Not moved. The entry price is missing.")
+            return
+        _apply(token, chat, ticket, "BREAK_EVEN", stop_loss=entry)
+    elif kind == "h":
+        _send(token, chat, f"Close 50% of ticket {ticket}?", [("CONFIRM", f"H{offer_id}"), ("CANCEL", f"n{offer_id}")])
+    elif kind == "x":
+        _send(token, chat, f"Close ticket {ticket} at the market?", [("CONFIRM", f"X{offer_id}"), ("CANCEL", f"n{offer_id}")])
+    elif kind == "H":
+        _apply(token, chat, ticket, "PARTIAL", partial_pct=50)
+    elif kind == "X":
+        _apply(token, chat, ticket, "CLOSE")
+
+
+def _apply(token: str, chat: str, ticket: int, action: str, **kwargs: Any) -> None:
+    host = _HOST
+    if host is None:
+        _send(token, chat, "Not sent. Zeus is not ready.")
+        return
+    try:
+        result = host.runtime.manage_physical_trade(
+            ticket=ticket,
+            action=action,
+            partial_pct=kwargs.get("partial_pct"),
+            stop_loss=kwargs.get("stop_loss"),
+            take_profits=tuple(kwargs.get("take_profits") or ()),
+            reason="TELEGRAM",
+            include_physical_snapshot=False,
+        )
+    except Exception as exc:
+        _send(token, chat, f"Not changed. {exc}")
+        return
+    management = result.get("management") if isinstance(result, dict) and isinstance(result.get("management"), dict) else {}
+    if management.get("ok") is False:
+        _send(token, chat, "Not changed. " + str(management.get("reason") or "the broker did not accept"))
+        return
+    done = {"BREAK_EVEN": "Stop moved to the entry.", "PARTIAL": "50% closed.", "CLOSE": "Closed.", "MODIFY_POSITION": "Sent to MT5."}
+    _send(token, chat, done.get(action, "Sent to MT5."))
 
 
 def _confirm(token: str, chat: str, offer_id: str) -> None:
