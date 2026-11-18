@@ -93,7 +93,8 @@ tr.pick{outline:1px solid var(--warn)}
   <button id="zones" onclick="toggleZones()">ZONES ON</button>
   <label>RISK % <input id="risk" value="2" style="width:72px" oninput="if(data)paint()"></label>
   <button id="manage" data-on="0" onclick="toggleManage()">MANAGE OFF</button>
-  <span class="muted">A signal is a confirmed 1-minute candle. The stop must clear 10 times the spread. TRADE sends one market order to the logged-in MT5 account.</span>
+  <button id="ice" data-on="0" onclick="toggleIce()">ICE AUTO OFF</button>
+  <span class="muted">MARKET sends now. LIMIT rests at the row price. ICE AUTO sends a gold, oil, or Nasdaq iceberg as a limit.</span>
 </div>
 <main>
   <section class="card">
@@ -180,6 +181,11 @@ async function load(force){
       manage.dataset.on=j.manage?"1":"0";
       manage.textContent=j.manage?"MANAGE ON":"MANAGE OFF";
     }
+    const ice=$("ice");
+    if(ice){
+      ice.dataset.on=j.ice_auto?"1":"0";
+      ice.textContent=j.ice_auto?"ICE AUTO ON":"ICE AUTO OFF";
+    }
     draw(); paint(); consider(j);
   }catch(e){
     if(e.name!=="AbortError" && id===loadId)$("status").textContent="CHART ERROR · "+e.message;
@@ -198,7 +204,22 @@ async function toggleManage(){
     $("status").textContent=j.on?"MANAGE ON. The stop moves. Banking stays a button.":"MANAGE OFF. The ticket is left alone.";
   }catch(e){
     $("status").textContent="MANAGE NOT SAVED · "+e.message;
-  }finally{ button.disabled=false; }
+  }finally{button.disabled=false}
+}
+async function toggleIce(){
+  const button=$("ice");
+  const on=button.dataset.on!=="1";
+  button.disabled=true;
+  try{
+    const r=await fetch("/api/v19/signals/ice",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:on})});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw Error(j.message||"iceberg auto was not saved");
+    button.dataset.on=j.on?"1":"0";
+    button.textContent=j.on?"ICE AUTO ON":"ICE AUTO OFF";
+    $("status").textContent=j.on?"ICE AUTO ON. A refilled gold, oil, or Nasdaq iceberg is sent as a limit.":"ICE AUTO OFF. An iceberg needs the LIMIT button.";
+  }catch(e){
+    $("status").textContent="ICE AUTO NOT SAVED · "+e.message;
+  }finally{button.disabled=false}
 }
 function windowRows(){
   const all=(data&&data.candles)||[];
@@ -532,17 +553,16 @@ async function trade(chartName, mode){
   const limit=mode==="LIMIT";
   const quote=(data&&data.quote)||{};
   const bid=Number(quote.bid), ask=Number(quote.ask);
-  if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){setStatus("NOT SENT · a sell stop must be above the live ask, and the target below the bid. Price has already gone through this one.", 12000);return}
-  if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){setStatus("NOT SENT · a buy stop must be below the live bid, and the target above the ask. Price has already gone through this one.", 12000);return}
-  if(limit && row.side==="BUY" && !(row.entry<ask)){setStatus("NOT SENT · the buy limit is no longer below the ask. MARKET is the chase.", 12000);return}
-  if(limit && row.side==="SELL" && !(row.entry>bid)){setStatus("NOT SENT · the sell limit is no longer above the bid. MARKET is the chase.", 12000);return}
+  if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){const text="NOT SENT · a sell stop must be above the live ask, and the target below the bid."; setStatus(text, 12000); alert(text); return}
+  if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){const text="NOT SENT · a buy stop must be below the live bid, and the target above the ask."; setStatus(text, 12000); alert(text); return}
+  const rests=row.side==="BUY"?row.entry<ask:row.entry>bid;
   const risk=Number($("risk").value);
   if(!isFinite(risk)||risk<=0){setStatus("NOT SENT · set the risk percent", 8000);return}
   const opens=data.positions||[];
   const same=opens.filter(p=>p.side===row.side);
   const opposite=opens.filter(p=>p.side!==row.side);
-  const kind=limit?("LIMIT "+row.side+" at "+row.entry):("MARKET "+row.side);
-  let msg="Send a "+kind+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\n"+row.note+"\nThis goes to the MT5 account that is logged in.";
+  const kind=limit?((rests?"LIMIT ":"STOP ")+row.side+" at "+row.entry):("MARKET "+row.side);
+  let msg="Send a "+kind+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThis goes to the MT5 account that is logged in.";
   if(same.length) msg="A "+row.side+" is already open. Send another "+kind+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
   else if(opposite.length) msg="A "+opposite[0].side+" is still open. Send this "+kind+" as well?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
   if(!confirm(msg))return;
@@ -1388,6 +1408,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         },
         "positions": positions,
         "manage": manage_enabled(),
+        "ice_auto": ice_enabled(),
         "account": _account(host),
         "research": research,
         "feed": _feed(quote, ((bars_by_chart.get(chart) or [None])[-1] or {}).get("time", ""), chart),
@@ -1406,6 +1427,31 @@ async def signals_manage(host: Any, request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "on": manage_enabled()})
     set_manage(bool(payload.get("on")))
     return web.json_response({"ok": True, "on": manage_enabled()})
+
+
+def ice_enabled() -> bool:
+    try:
+        from zeus3.v19.telegram_alert import ice_enabled as saved
+        return bool(saved())
+    except Exception:
+        return False
+
+
+def set_ice(on: bool) -> None:
+    from zeus3.v19.telegram_alert import set_ice as save
+    save(bool(on))
+
+
+async def signals_ice(host: Any, request: web.Request) -> web.Response:
+    """Iceberg auto. Off until this is on. It sends a resting limit, not a market chase."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict) or "on" not in payload:
+        return web.json_response({"ok": True, "on": ice_enabled()})
+    set_ice(bool(payload.get("on")))
+    return web.json_response({"ok": True, "on": ice_enabled()})
 
 
 async def signals_positions(host: Any, request: web.Request) -> web.Response:

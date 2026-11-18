@@ -60,6 +60,15 @@ def _read() -> tuple[str, str, float, bool, bool]:
     return token, chat, risk, auto, ice
 
 
+def ice_enabled() -> bool:
+    return _read()[4]
+
+
+def set_ice(on: bool) -> None:
+    token, chat, risk, auto, _ice = _read()
+    _write(token, chat, risk, auto, bool(on))
+
+
 def _write(token: str, chat: str, risk: float, auto: bool, ice: bool = False) -> None:
     _file().write_text(f"{token}\n{chat}\n{risk}\n{'on' if auto else 'off'}\n{'on' if ice else 'off'}\n", encoding="utf-8")
 
@@ -1076,14 +1085,8 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
         if offer["side"] == "SELL" and not (offer["stop"] > ask and offer["target"] < bid):
             _send(token, chat, prefix + "Not sent. Price has already gone through this sell.")
             return
-        if limit and offer["side"] == "BUY" and not (float(offer["entry"]) < ask):
-            _send(token, chat, prefix + "Not sent. The buy limit is no longer below the ask.")
-            return
-        if limit and offer["side"] == "SELL" and not (float(offer["entry"]) > bid):
-            _send(token, chat, prefix + "Not sent. The sell limit is no longer above the bid.")
-            return
     elif limit:
-        _send(token, chat, prefix + "Not sent. No live quote, so the limit cannot be checked.")
+        _send(token, chat, prefix + "Not sent. No live quote, so the order cannot be checked.")
         return
     host = _HOST
     if host is None:

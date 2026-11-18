@@ -178,6 +178,32 @@ if "/api/v19/signals/manage" not in text:
     )
     print("Manage route added.", flush=True)
 
+if "def signals_ice" not in text:
+    ice_method = (
+        "    async def signals_ice(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import signals_ice" + newline
+        + "        return await signals_ice(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the iceberg auto handler.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, ice_method + marker, 1)
+    print("Iceberg auto handler added.", flush=True)
+
+if "/api/v19/signals/ice" not in text:
+    old_manage = 'app.router.add_post("/api/v19/signals/manage", self.signals_manage)'
+    if old_manage not in text:
+        print("Could not find the manage route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_manage,
+        old_manage + newline + '        app.router.add_post("/api/v19/signals/ice", self.signals_ice)',
+        1,
+    )
+    print("Iceberg auto route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
 
 shell = Path("src") / "zeus3" / "v19" / "shell.py"
@@ -792,8 +818,12 @@ ui_changes = [
     (":laneOn('OWNER_MANUAL')", ":true"),
     ("&&!laneOn('OWNER_MANUAL')", ""),
     ("&&laneOn('OWNER_MANUAL')", ""),
-    ("' · MANUAL '+(laneOn('OWNER_MANUAL')?'ON':'OFF')", ""),
+    ("+' · MANUAL '+(laneOn('OWNER_MANUAL')?'ON':'OFF')+", "+"),
 ]
+if "OFF')++'" in ui:
+    ui = ui.replace("OFF')++'", "OFF')+'")
+    desk_ui.write_text(ui, encoding="utf-8")
+    print("The trade desk script is repaired.", flush=True)
 if 'id="manualBtn"' not in ui and "laneOn('OWNER_MANUAL')" not in ui:
     print("The manual switch is already gone.", flush=True)
 else:

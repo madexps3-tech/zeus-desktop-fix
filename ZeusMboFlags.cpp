@@ -8,7 +8,7 @@
 SCDLLName("ZeusMboFlags")
 
 struct OrderSnap { uint64_t id; double qty; double price; int bid; };
-struct IceLevel { int active; double price; int bid; int refills; double until; };
+struct IceLevel { int active; double price; int bid; int refills; double until; double peak; };
 struct MboState { OrderSnap prev[400]; int prevCount; double sweepUntil; double icebergUntil; double pulledUntil; IceLevel bidIce; IceLevel askIce; int primaryBid; };
 
 struct ValueArea { int have; double poc; double vah; double val; };
@@ -119,16 +119,27 @@ static void TradeDelta(SCStudyInterfaceRef sc, double& buy5, double& buy60)
     }
 }
 
-static int IceLive(const IceLevel* ice, double now)
+static double QtyAt(const OrderSnap* rows, int count, int bidSide, double price, double tick)
 {
-    return ice != nullptr && ice->active && ice->until >= now && ice->refills >= 1;
+    double qty = 0.0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (rows[i].bid == bidSide && std::fabs(rows[i].price - price) <= tick * 0.51)
+            qty += rows[i].qty;
+    }
+    return qty;
+}
+
+static int IceShown(const IceLevel* ice, double now)
+{
+    return ice != nullptr && ice->active && ice->until >= now && ice->price > 0.0;
 }
 
 static void CollectSide(SCStudyInterfaceRef sc, int bidSide, int levels, OrderSnap* rows, int& count)
 {
     const int kMaxOrders = 16;
     n_ACSIL::s_MarketOrderData orders[kMaxOrders];
-    if (levels > 8) levels = 8;
+    if (levels > 32) levels = 32;
     for (int level = 0; level < levels && count < 400; ++level)
     {
         s_MarketDepthEntry entry;
@@ -162,14 +173,14 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
     }
     char root[8] = {};
     if (!RootFromSymbol(sc.Symbol, root, sizeof root)) return;
-    MboState* state = static_cast<MboState*>(sc.GetPersistentPointer(2));
+    MboState* state = static_cast<MboState*>(sc.GetPersistentPointer(3));
     if (state == nullptr)
     {
         state = static_cast<MboState*>(sc.AllocateMemory(sizeof(MboState)));
         if (state == nullptr) return;
         std::memset(state, 0, sizeof(MboState));
         state->primaryBid = -1;
-        sc.SetPersistentPointer(2, state);
+        sc.SetPersistentPointer(3, state);
     }
     OrderSnap current[400];
     int count = 0;
@@ -217,6 +228,53 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
             state->primaryBid = oldOrder.bid;
         }
     }
+    const double life = 180.0;
+    for (int side = 0; side <= 1; ++side)
+    {
+        for (int i = 0; i < state->prevCount; ++i)
+        {
+            if (state->prev[i].bid != side) continue;
+            bool seen = false;
+            for (int earlier = 0; earlier < i; ++earlier)
+            {
+                if (state->prev[earlier].bid == side && std::fabs(state->prev[earlier].price - state->prev[i].price) <= tick * 0.51)
+                {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) continue;
+            const double price = state->prev[i].price;
+            const double was = QtyAt(state->prev, state->prevCount, side, price, tick);
+            const double nowQty = QtyAt(current, count, side, price, tick);
+            if (std::fabs(price - tradePrice) > tick * 2.0) continue;
+            IceLevel* ice = side ? &state->bidIce : &state->askIce;
+            const bool same = ice->active && ice->until >= now && std::fabs(ice->price - price) <= tick * 2.0;
+            if (was >= large && nowQty < was * 0.7)
+            {
+                if (!same)
+                {
+                    ice->price = price;
+                    ice->bid = side;
+                    ice->refills = 0;
+                    ice->peak = was;
+                }
+                else if (was > ice->peak)
+                    ice->peak = was;
+                ice->active = 1;
+                ice->until = now + life;
+                state->icebergUntil = now + life;
+                state->primaryBid = side;
+            }
+            if (same && ice->peak >= large && was < ice->peak * 0.9 && nowQty >= ice->peak * 0.9)
+            {
+                ice->refills += 1;
+                ice->until = now + life;
+                state->icebergUntil = now + life;
+                state->primaryBid = side;
+            }
+        }
+    }
     state->prevCount = count;
     if (count > 0) std::memcpy(state->prev, current, sizeof(OrderSnap) * static_cast<size_t>(count));
     SCString path;
@@ -232,11 +290,11 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
     if (state->primaryBid == 1) { primary = &state->bidIce; other = &state->askIce; }
     else if (state->primaryBid == 0) { primary = &state->askIce; other = &state->bidIce; }
     std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0);
-    if (IceLive(primary, now))
+    if (IceShown(primary, now))
         std::fprintf(file, "\"iceberg\":{\"price\":%.10g,\"side\":\"%s\",\"refills\":%d,\"time\":%.0f},", primary->price, primary->bid ? "bid" : "ask", primary->refills, primary->until);
     else
         std::fprintf(file, "\"iceberg\":null,");
-    if (IceLive(other, now))
+    if (IceShown(other, now))
         std::fprintf(file, "\"other\":{\"price\":%.10g,\"side\":\"%s\",\"refills\":%d,\"time\":%.0f},", other->price, other->bid ? "bid" : "ask", other->refills, other->until);
     else
         std::fprintf(file, "\"other\":null,");
