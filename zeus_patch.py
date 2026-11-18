@@ -507,6 +507,24 @@ else:
     stage.write_bytes(stage_text.encode("utf-8"))
     print("Startup now shows which step it is on.", flush=True)
 
+manual_needle = "        controls = self._owner_manual_controls_snapshot()"
+manual_insert = (
+    manual_needle + snl
+    + "        if controls.get(\"acceptance_armed\") and not controls.get(\"kill_switch\") and isinstance(controls.get(\"binding\"), dict):" + snl
+    + "            controls[\"owner_manual_enabled\"] = True" + snl
+    + "            if not isinstance(controls.get(\"owner_manual_binding\"), dict):" + snl
+    + "                controls[\"owner_manual_binding\"] = dict(controls[\"binding\"])"
+)
+if "controls[\"owner_manual_enabled\"] = True" in stage_text:
+    print("The signals order no longer waits on the manual switch.", flush=True)
+elif manual_needle not in stage_text:
+    print("Could not find the manual order check.", flush=True)
+    raise SystemExit(1)
+else:
+    stage_text = stage_text.replace(manual_needle, manual_insert, 1)
+    stage.write_bytes(stage_text.encode("utf-8"))
+    print("The signals order no longer waits on the manual switch.", flush=True)
+
 slip_path = Path("src") / "zeus2" / "execution" / "mt5_native.py"
 slip = slip_path.read_text(encoding="utf-8")
 slip_nl = "\r\n" if "\r\n" in slip else "\n"
