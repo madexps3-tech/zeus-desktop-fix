@@ -1326,6 +1326,19 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     stepping = "BUYERS" if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta > 0 else (
         "SELLERS" if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta < 0 else "QUIET"
     )
+    shots: dict[str, list[dict[str, float]]] = {}
+    if any(isinstance(row, dict) and row.get("tradeable") for row in rows):
+        def compact(name: str) -> list[dict[str, float]]:
+            found = []
+            for bar in (bars_by_chart.get(name) or [])[-70:]:
+                if not isinstance(bar, dict):
+                    continue
+                try:
+                    found.append({"o": float(bar["open"]), "h": float(bar["high"]), "l": float(bar["low"]), "c": float(bar["close"])})
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return found
+        shots = {"M5": compact("M5"), "M15": compact("M15"), "H1": compact("H1")}
     return {
         "ok": True,
         "symbol": symbol,
@@ -1338,6 +1351,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         "pools": pools,
         "reaction": reaction(bars_by_chart.get(chart) or [], pools),
         "rows": rows,
+        "shots": shots,
         "market": (rows[0].get("market") if rows else "RANGE"),
         "ladder": align_ladder(symbol, book, bid, ask),
         "flow": {

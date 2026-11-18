@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 import threading
 import urllib.request
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
 from secrets import token_hex
@@ -81,7 +83,13 @@ def _send(
     *,
     one_row: bool = False,
     reply: bool = False,
+    photo: bytes | None = None,
 ) -> int | None:
+    if photo:
+        try:
+            return _send_photo(token, chat, photo, text, buttons, one_row=one_row)
+        except Exception:
+            pass
     payload: dict[str, Any] = {"chat_id": chat, "text": text[:4000]}
     if buttons:
         cells = [{"text": label, "callback_data": data} for label, data in buttons]
@@ -98,6 +106,200 @@ def _send(
         return int(data["result"]["message_id"])
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _send_photo(
+    token: str,
+    chat: str,
+    photo: bytes,
+    caption: str,
+    buttons: list[tuple[str, str]] | None,
+    *,
+    one_row: bool,
+) -> int | None:
+    fields = {"chat_id": chat, "caption": caption[:1024]}
+    if buttons:
+        cells = [{"text": label, "callback_data": data} for label, data in buttons]
+        rows = [cells] if one_row else [[cell] for cell in cells]
+        fields["reply_markup"] = json.dumps({"inline_keyboard": rows})
+    boundary = "----ZeusShot"
+    body = bytearray()
+    for key, value in fields.items():
+        body.extend(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode()
+        )
+    body.extend(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"chart.png\"\r\nContent-Type: image/png\r\n\r\n".encode()
+    )
+    body.extend(photo)
+    body.extend(f"\r\n--{boundary}--\r\n".encode())
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendPhoto",
+        data=bytes(body),
+        headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    try:
+        return int(data["result"]["message_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+_FONT = {
+    " ": (0, 0, 0, 0, 0, 0, 0),
+    "-": (0, 0, 0, 31, 0, 0, 0),
+    ".": (0, 0, 0, 0, 0, 12, 12),
+    "0": (14, 17, 19, 21, 25, 17, 14),
+    "1": (4, 12, 4, 4, 4, 4, 14),
+    "2": (14, 17, 1, 6, 8, 16, 31),
+    "3": (14, 17, 1, 6, 1, 17, 14),
+    "4": (2, 6, 10, 18, 31, 2, 2),
+    "5": (31, 16, 30, 1, 1, 17, 14),
+    "6": (14, 16, 16, 30, 17, 17, 14),
+    "7": (31, 1, 2, 4, 8, 8, 8),
+    "8": (14, 17, 17, 14, 17, 17, 14),
+    "9": (14, 17, 17, 15, 1, 1, 14),
+    "A": (14, 17, 17, 31, 17, 17, 17),
+    "B": (30, 17, 17, 30, 17, 17, 30),
+    "C": (14, 17, 16, 16, 16, 17, 14),
+    "D": (30, 17, 17, 17, 17, 17, 30),
+    "E": (31, 16, 16, 30, 16, 16, 31),
+    "F": (31, 16, 16, 30, 16, 16, 16),
+    "G": (14, 17, 16, 23, 17, 17, 14),
+    "H": (17, 17, 17, 31, 17, 17, 17),
+    "I": (14, 4, 4, 4, 4, 4, 14),
+    "J": (7, 2, 2, 2, 2, 18, 12),
+    "K": (17, 18, 20, 24, 20, 18, 17),
+    "L": (16, 16, 16, 16, 16, 16, 31),
+    "M": (17, 27, 21, 21, 17, 17, 17),
+    "N": (17, 25, 21, 19, 17, 17, 17),
+    "O": (14, 17, 17, 17, 17, 17, 14),
+    "P": (30, 17, 17, 30, 16, 16, 16),
+    "Q": (14, 17, 17, 17, 21, 18, 13),
+    "R": (30, 17, 17, 30, 20, 18, 17),
+    "S": (14, 17, 16, 14, 1, 17, 14),
+    "T": (31, 4, 4, 4, 4, 4, 4),
+    "U": (17, 17, 17, 17, 17, 17, 14),
+    "V": (17, 17, 17, 17, 10, 10, 4),
+    "W": (17, 17, 17, 21, 21, 27, 17),
+    "X": (17, 17, 10, 4, 10, 17, 17),
+    "Y": (17, 17, 10, 4, 4, 4, 4),
+    "Z": (31, 1, 2, 4, 8, 16, 31),
+}
+
+
+def _png(width: int, height: int, rgb: bytearray) -> bytes:
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    raw = bytearray()
+    stride = width * 3
+    for y in range(height):
+        raw.append(0)
+        raw.extend(rgb[y * stride:(y + 1) * stride])
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b"")
+
+
+def _dot(rgb: bytearray, width: int, height: int, x: int, y: int, color: tuple[int, int, int]) -> None:
+    if 0 <= x < width and 0 <= y < height:
+        i = (y * width + x) * 3
+        rgb[i:i + 3] = bytes(color)
+
+
+def _text(rgb: bytearray, width: int, height: int, x: int, y: int, text: str, color: tuple[int, int, int]) -> None:
+    for ch in text.upper():
+        glyph = _FONT.get(ch, _FONT[" "])
+        for row, bits in enumerate(glyph):
+            for col in range(5):
+                if bits & (1 << (4 - col)):
+                    for dy in (0, 1):
+                        for dx in (0, 1):
+                            _dot(rgb, width, height, x + col * 2 + dx, y + row * 2 + dy, color)
+        x += 12
+
+
+def _price_text(price: float) -> str:
+    size = abs(price)
+    digits = 2 if size >= 100 else 3 if size >= 10 else 5
+    return f"{price:.{digits}f}"
+
+
+def chart_png(candles: list[dict[str, Any]], title: str, side: str, entry: float, stop: float, targets: list[float]) -> bytes | None:
+    """One phone-sized chart. Candles, the entry, the stop, and the targets."""
+    bars = []
+    for bar in candles[-70:]:
+        if not isinstance(bar, dict):
+            continue
+        try:
+            bars.append((float(bar.get("o", bar.get("open"))), float(bar.get("h", bar.get("high"))), float(bar.get("l", bar.get("low"))), float(bar.get("c", bar.get("close")))))
+        except (TypeError, ValueError):
+            continue
+    if len(bars) < 8:
+        return None
+    marks = [entry, stop, *[float(price) for price in targets if price is not None]]
+    lows = [bar[2] for bar in bars] + marks
+    highs = [bar[1] for bar in bars] + marks
+    low = min(lows)
+    high = max(highs)
+    if not high > low:
+        return None
+    pad = (high - low) * 0.06
+    low -= pad
+    high += pad
+    width, height = 960, 540
+    rgb = bytearray(b"\x0e\x16\x20" * (width * height))
+    left, right, top, bottom = 24, 820, 46, 500
+    span = high - low
+
+    def y_of(price: float) -> int:
+        return top + int((high - price) / span * (bottom - top))
+
+    grid = (28, 42, 58)
+    for step in range(5):
+        y = top + int((bottom - top) * step / 4)
+        for x in range(left, right):
+            _dot(rgb, width, height, x, y, grid)
+    slot = (right - left) / len(bars)
+    up = (92, 204, 148)
+    down = (214, 96, 104)
+    for index, (open_, high_, low_, close) in enumerate(bars):
+        x = left + int(index * slot + slot / 2)
+        color = up if close >= open_ else down
+        y1, y2 = y_of(high_), y_of(low_)
+        for y in range(min(y1, y2), max(y1, y2) + 1):
+            _dot(rgb, width, height, x, y, color)
+        body_top = y_of(max(open_, close))
+        body_bot = y_of(min(open_, close))
+        if body_bot - body_top < 1:
+            body_bot = body_top + 1
+        half = max(1, int(slot * 0.32))
+        for y in range(body_top, body_bot + 1):
+            for dx in range(-half, half + 1):
+                _dot(rgb, width, height, x + dx, y, color)
+    ink = (236, 232, 214)
+    lines = [(entry, "ENTRY", (232, 196, 96)), (stop, "STOP", (214, 96, 104))]
+    for index, price in enumerate(targets[:4]):
+        try:
+            lines.append((float(price), f"T{index + 1}", (120, 186, 230)))
+        except (TypeError, ValueError):
+            continue
+    used = []
+    for price, name, color in lines:
+        y = y_of(price)
+        for x in range(left, right):
+            if x % 4 < 3:
+                _dot(rgb, width, height, x, y, color)
+        label_y = y - 8
+        for taken in used:
+            if abs(label_y - taken) < 16:
+                label_y = taken + 16
+        used.append(label_y)
+        _text(rgb, width, height, right + 12, max(8, min(label_y, height - 20)), f"{name} {_price_text(price)}", color)
+    tone = up if side == "BUY" else down
+    _text(rgb, width, height, 24, 12, title[:42], tone if side in {"BUY", "SELL"} else ink)
+    return _png(width, height, rgb)
 
 
 def _money(row: dict[str, Any], account: Any, risk: float) -> str:
@@ -290,13 +492,27 @@ def announce(payload: dict[str, Any]) -> None:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
             text += "\nTap EDIT. It shows the risk, target, and stop. Reply with only the line you want to change."
+            photo = None
+            try:
+                shots = payload.get("shots") if isinstance(payload.get("shots"), dict) else {}
+                frame = "H1" if chart in {"SWING", "INTERDAY"} else "M5"
+                candles = shots.get(frame) or shots.get("M15") or shots.get("M5") or []
+                prices = [float(price) for price in targets if price is not None] or [float(target)]
+                photo = chart_png(candles, f"{label} {chart} {row.get('side')}", str(row.get("side")), float(row["entry"]), float(row["stop"]), prices)
+            except Exception:
+                photo = None
             if chart == "SCALP" and auto:
                 with _LOCK:
                     row_offer = _OFFERS.pop(offer)
                 _submit(token, chat, row_offer, "Scalp auto. ")
+                if photo:
+                    try:
+                        _send(token, chat, text, photo=photo)
+                    except Exception:
+                        pass
                 continue
             try:
-                _send(token, chat, text, [("TRADE", f"t{offer}"), ("EDIT", f"z{offer}")], one_row=True)
+                _send(token, chat, text, [("TRADE", f"t{offer}"), ("EDIT", f"z{offer}")], one_row=True, photo=photo)
             except Exception:
                 with _LOCK:
                     _OFFERS.pop(offer, None)
