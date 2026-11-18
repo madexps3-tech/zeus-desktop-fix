@@ -776,3 +776,32 @@ else:
         encoding="utf-8",
     )
     print("The order path accepts the typed risk.", flush=True)
+
+desk_ui = Path("src") / "zeus3" / "v19" / "trade_desk_v19_frontend.py"
+ui = desk_ui.read_text(encoding="utf-8")
+ui_changes = [
+    (
+        '<button id="manualBtn" class="statebtn" onclick="toggleAuthorityTD(\'OWNER_MANUAL\')">MANUAL</button>',
+        "",
+    ),
+    ("stateBtnTD('manualBtn',man,'MANUAL ✓','MANUAL OFF');", ""),
+    ("man=laneOn('OWNER_MANUAL')", "man=true"),
+    ("if(!laneOn('OWNER_MANUAL'))blockers.push('MANUAL OFF');", ""),
+    ("if(!laneOn('OWNER_MANUAL'))b.push('MANUAL OFF');", ""),
+    (":!laneOn('OWNER_MANUAL')", ":false"),
+    (":laneOn('OWNER_MANUAL')", ":true"),
+    ("&&!laneOn('OWNER_MANUAL')", ""),
+    ("&&laneOn('OWNER_MANUAL')", ""),
+    ("' · MANUAL '+(laneOn('OWNER_MANUAL')?'ON':'OFF')", ""),
+]
+if 'id="manualBtn"' not in ui and "laneOn('OWNER_MANUAL')" not in ui:
+    print("The manual switch is already gone.", flush=True)
+else:
+    updated = ui
+    for old, new in ui_changes:
+        updated = updated.replace(old, new)
+    if 'id="manualBtn"' in updated or "laneOn('OWNER_MANUAL')" in updated:
+        print("Could not remove the manual switch.", flush=True)
+        raise SystemExit(1)
+    desk_ui.write_text(updated, encoding="utf-8")
+    print("The manual switch is gone. A trade no longer waits on it.", flush=True)
