@@ -829,12 +829,10 @@ def _oil_feed(host: Any, chart: str, scan: bool) -> tuple[Any, dict[str, list[di
     if quote is None or chosen is None:
         return None
     bars_by_chart: dict[str, list[dict[str, Any]]] = {}
-    for name in CHARTS:
-        if scan and name != "M1":
-            bars_by_chart[name] = []
-            continue
+    names = ("M1", "M15", "H1", "H4", "D1") if scan else CHARTS
+    for name in names:
         try:
-            bars_by_chart[name] = _candles_from_rows(worker.bars(chosen, Timeframe(name), count=120 if scan else 400))
+            bars_by_chart[name] = _candles_from_rows(worker.bars(chosen, Timeframe(name), count=160 if scan else 400))
         except Exception:
             bars_by_chart[name] = []
     return quote, bars_by_chart, chosen
@@ -866,8 +864,14 @@ _FILLED: dict[str, float] = {}
 
 
 def _chart_bars(host: Any, symbol: str, chart: str, scan: bool) -> dict[str, list[dict[str, Any]]]:
-    """One MetaTrader history on a click. The other timeframes stay cached, and only one missing one is filled."""
+    """The pair on screen can wait for one missing chart. A scan has to see the charts a trade is built from."""
     found: dict[str, list[dict[str, Any]]] = {}
+    if scan:
+        for name in ("M1", "M15", "H1", "H4", "D1"):
+            found[name] = _bars(host, symbol, name, 90.0, 160)
+        for name in CHARTS:
+            found.setdefault(name, _CACHE.get(symbol + "|" + name, (0.0, []))[1])
+        return found
     missing: list[str] = []
     for name in CHARTS:
         key = symbol + "|" + name

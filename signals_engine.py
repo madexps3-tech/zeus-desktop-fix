@@ -850,27 +850,14 @@ def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None, symbol
     else:
         dead = bid is not None and stop >= float(bid)
         passed = ask is not None and target is not None and float(ask) >= float(target) - _band(symbol)
-    zone = row.get("zone")
-    entry = row.get("entry")
-    limit = float(MAX_WICK.get(symbol, 0.0) or 0.0)
-    # A swing break is outside value on purpose. The distance from that level is the trade.
-    left = (
-        row.get("chart") != "SWING"
-        and zone is not None
-        and entry is not None
-        and limit > 0
-        and abs(float(entry) - float(zone)) > limit
-    )
-    if not (dead or passed or left):
+    if not (dead or passed):
         return
     row["tradeable"] = False
     row["state"] = "SHOWN"
     if dead:
         reason = "Price is already through this stop, so the broker will not take it."
-    elif passed:
-        reason = "The first target is already reached. Not a new order."
     else:
-        reason = "The close was already too far from the zone. Not a market entry."
+        reason = "The first target is already reached. Not a new order."
     note = str(row.get("note") or "")
     if reason not in note:
         row["note"] = (reason + " " + note).strip()
@@ -1092,16 +1079,6 @@ def _pack(
     row["score_on"] = "M1"
     row["zone"] = float(zone["price"])
     row["note"] = _sentence(state, reason, side, zone, entry, stop, targets, symbol)
-    limit = float(MAX_WICK.get(symbol, 0.0) or 0.0)
-    if chart != "SWING" and limit and abs(entry - float(zone["price"])) > limit:
-        row["tradeable"] = False
-        row["state"] = "SHOWN"
-        late = (
-            f"The close is {round(abs(entry - float(zone['price'])), 5)} from the zone at {round(float(zone['price']), 5)}. "
-            "The move has already left. Not a market entry."
-        )
-        if late not in str(row.get("note") or ""):
-            row["note"] = (late + " " + str(row.get("note") or "")).strip()
     return row
 
 
