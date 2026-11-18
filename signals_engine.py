@@ -48,7 +48,7 @@ ICE_TICK = {
 WING = 2
 LOG = Path("signal_research_v2.jsonl")
 STATE = Path("signal_research_state_v2.json")
-FLOW_PAIRS = {"XAUUSD", "NAS100", "WTI"}
+FLOW_PAIRS = set(PAIRS)
 # How far price must move before the second score puts the stop at the entry.
 BE_MOVE = {
     "XAUUSD": 2.0,

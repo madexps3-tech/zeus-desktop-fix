@@ -94,6 +94,30 @@ static ValueArea SessionValue(SCStudyInterfaceRef sc)
     return area;
 }
 
+static void TradeDelta(SCStudyInterfaceRef sc, double& buy5, double& buy60)
+{
+    buy5 = 0.0;
+    buy60 = 0.0;
+    c_SCTimeAndSalesArray sales;
+    sc.GetTimeAndSales(sales);
+    const double now = sc.CurrentSystemDateTime.GetAsDouble();
+    const double second = 1.0 / 86400.0;
+    for (int index = sales.Size() - 1; index >= 0; --index)
+    {
+        const s_TimeAndSales& trade = sales[index];
+        if (trade.Volume <= 0) continue;
+        const double age = (now - trade.DateTime.GetAsDouble()) / second;
+        if (age > 60.0) break;
+        if (age < 0.0) continue;
+        double signedVolume = 0.0;
+        if (trade.Type == SC_TS_ASK) signedVolume = trade.Volume;
+        else if (trade.Type == SC_TS_BID) signedVolume = -static_cast<double>(trade.Volume);
+        else continue;
+        buy60 += signedVolume;
+        if (age <= 5.0) buy5 += signedVolume;
+    }
+}
+
 static void CollectSide(SCStudyInterfaceRef sc, int bidSide, int levels, OrderSnap* rows, int& count)
 {
     const int kMaxOrders = 16;
@@ -173,13 +197,16 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
     FILE* file = std::fopen(path.GetChars(), "wb");
     if (file == nullptr) return;
     const ValueArea area = SessionValue(sc);
+    double delta5 = 0.0;
+    double delta60 = 0.0;
+    TradeDelta(sc, delta5, delta60);
     if (area.have)
     {
-        std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g,\"last\":%.10g}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0, area.poc, area.vah, area.val, tradePrice);
+        std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g,\"last\":%.10g,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0, area.poc, area.vah, area.val, tradePrice, delta5, delta60);
     }
     else
     {
-        std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,\"poc\":null,\"vah\":null,\"val\":null}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0);
+        std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,\"poc\":null,\"vah\":null,\"val\":null,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0, delta5, delta60);
     }
     std::fclose(file);
 }

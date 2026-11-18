@@ -15,8 +15,12 @@ FRESH_SECONDS = 20.0
 
 MBO_ROOT = {
     "XAUUSD": "GC",
+    "XAGUSD": "SI",
     "NAS100": "NQ",
     "WTI": "CL",
+    "EURUSD": "6E",
+    "USDJPY": "6J",
+    "BTCUSD": "BTC",
 }
 
 

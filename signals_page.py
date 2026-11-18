@@ -884,6 +884,10 @@ def _book(symbol: str) -> dict[str, Any]:
             value = raw.get(name)
             if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0:
                 book[name] = float(value)
+        for name in ("delta_5s", "delta_60s"):
+            value = raw.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                book[name] = float(value)
         ice = raw.get("iceberg")
         if isinstance(ice, dict) and ice.get("price") is not None:
             book["iceberg"] = {
@@ -902,8 +906,10 @@ def _book(symbol: str) -> dict[str, Any]:
         _flow, _state, metrics = _sierra_flow(symbol)
         if metrics:
             book["absorption"] = bool(metrics.get("absorption"))
-            book["delta_5s"] = metrics.get("delta_5s")
-            book["delta_60s"] = metrics.get("delta_60s")
+            for name in ("delta_5s", "delta_60s"):
+                value = metrics.get(name)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    book[name] = value
     except Exception:
         pass
     return book

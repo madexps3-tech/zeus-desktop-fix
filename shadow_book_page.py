@@ -96,7 +96,7 @@ def _sierra_flow(symbol):
 
 
 def _mbo_view(mt5, symbol, resolved, preview):
-    if symbol not in ("XAUUSD", "NAS100", "WTI"):
+    if symbol not in ("XAUUSD", "XAGUSD", "NAS100", "WTI", "EURUSD", "USDJPY", "BTCUSD"):
         return {"mbo": None, "potentials": []}
     mbo = read_mbo(symbol)
     info = mt5.symbol_info(resolved)
