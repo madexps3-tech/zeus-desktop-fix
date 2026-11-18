@@ -1674,6 +1674,141 @@ def place_yen(book: dict[str, Any] | None, bid: float | None, ask: float | None)
         book[name] = round(value + shift, 5)
 
 
+def _hold_full(side: str, book: dict[str, Any] | None) -> bool:
+    """Both clocks with the trade, and no absorption. One clock is not a hold."""
+    book = book or {}
+    short = book.get("delta_5s")
+    longer = book.get("delta_60s")
+    if isinstance(short, bool) or isinstance(longer, bool):
+        return False
+    if not isinstance(short, (int, float)) or not isinstance(longer, (int, float)):
+        return False
+    if bool(book.get("absorption")):
+        return False
+    if side == "BUY":
+        return short > 0 and longer > 0
+    return short < 0 and longer < 0
+
+
+def _both_against(side: str, book: dict[str, Any] | None) -> bool:
+    book = book or {}
+    short = book.get("delta_5s")
+    longer = book.get("delta_60s")
+    if isinstance(short, bool) or isinstance(longer, bool):
+        return False
+    if not isinstance(short, (int, float)) or not isinstance(longer, (int, float)):
+        return False
+    if side == "BUY":
+        return short < 0 and longer < 0
+    return short > 0 and longer > 0
+
+
+def range_dip(bars: list[dict[str, Any]] | None) -> float | None:
+    """Twice the average candle range. Locked by the caller so a fast hour cannot widen it."""
+    if not bars:
+        return None
+    sample = list(bars[-15:-1]) if len(bars) > 15 else list(bars[-14:])
+    ranges = []
+    for bar in sample:
+        try:
+            ranges.append(abs(_num(bar, "high") - _num(bar, "low")))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(ranges) < 5:
+        return None
+    average = sum(ranges) / len(ranges)
+    if average <= 0:
+        return None
+    return average * 2.0
+
+
+def manage_decision(
+    *,
+    side: str,
+    entry: float,
+    stop: float | None,
+    risk: float | None,
+    bid: float,
+    ask: float,
+    targets: list[float],
+    dip: float | None,
+    book: dict[str, Any] | None,
+    volume: float,
+) -> dict[str, Any]:
+    """The stop moves. The half does not. T1 stays the first target."""
+    prices = []
+    for price in targets:
+        try:
+            prices.append(float(price))
+        except (TypeError, ValueError):
+            continue
+    if side not in {"BUY", "SELL"} or entry <= 0 or not prices:
+        return {"stop": None, "line": "", "risk": risk, "dip": dip}
+    first = prices[0]
+    distance = abs(first - entry)
+    if distance <= 0:
+        return {"stop": None, "line": "", "risk": risk, "dip": dip}
+    if risk is None or risk <= 0:
+        if isinstance(stop, (int, float)) and not isinstance(stop, bool):
+            gap = abs(entry - float(stop))
+            protective = (side == "BUY" and float(stop) < entry) or (side == "SELL" and float(stop) > entry)
+            if protective and gap > distance * 1e-4:
+                risk = gap
+    if risk is None or risk <= 0:
+        return {"stop": None, "line": "No original stop, so 1R cannot be found.", "risk": risk, "dip": dip}
+    one_r = entry + risk if side == "BUY" else entry - risk
+    mark = bid if side == "BUY" else ask
+    made = mark >= one_r if side == "BUY" else mark <= one_r
+    first_hit = mark >= first if side == "BUY" else mark <= first
+    first_is_inside = distance <= risk + 1e-9
+    paid = [price for price in prices if (mark >= price if side == "BUY" else mark <= price)]
+    desired = None
+    if first_is_inside:
+        if first_hit:
+            desired = entry
+    elif made:
+        desired = entry
+    if dip and dip > 0 and paid:
+        furthest = max(paid) if side == "BUY" else min(paid)
+        if abs(mark - furthest) + 1e-9 >= dip and ((side == "BUY" and furthest > entry) or (side == "SELL" and furthest < entry)):
+            desired = furthest
+    new_stop = None
+    if desired is not None and ((side == "BUY" and desired < mark) or (side == "SELL" and desired > mark)):
+        current = float(stop) if isinstance(stop, (int, float)) and not isinstance(stop, bool) else None
+        better = current is None or (desired > current if side == "BUY" else desired < current)
+        if better and (current is None or abs(desired - current) > max(risk * 1e-6, 1e-8)):
+            new_stop = desired
+    nxt = None
+    for price in prices:
+        if side == "BUY" and price > mark:
+            nxt = price
+            break
+        if side == "SELL" and price < mark:
+            nxt = price
+            break
+    in_window = False
+    if first_is_inside:
+        in_window = first_hit
+    elif made and dip and dip <= distance:
+        stretch = min(dip, distance * 0.10)
+        in_window = mark >= first - stretch if side == "BUY" else mark <= first + stretch
+    line = ""
+    if in_window or first_hit:
+        if _both_against(side, book):
+            line = "Both clocks are against the trade. Bank the rest."
+        elif _hold_full(side, book) and nxt is not None:
+            line = f"Hold the full position for {round(nxt, 5)}. The stop stays at the entry."
+        elif nxt is None:
+            line = "The last target is reached. Bank the trade."
+        elif volume < 0.02:
+            line = "Half is below the minimum lot. Bank all or hold all."
+        else:
+            line = f"Bank half. The rest stays for {round(nxt, 5)} with the stop at the entry."
+    elif made and not first_is_inside:
+        line = "1R is made. The stop belongs at the entry."
+    return {"stop": new_stop, "line": line, "risk": risk, "dip": dip}
+
+
 def _band(symbol: str, pips: float = 5.0) -> float:
     """Five pips is close enough to bank. The step is the pair's own pip."""
     return float(PIP.get(symbol, 0.0)) * pips

@@ -366,7 +366,7 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
             if incoming != chat:
                 return
             state = "on" if auto else "off"
-            _send(token, chat, f"Zeus will message this chat when a row is a trade. Tap TRADE, then CONFIRM. Scalp auto is {state}. Send /scalp on to send a scalp without the tap. /risk sets the percent. /sl, /tp, and /r edit the open trade. A price walking toward a zone is not a message.")
+            _send(token, chat, f"Zeus will message this chat when a row is a trade. Tap TRADE, then CONFIRM. Scalp auto is {state}. Send /scalp on to send a scalp without the tap. /manage on moves the stop. Banking stays a button. /risk sets the percent. /sl, /tp, and /r edit the open trade. A price walking toward a zone is not a message.")
             return
         if incoming != chat:
             return
@@ -390,6 +390,19 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
                 _send(token, chat, "Scalp auto is on. A scalp that is already a trade is sent. Intraday, interday, and swing still need a tap.")
             else:
                 _send(token, chat, "Scalp auto is off. A scalp needs a tap again.")
+            return
+        if lower.startswith("/manage"):
+            parts = lower.split()
+            if len(parts) != 2 or parts[1] not in {"on", "off"}:
+                from zeus3.v19.signals_page import manage_enabled
+                _send(token, chat, f"Manage is {'on' if manage_enabled() else 'off'}. Send /manage on or /manage off.")
+                return
+            from zeus3.v19.signals_page import set_manage
+            set_manage(parts[1] == "on")
+            if parts[1] == "on":
+                _send(token, chat, "Manage is on. At 1R the stop moves to the entry. Near the first target Zeus tells you to bank. It does not close the trade.")
+            else:
+                _send(token, chat, "Manage is off. Open tickets are left alone.")
             return
         if not lower.startswith("/risk"):
             if _command(token, chat, text):
@@ -721,6 +734,31 @@ def _apply(token: str, chat: str, ticket: int, action: str, **kwargs: Any) -> No
     done = {"BREAK_EVEN": "Stop moved to the entry.", "PARTIAL": "50% closed.", "CLOSE": "Closed.", "MODIFY_POSITION": "Sent to MT5."}
     held = _stamp()
     _send(token, chat, done.get(action, "Sent to MT5.") + (("\n" + held) if held else ""))
+
+
+def announce_manage(symbol: str, text: str, ticket: int, entry: float) -> None:
+    """One message when the stop moves or the bank line changes. The half is still a tap."""
+    token, chat, _risk, _auto = _read()
+    if not token or not chat or not text:
+        return
+    key = f"M|{ticket}|{text}"
+    if not _fresh(key):
+        return
+    offer_id = token_hex(4)
+    buttons = None
+    if text.startswith("Bank half"):
+        with _LOCK:
+            _OFFERS[offer_id] = {"kind": "manage", "ticket": ticket, "entry": entry, "at": time()}
+        buttons = [("BANK HALF", f"h{offer_id}")]
+    elif text.startswith("Bank"):
+        with _LOCK:
+            _OFFERS[offer_id] = {"kind": "manage", "ticket": ticket, "entry": entry, "at": time()}
+        buttons = [("BANK", f"x{offer_id}")]
+    label = _LABELS.get(symbol, symbol)
+    try:
+        _send(token, chat, f"{label}\n{text}", buttons)
+    except Exception:
+        _SENT.pop(key, None)
 
 
 def _confirm(token: str, chat: str, offer_id: str) -> None:

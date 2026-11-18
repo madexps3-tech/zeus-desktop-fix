@@ -6,6 +6,7 @@ import json
 import threading
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -22,7 +23,9 @@ from zeus3.v19.signals_engine import (
     build_rows,
     liquidity,
     mark_taken,
+    manage_decision,
     place_yen,
+    range_dip,
     reaction,
     record,
     session_levels,
@@ -89,6 +92,7 @@ tr.pick{outline:1px solid var(--warn)}
   <button onclick="fit()">FIT</button>
   <button id="zones" onclick="toggleZones()">ZONES ON</button>
   <label>RISK % <input id="risk" value="2" style="width:72px" oninput="if(data)paint()"></label>
+  <button id="manage" data-on="0" onclick="toggleManage()">MANAGE OFF</button>
   <span class="muted">A signal is a confirmed 1-minute candle. The stop must clear 10 times the spread. TRADE sends one market order to the logged-in MT5 account.</span>
 </div>
 <main>
@@ -171,10 +175,30 @@ async function load(force){
     if(id!==loadId || want!==symbol || wantChart!==chart)return;
     if(!r.ok||!j.ok)throw Error(j.message||("HTTP "+r.status));
     data=j; remember(j); $("clock").textContent=j.server_time||"";
+    const manage=$("manage");
+    if(manage){
+      manage.dataset.on=j.manage?"1":"0";
+      manage.textContent=j.manage?"MANAGE ON":"MANAGE OFF";
+    }
     draw(); paint(); consider(j);
   }catch(e){
     if(e.name!=="AbortError" && id===loadId)$("status").textContent="CHART ERROR · "+e.message;
   }finally{ if(id===loadId)busy=false }
+}
+async function toggleManage(){
+  const button=$("manage");
+  const on=button.dataset.on!=="1";
+  button.disabled=true;
+  try{
+    const r=await fetch("/api/v19/signals/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:on})});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw Error(j.message||"manage was not saved");
+    button.dataset.on=j.on?"1":"0";
+    button.textContent=j.on?"MANAGE ON":"MANAGE OFF";
+    $("status").textContent=j.on?"MANAGE ON. The stop moves. Banking stays a button.":"MANAGE OFF. The ticket is left alone.";
+  }catch(e){
+    $("status").textContent="MANAGE NOT SAVED · "+e.message;
+  }finally{ button.disabled=false; }
 }
 function windowRows(){
   const all=(data&&data.candles)||[];
@@ -673,7 +697,8 @@ function positionBox(list){
     <button onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
     <button onclick="manage(${p.ticket},'PARTIAL',null,50)">50%</button>
     <button onclick="editStop(${p.ticket})">EDIT SL</button>
-    <button onclick="editR(${p.ticket},${p.price_open},${p.stop_loss},'${p.side}')">EDIT R</button></div>`).join(""):"<div class='muted'>No open broker position on this pair.</div>";
+    <button onclick="editR(${p.ticket},${p.price_open},${p.stop_loss},'${p.side}')">EDIT R</button>
+    ${p.manage_line?`<div class="muted">${p.manage_line}</div>`:""}</div>`).join(""):"<div class='muted'>No open broker position on this pair.</div>";
 }
 async function livePositions(){
   if(document.visibilityState==="hidden"||!symbol)return;
@@ -945,7 +970,163 @@ def _positions(host: Any, symbol: str) -> list[dict[str, Any]]:
                 "profit": getattr(row, "profit", None),
             }
         )
+    _attach_manage(found)
     return found
+
+
+def _manage_path() -> Path:
+    return Path.cwd() / "manage.txt"
+
+
+def _manage_state_path() -> Path:
+    return Path.cwd() / "manage_state.json"
+
+
+def manage_enabled() -> bool:
+    path = _manage_path()
+    if not path.is_file():
+        return False
+    return path.read_text(encoding="utf-8").strip().lower() == "on"
+
+
+def set_manage(on: bool) -> None:
+    _manage_path().write_text("on\n" if on else "off\n", encoding="utf-8")
+
+
+def _load_manage_state() -> dict[str, Any]:
+    path = _manage_state_path()
+    if not path.is_file():
+        return {"trades": {}}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"trades": {}}
+    if not isinstance(payload, dict):
+        return {"trades": {}}
+    payload.setdefault("trades", {})
+    return payload
+
+
+def _save_manage_state(state: dict[str, Any]) -> None:
+    _manage_state_path().write_text(json.dumps(state), encoding="utf-8")
+
+
+def _attach_manage(positions: list[dict[str, Any]]) -> None:
+    if not manage_enabled():
+        return
+    trades = _load_manage_state().get("trades") or {}
+    for row in positions:
+        saved = trades.get(str(row.get("ticket"))) or {}
+        if saved.get("line"):
+            row["manage_line"] = saved["line"]
+
+
+def _announce_manage(symbol: str, text: str, ticket: int, entry: float) -> None:
+    try:
+        from zeus3.v19.telegram_alert import announce_manage
+    except Exception:
+        return
+    try:
+        announce_manage(symbol, text, ticket, entry)
+    except Exception:
+        return
+
+
+def _run_manage(
+    host: Any,
+    symbol: str,
+    rows: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+    bars_by_chart: dict[str, list[dict[str, Any]]],
+    book: dict[str, Any],
+    bid: float,
+    ask: float,
+) -> None:
+    """Move the stop when manage is on. Never close the trade from here."""
+    if not manage_enabled() or not positions:
+        return
+    state = _load_manage_state()
+    trades = state.setdefault("trades", {})
+    changed = False
+    for pos in positions:
+        side = str(pos.get("side") or "")
+        try:
+            entry = float(pos.get("price_open"))
+        except (TypeError, ValueError):
+            continue
+        match = None
+        nearest = None
+        for row in rows:
+            if str(row.get("side") or "") != side or row.get("entry") is None:
+                continue
+            try:
+                gap = abs(float(row["entry"]) - entry)
+            except (TypeError, ValueError):
+                continue
+            if nearest is None or gap < nearest:
+                nearest = gap
+                match = row
+        if match is None or nearest is None or nearest > max(abs(entry) * 0.002, 1e-6):
+            continue
+        targets = [price for price in (match.get("targets") or []) if price is not None]
+        if not targets and match.get("target") is not None:
+            targets = [match.get("target")]
+        chart = str(match.get("chart") or "")
+        bars = bars_by_chart.get("H1" if chart in {"SWING", "INTERDAY"} else "M15") or []
+        key = str(pos.get("ticket"))
+        previous = trades.get(key) if isinstance(trades.get(key), dict) else {}
+        dip = previous.get("dip")
+        if not isinstance(dip, (int, float)) or isinstance(dip, bool) or float(dip) <= 0:
+            dip = range_dip(bars)
+        risk = previous.get("risk")
+        if isinstance(risk, bool) or not isinstance(risk, (int, float)):
+            risk = None
+        decision = manage_decision(
+            side=side,
+            entry=entry,
+            stop=pos.get("stop_loss"),
+            risk=None if risk is None else float(risk),
+            bid=bid,
+            ask=ask,
+            targets=targets,
+            dip=None if dip is None else float(dip),
+            book=book,
+            volume=float(pos.get("volume") or 0),
+        )
+        saved = {
+            "symbol": symbol,
+            "line": decision.get("line") or "",
+            "risk": decision.get("risk"),
+            "dip": decision.get("dip"),
+            "sent": previous.get("sent"),
+            "told": previous.get("told") or "",
+        }
+        new_stop = decision.get("stop")
+        if isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool):
+            if saved.get("sent") != float(new_stop):
+                try:
+                    host.runtime.manage_physical_trade(
+                        ticket=int(pos["ticket"]),
+                        action="MODIFY_POSITION",
+                        stop_loss=float(new_stop),
+                        reason="ZEUS MANAGE",
+                    )
+                except Exception:
+                    new_stop = None
+                else:
+                    saved["sent"] = float(new_stop)
+                    pos["stop_loss"] = float(new_stop)
+                    _announce_manage(symbol, f"Stop moved to {round(float(new_stop), 5)}.", int(pos["ticket"]), entry)
+        if saved["line"] and saved["line"] != saved["told"]:
+            _announce_manage(symbol, str(saved["line"]), int(pos["ticket"]), entry)
+            saved["told"] = saved["line"]
+        trades[key] = saved
+        if saved["line"]:
+            pos["manage_line"] = saved["line"]
+        if saved != previous:
+            changed = True
+    if changed:
+        _save_manage_state(state)
 
 
 def render_signals_page() -> str:
@@ -1131,6 +1312,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)
     positions = _positions(host, symbol)
     _broker_protection(rows, positions)
+    _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
     if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:
         research = {"taken": {}, "if_taken": {}}
     else:
@@ -1175,12 +1357,25 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
             "note": str(book.get("reason") or ""),
         },
         "positions": positions,
+        "manage": manage_enabled(),
         "account": _account(host),
         "research": research,
         "feed": _feed(quote, ((bars_by_chart.get(chart) or [None])[-1] or {}).get("time", ""), chart),
         "news": _news(symbol),
         "server_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     }
+
+
+async def signals_manage(host: Any, request: web.Request) -> web.Response:
+    """The stop-management switch. Off leaves the ticket alone."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict) or "on" not in payload:
+        return web.json_response({"ok": True, "on": manage_enabled()})
+    set_manage(bool(payload.get("on")))
+    return web.json_response({"ok": True, "on": manage_enabled()})
 
 
 async def signals_positions(host: Any, request: web.Request) -> web.Response:

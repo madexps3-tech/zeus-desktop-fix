@@ -152,6 +152,32 @@ if "/api/v19/signals/positions" not in text:
     )
     print("Positions route added.", flush=True)
 
+if "def signals_manage" not in text:
+    manage_method = (
+        "    async def signals_manage(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import signals_manage" + newline
+        + "        return await signals_manage(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the manage handler.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, manage_method + marker, 1)
+    print("Manage handler added.", flush=True)
+
+if "/api/v19/signals/manage" not in text:
+    old_positions = 'app.router.add_get("/api/v19/signals/positions", self.signals_positions)'
+    if old_positions not in text:
+        print("Could not find the positions route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_positions,
+        old_positions + newline + '        app.router.add_post("/api/v19/signals/manage", self.signals_manage)',
+        1,
+    )
+    print("Manage route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
 
 shell = Path("src") / "zeus3" / "v19" / "shell.py"
