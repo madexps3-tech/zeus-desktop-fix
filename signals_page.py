@@ -1378,7 +1378,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
                 except (KeyError, TypeError, ValueError):
                     continue
             return found
-        shots = {"M5": compact("M5"), "M15": compact("M15"), "H1": compact("H1")}
+        shots = {"M1": compact("M1"), "M5": compact("M5"), "M15": compact("M15"), "H1": compact("H1"), "H4": compact("H4")}
     return {
         "ok": True,
         "symbol": symbol,

@@ -312,6 +312,35 @@ def chart_png(candles: list[dict[str, Any]], title: str, side: str, entry: float
     return _png(width, height, rgb)
 
 
+def _candles_for(payload: dict[str, Any], chart: str) -> list[dict[str, Any]]:
+    shots = payload.get("shots") if isinstance(payload.get("shots"), dict) else {}
+    order = ("H1", "H4", "M15", "M5", "M1") if chart in {"SWING", "INTERDAY"} else ("M5", "M15", "M1", "H1", "H4")
+    for name in order:
+        candles = shots.get(name) or []
+        if isinstance(candles, list) and len(candles) >= 8:
+            return candles
+    for candles in shots.values():
+        if isinstance(candles, list) and len(candles) >= 8:
+            return candles
+    return []
+
+
+def _picture(payload: dict[str, Any], label: str, chart: str, row: dict[str, Any], target: Any, targets: list[Any]) -> bytes | None:
+    try:
+        candles = _candles_for(payload, chart)
+        prices = [float(price) for price in targets if price is not None] or [float(target)]
+        return chart_png(
+            candles,
+            f"{label} {chart} {row.get('side')}",
+            str(row.get("side")),
+            float(row["entry"]),
+            float(row["stop"]),
+            prices,
+        )
+    except Exception:
+        return None
+
+
 def _money(row: dict[str, Any], account: Any, risk: float) -> str:
     """Same line as the desk: each target in R, and the dollar value of that R at the chosen risk."""
     entry = row.get("entry")
@@ -505,15 +534,7 @@ def announce(payload: dict[str, Any]) -> None:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
             text += "\nTap EDIT. It shows the risk, target, and stop. Reply with only the line you want to change."
-            photo = None
-            try:
-                shots = payload.get("shots") if isinstance(payload.get("shots"), dict) else {}
-                frame = "H1" if chart in {"SWING", "INTERDAY"} else "M5"
-                candles = shots.get(frame) or shots.get("M15") or shots.get("M5") or []
-                prices = [float(price) for price in targets if price is not None] or [float(target)]
-                photo = chart_png(candles, f"{label} {chart} {row.get('side')}", str(row.get("side")), float(row["entry"]), float(row["stop"]), prices)
-            except Exception:
-                photo = None
+            photo = _picture(payload, label, chart, row, target, targets)
             if chart == "SCALP" and auto:
                 with _LOCK:
                     row_offer = _OFFERS.pop(offer)
@@ -552,8 +573,9 @@ def announce(payload: dict[str, Any]) -> None:
             held = _stamp(symbol, str(row.get("side") or ""))
             if held:
                 text += f"\n{held}"
+            photo = _picture(payload, label, chart, row, target, targets)
             try:
-                _send(token, chat, text, buttons or None)
+                _send(token, chat, text, buttons or None, photo=photo)
             except Exception:
                 _SENT.pop(f"G|{symbol}|{chart}|{row.get('side')}|{guide}", None)
 
