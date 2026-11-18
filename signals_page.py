@@ -402,8 +402,9 @@ let board={};
 function boardLine(payload){
   const rows=(payload&&payload.rows)||[];
   const rank={INTRADAY:0,INTERDAY:1,SCALP:2,SWING:3,ICEBERG:4};
-  const live=rows.filter(r=>rank[r.chart]!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
-  const hit=live.find(r=>(r.tradeable||r.entry!=null)&&r.side);
+  const live=rows.filter(r=>rank[r.chart]!=null);
+  const ranked=live.filter(r=>r.side&&r.entry!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
+  const hit=ranked.find(r=>r.tradeable)||ranked.find(r=>r.state!=="SHOWN");
   if(hit){
     const money=String(moneyLine(hit, payload.account)).split(" · ")[0];
     return {kind:"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
