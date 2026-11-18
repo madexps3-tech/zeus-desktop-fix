@@ -1344,24 +1344,18 @@ def _value_break(
     spread: float,
     area: tuple[float, float, float] | None,
 ) -> dict[str, Any] | None:
-    """Two closes outside value. That sell or buy is the swing, taken once and held."""
-    if area is None or len(closed) < 2:
+    """The last two closes just left value. An older close is not a new market order."""
+    if area is None or len(closed) < 3:
         return None
     val, poc, vah = area
-    window = closed[-300:]
-    start = None
-    side = ""
-    level = 0.0
-    for index in range(1, len(window)):
-        older = _num(window[index - 1], "close")
-        newer = _num(window[index], "close")
-        if older < val and newer < val:
-            start, side, level = window[index], "SELL", val
-            break
-        if older > vah and newer > vah:
-            start, side, level = window[index], "BUY", vah
-            break
-    if start is None:
+    prior = _num(closed[-3], "close")
+    older = _num(closed[-2], "close")
+    newer = _num(closed[-1], "close")
+    if older > vah and newer > vah and prior <= vah:
+        start, side, level = closed[-1], "BUY", vah
+    elif older < val and newer < val and prior >= val:
+        start, side, level = closed[-1], "SELL", val
+    else:
         return None
     entry = _num(start, "close")
     pad = max(float(spread) * 10.0, PIP.get(symbol, 0.0) or 0.0)
@@ -1391,27 +1385,6 @@ def _value_break(
     row = _pack(symbol, "SWING", "BREAK", side, "TREND", zone, start, stop, targets, spread)
     if row is None:
         return None
-    first = float(targets[0])
-    near = _band(symbol)
-    for bar in window:
-        if _time(bar) <= _time(start):
-            continue
-        if side == "SELL":
-            if _num(bar, "low") <= first + near:
-                row["tradeable"] = False
-                row["state"] = "SHOWN"
-                row["note"] = "The first target is already reached. Not a new order. " + str(row.get("note") or "")
-                break
-            if _num(bar, "high") >= stop:
-                return None
-        else:
-            if _num(bar, "high") >= first - near:
-                row["tradeable"] = False
-                row["state"] = "SHOWN"
-                row["note"] = "The first target is already reached. Not a new order. " + str(row.get("note") or "")
-                break
-            if _num(bar, "low") <= stop:
-                return None
     row["note"] = (
         f"BREAK {side}. Price left value. Two 1-minute candles closed outside {round(level, 5)}. "
         f"Stop back inside value at {round(float(row['stop']), 5)}. "
