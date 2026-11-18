@@ -40,10 +40,10 @@ def _file() -> Path:
     return Path.cwd() / "telegram.txt"
 
 
-def _read() -> tuple[str, str, float, bool]:
+def _read() -> tuple[str, str, float, bool, bool]:
     path = _file()
     if not path.is_file():
-        return "", "", 2.0, False
+        return "", "", 2.0, False, False
     lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
     token = lines[0] if lines else ""
     chat = lines[1] if len(lines) > 1 else ""
@@ -56,11 +56,12 @@ def _read() -> tuple[str, str, float, bool]:
     if not 0 < risk:
         risk = 2.0
     auto = len(lines) > 3 and lines[3].lower() == "on"
-    return token, chat, risk, auto
+    ice = len(lines) > 4 and lines[4].lower() == "on"
+    return token, chat, risk, auto, ice
 
 
-def _write(token: str, chat: str, risk: float, auto: bool) -> None:
-    _file().write_text(f"{token}\n{chat}\n{risk}\n{'on' if auto else 'off'}\n", encoding="utf-8")
+def _write(token: str, chat: str, risk: float, auto: bool, ice: bool = False) -> None:
+    _file().write_text(f"{token}\n{chat}\n{risk}\n{'on' if auto else 'off'}\n{'on' if ice else 'off'}\n", encoding="utf-8")
 
 
 def _api(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -430,7 +431,7 @@ def _charts_aside():
 def start(host: Any) -> None:
     global _STARTED, _HOST
     _HOST = host
-    token, _, _, _ = _read()
+    token, _, _, _, _ = _read()
     if not token or _STARTED:
         return
     _STARTED = True
@@ -438,9 +439,9 @@ def start(host: Any) -> None:
 
 
 def announce(payload: dict[str, Any]) -> None:
-    """A tradeable row gets one message with TRADE. A scalp with auto on is sent without the tap."""
+    """A tradeable row gets one message with TRADE. A scalp or iceberg with its own auto on is sent without the tap."""
     global _FOCUS
-    token, chat, risk, auto = _read()
+    token, chat, risk, auto, ice = _read()
     if not token or not chat or not payload.get("ok"):
         return
     symbol = str(payload.get("symbol") or "")
@@ -511,6 +512,16 @@ def announce(payload: dict[str, Any]) -> None:
                     except Exception:
                         pass
                 continue
+            if chart == "ICEBERG" and ice:
+                with _LOCK:
+                    row_offer = _OFFERS.pop(offer)
+                _submit(token, chat, row_offer, "Iceberg auto. ")
+                if photo:
+                    try:
+                        _send(token, chat, text, photo=photo)
+                    except Exception:
+                        pass
+                continue
             try:
                 _send(token, chat, text, [("TRADE", f"t{offer}"), ("EDIT", f"z{offer}")], one_row=True, photo=photo)
             except Exception:
@@ -552,7 +563,7 @@ def _fresh(key: str) -> bool:
 def _poll() -> None:
     global _OFFSET
     while True:
-        token, chat, risk, auto = _read()
+        token, chat, risk, auto, ice = _read()
         if not token:
             return
         try:
@@ -565,24 +576,25 @@ def _poll() -> None:
                 continue
             _OFFSET = int(update.get("update_id") or _OFFSET) + 1
             try:
-                _handle(token, chat, risk, auto, update)
+                _handle(token, chat, risk, auto, ice, update)
             except Exception:
                 continue
 
 
-def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, Any]) -> None:
+def _handle(token: str, chat: str, risk: float, auto: bool, ice: bool, update: dict[str, Any]) -> None:
     message = update.get("message") if isinstance(update.get("message"), dict) else None
     if message is not None:
         incoming = str(message.get("chat", {}).get("id") or "")
         text = str(message.get("text") or "").strip()
         if text.startswith("/start") and incoming:
             if not chat:
-                _write(token, incoming, risk, auto)
+                _write(token, incoming, risk, auto, ice)
                 chat = incoming
             if incoming != chat:
                 return
             state = "on" if auto else "off"
-            _send(token, chat, f"Zeus will message this chat when a row is a trade. Tap TRADE, then CONFIRM. Scalp auto is {state}. Send /scalp on to send a scalp without the tap. /manage on moves the stop. Banking stays a button. /risk sets the percent. /sl, /tp, and /r edit the open trade. A price walking toward a zone is not a message.")
+            ice_state = "on" if ice else "off"
+            _send(token, chat, f"Zeus will message this chat when a row is a trade. Tap TRADE, then CONFIRM. Scalp auto is {state}. Iceberg auto is {ice_state}. Send /scalp on or /ice on to send that one without the tap. /manage on moves the stop. Banking stays a button. /risk sets the percent. /sl, /tp, and /r edit the open trade. A price walking toward a zone is not a message.")
             return
         if incoming != chat:
             return
@@ -601,11 +613,23 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
                 _send(token, chat, f"Scalp auto is {'on' if auto else 'off'}. Send /scalp on or /scalp off.")
                 return
             nxt = parts[1] == "on"
-            _write(token, chat, risk, nxt)
+            _write(token, chat, risk, nxt, ice)
             if nxt:
                 _send(token, chat, "Scalp auto is on. A scalp that is already a trade is sent. Intraday, interday, and swing still need a tap.")
             else:
                 _send(token, chat, "Scalp auto is off. A scalp needs a tap again.")
+            return
+        if lower.startswith("/ice"):
+            parts = lower.split()
+            if len(parts) != 2 or parts[1] not in {"on", "off"}:
+                _send(token, chat, f"Iceberg auto is {'on' if ice else 'off'}. Send /ice on or /ice off.")
+                return
+            nxt_ice = parts[1] == "on"
+            _write(token, chat, risk, auto, nxt_ice)
+            if nxt_ice:
+                _send(token, chat, "Iceberg auto is on. A gold, oil, or Nasdaq iceberg that has already refilled is sent. The other rows still need a tap.")
+            else:
+                _send(token, chat, "Iceberg auto is off. An iceberg needs a tap again.")
             return
         if lower.startswith("/manage"):
             parts = lower.split()
@@ -635,7 +659,7 @@ def _handle(token: str, chat: str, risk: float, auto: bool, update: dict[str, An
         if not 0 < nxt_risk:
             _send(token, chat, "Risk must be above 0.")
             return
-        _write(token, chat, nxt_risk, auto)
+        _write(token, chat, nxt_risk, auto, ice)
         pending = _pending()
         if pending is not None:
             _touch(pending[0], risk=nxt_risk)
@@ -736,8 +760,8 @@ def _apply_reply(token: str, chat: str, offer_id: str, text: str) -> None:
         changes["target"] = entry + span * found["r"] if offer.get("side") == "BUY" else entry - span * found["r"]
     _touch(offer_id, **changes)
     if "risk" in changes:
-        _, _, _, auto = _read()
-        _write(token, chat, float(changes["risk"]), auto)
+        _, _, _, auto, ice = _read()
+        _write(token, chat, float(changes["risk"]), auto, ice)
     _send(token, chat, "Updated. Confirm this one.")
     _confirm(token, chat, offer_id)
 
@@ -954,7 +978,7 @@ def _apply(token: str, chat: str, ticket: int, action: str, **kwargs: Any) -> No
 
 def announce_manage(symbol: str, text: str, ticket: int, entry: float) -> None:
     """One message when the stop moves or the bank line changes. The half is still a tap."""
-    token, chat, _risk, _auto = _read()
+    token, chat, _risk, _auto, _ice = _read()
     if not token or not chat or not text:
         return
     key = f"M|{ticket}|{text}"
