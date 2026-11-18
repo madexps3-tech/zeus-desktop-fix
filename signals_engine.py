@@ -35,7 +35,9 @@ MAX_WICK = {
     "USDJPY": 0.20,
     "BTCUSD": 200.0,
 }
-# One price step past an iceberg. The spread rule can still block it.
+# Gold and oil stop just past the iceberg. Nasdaq is wider because one tick is run through.
+ICE_ONLY = {"XAUUSD", "WTI", "NAS100"}
+ICE_STOP = {"XAUUSD": 3.0, "WTI": 0.30, "NAS100": 20.0}
 ICE_TICK = {
     "XAUUSD": 0.1,
     "XAGUSD": 0.005,
@@ -758,7 +760,24 @@ def _swing(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], spread: 
     return None
 
 
-def _iceberg(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], book: dict[str, Any] | None, spread: float) -> dict[str, Any] | None:
+def _on_cfd(symbol: str, price: float, book: dict[str, Any], bid: float | None, ask: float | None) -> float | None:
+    """Move a futures iceberg onto the CFD. Too wide a gap is not an entry."""
+    try:
+        futures = float((book or {}).get("last"))
+        mid = (float(bid) + float(ask)) / 2.0
+    except (TypeError, ValueError):
+        return None
+    if futures <= 0 or mid <= 0:
+        return None
+    shift = mid - futures
+    if abs(shift) > float(MAX_BASIS.get(symbol, 0.0)):
+        return None
+    return price + shift
+
+
+def _iceberg(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], book: dict[str, Any] | None, spread: float, bid: float | None = None, ask: float | None = None) -> dict[str, Any] | None:
+    if symbol not in ICE_ONLY:
+        return None
     ice = (book or {}).get("iceberg")
     if not isinstance(ice, dict) or ice.get("price") is None:
         return None
@@ -766,15 +785,30 @@ def _iceberg(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], book: 
     if side_name not in ("bid", "ask"):
         return None
     side = "BUY" if side_name == "bid" else "SELL"
-    price = float(ice["price"])
-    tick = float(ICE_TICK.get(symbol, 0.0))
-    if tick <= 0:
+    try:
+        raw_price = float(ice["price"])
+    except (TypeError, ValueError):
         return None
-    stop = price - tick if side == "BUY" else price + tick
-    _, highs, lows = _ends(bars_by_chart.get("M15") or [])
-    _, highs5, lows5 = _ends(bars_by_chart.get("M5") or [])
-    pool = [point["price"] for point in (highs + highs5 if side == "BUY" else lows + lows5)]
-    target = _nearest(side, price, pool)
+    price = _on_cfd(symbol, raw_price, book or {}, bid, ask)
+    if price is None:
+        return None
+    stop_dist = max(float(ICE_STOP.get(symbol, 0.0)), spread * 10.0 if spread > 0 else 0.0)
+    if stop_dist <= 0:
+        return None
+    stop = price - stop_dist if side == "BUY" else price + stop_dist
+    other = (book or {}).get("other") if isinstance((book or {}).get("other"), dict) else None
+    target = None
+    bank = "No iceberg the other way yet. The first target is 1R, and it banks early when that iceberg prints."
+    if other is not None and other.get("price") is not None:
+        try:
+            other_price = _on_cfd(symbol, float(other["price"]), book or {}, bid, ask)
+        except (TypeError, ValueError):
+            other_price = None
+        if other_price is not None and ((side == "SELL" and other_price < price) or (side == "BUY" and other_price > price)):
+            target = other_price
+            bank = "The iceberg the other way is the target. Bank there."
+    if target is None:
+        target = price + stop_dist if side == "BUY" else price - stop_dist
     stamp = ice.get("time")
     when = ""
     try:
@@ -782,6 +816,7 @@ def _iceberg(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], book: 
     except (TypeError, ValueError, OSError):
         when = datetime.now(timezone.utc).isoformat()
     row = _offer("M1", side, "ICEBERG", price, stop, target, when, spread, symbol, wick_limit=False)
+    row["note"] = bank + " " + str(row.get("note") or "")
     if not (book or {}).get("fresh"):
         row["tradeable"] = False
         row["state"] = "SHOWN"
@@ -1496,15 +1531,13 @@ def build_rows(
         swing = _choose(
             symbol, "SWING", swing_state, closed_h4, swing_zones, spread, wider, wider=wider, swing_stop=True,
         )
-    iceberg = _iceberg(symbol, bars_by_chart, book, spread)
-    if iceberg is not None:
-        risk = abs(float(iceberg.get("entry") or 0) - float(iceberg.get("stop") or 0))
-        if spread > 0 and risk + 1e-9 < spread * 10.0:
-            iceberg = None
-        elif iceberg.get("target") is None or not iceberg.get("tradeable"):
-            iceberg = None
+    iceberg = _iceberg(symbol, bars_by_chart, book, spread, bid, ask)
+    if symbol not in ICE_ONLY:
+        iceberg_note = "Iceberg is only gold, oil, and Nasdaq."
+    else:
+        iceberg_note = "No iceberg price in the file."
     notes = {
-        "ICEBERG": "No iceberg price in the file.",
+        "ICEBERG": iceberg_note,
         "INTRADAY": intraday_note,
         "INTERDAY": "No intraday trade is still open.",
         "SCALP": "The close is not on the point of control.",

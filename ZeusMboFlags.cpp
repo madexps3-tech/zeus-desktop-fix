@@ -8,7 +8,8 @@
 SCDLLName("ZeusMboFlags")
 
 struct OrderSnap { uint64_t id; double qty; double price; int bid; };
-struct MboState { OrderSnap prev[400]; int prevCount; double sweepUntil; double icebergUntil; double pulledUntil; };
+struct IceLevel { int active; double price; int bid; int refills; double until; };
+struct MboState { OrderSnap prev[400]; int prevCount; double sweepUntil; double icebergUntil; double pulledUntil; IceLevel bidIce; IceLevel askIce; int primaryBid; };
 
 struct ValueArea { int have; double poc; double vah; double val; };
 
@@ -118,6 +119,11 @@ static void TradeDelta(SCStudyInterfaceRef sc, double& buy5, double& buy60)
     }
 }
 
+static int IceLive(const IceLevel* ice, double now)
+{
+    return ice != nullptr && ice->active && ice->until >= now && ice->refills >= 1;
+}
+
 static void CollectSide(SCStudyInterfaceRef sc, int bidSide, int levels, OrderSnap* rows, int& count)
 {
     const int kMaxOrders = 16;
@@ -146,7 +152,7 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
     if (sc.SetDefaults)
     {
         sc.GraphName = "ZEUS MBO Flags";
-        sc.StudyDescription = "Writes the session point of control, value area, and the sweep flags. Does not trade.";
+        sc.StudyDescription = "Writes the session point of control, value area, and the iceberg price. Does not trade.";
         sc.AutoLoop = 0;
         sc.MaintainVolumeAtPriceData = 1;
         sc.UsesMarketDepthData = 1;
@@ -156,13 +162,14 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
     }
     char root[8] = {};
     if (!RootFromSymbol(sc.Symbol, root, sizeof root)) return;
-    MboState* state = static_cast<MboState*>(sc.GetPersistentPointer(1));
+    MboState* state = static_cast<MboState*>(sc.GetPersistentPointer(2));
     if (state == nullptr)
     {
         state = static_cast<MboState*>(sc.AllocateMemory(sizeof(MboState)));
         if (state == nullptr) return;
         std::memset(state, 0, sizeof(MboState));
-        sc.SetPersistentPointer(1, state);
+        state->primaryBid = -1;
+        sc.SetPersistentPointer(2, state);
     }
     OrderSnap current[400];
     int count = 0;
@@ -181,14 +188,34 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
             if (current[newIndex].id == oldOrder.id) { match = &current[newIndex]; break; }
         }
         const bool tradedHere = std::fabs(oldOrder.price - tradePrice) <= tick * 2.0;
+        IceLevel* ice = oldOrder.bid ? &state->bidIce : &state->askIce;
+        const bool sameIce = ice->active && ice->until >= now && std::fabs(ice->price - oldOrder.price) <= tick * 2.0;
         if (match == nullptr)
         {
             if (tradedHere) state->sweepUntil = now + 60.0;
             else if (oldOrder.qty >= large) state->pulledUntil = now + 60.0;
             continue;
         }
-        if (oldOrder.qty >= large && match->qty < oldOrder.qty * 0.7 && tradedHere) state->icebergUntil = now + 60.0;
-        if (oldOrder.qty >= large && match->qty >= oldOrder.qty * 0.9 && tradedHere && state->icebergUntil > now) state->icebergUntil = now + 60.0;
+        if (oldOrder.qty >= large && match->qty < oldOrder.qty * 0.7 && tradedHere)
+        {
+            if (!sameIce)
+            {
+                ice->price = oldOrder.price;
+                ice->bid = oldOrder.bid;
+                ice->refills = 0;
+            }
+            ice->active = 1;
+            ice->until = now + 60.0;
+            state->icebergUntil = now + 60.0;
+            state->primaryBid = oldOrder.bid;
+        }
+        if (oldOrder.qty >= large && match->qty >= oldOrder.qty * 0.9 && tradedHere && sameIce)
+        {
+            ice->refills += 1;
+            ice->until = now + 60.0;
+            state->icebergUntil = now + 60.0;
+            state->primaryBid = oldOrder.bid;
+        }
     }
     state->prevCount = count;
     if (count > 0) std::memcpy(state->prev, current, sizeof(OrderSnap) * static_cast<size_t>(count));
@@ -200,13 +227,22 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
     double delta5 = 0.0;
     double delta60 = 0.0;
     TradeDelta(sc, delta5, delta60);
-    if (area.have)
-    {
-        std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g,\"last\":%.10g,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0, area.poc, area.vah, area.val, tradePrice, delta5, delta60);
-    }
+    const IceLevel* primary = nullptr;
+    const IceLevel* other = nullptr;
+    if (state->primaryBid == 1) { primary = &state->bidIce; other = &state->askIce; }
+    else if (state->primaryBid == 0) { primary = &state->askIce; other = &state->bidIce; }
+    std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0);
+    if (IceLive(primary, now))
+        std::fprintf(file, "\"iceberg\":{\"price\":%.10g,\"side\":\"%s\",\"refills\":%d,\"time\":%.0f},", primary->price, primary->bid ? "bid" : "ask", primary->refills, primary->until);
     else
-    {
-        std::fprintf(file, "{\"source\":\"SIERRA_ACSIL_MBO\",\"symbol\":\"%s\",\"sweep_consumed\":%d,\"iceberg_refresh\":%d,\"size_pulled\":%d,\"poc\":null,\"vah\":null,\"val\":null,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", root, state->sweepUntil >= now ? 1 : 0, state->icebergUntil >= now ? 1 : 0, state->pulledUntil >= now ? 1 : 0, delta5, delta60);
-    }
+        std::fprintf(file, "\"iceberg\":null,");
+    if (IceLive(other, now))
+        std::fprintf(file, "\"other\":{\"price\":%.10g,\"side\":\"%s\",\"refills\":%d,\"time\":%.0f},", other->price, other->bid ? "bid" : "ask", other->refills, other->until);
+    else
+        std::fprintf(file, "\"other\":null,");
+    if (area.have)
+        std::fprintf(file, "\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g,\"last\":%.10g,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", area.poc, area.vah, area.val, tradePrice, delta5, delta60);
+    else
+        std::fprintf(file, "\"poc\":null,\"vah\":null,\"val\":null,\"last\":%.10g,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", tradePrice, delta5, delta60);
     std::fclose(file);
 }

@@ -450,7 +450,7 @@ def announce(payload: dict[str, Any]) -> None:
         if not isinstance(row, dict) or not row.get("side") or row.get("entry") is None or row.get("stop") is None:
             continue
         chart = str(row.get("chart") or "")
-        if chart not in {"INTRADAY", "INTERDAY", "SCALP", "SWING"}:
+        if chart not in {"INTRADAY", "INTERDAY", "SCALP", "SWING", "ICEBERG"}:
             continue
         target = row.get("target")
         targets = row.get("targets") if isinstance(row.get("targets"), list) else []

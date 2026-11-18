@@ -926,6 +926,16 @@ def _book(symbol: str) -> dict[str, Any]:
             }
         else:
             book["iceberg"] = None
+        other = raw.get("other")
+        if isinstance(other, dict) and other.get("price") is not None:
+            book["other"] = {
+                "price": float(other["price"]),
+                "side": str(other.get("side") or ""),
+                "refills": int(other.get("refills") or 0),
+                "time": other.get("time"),
+            }
+        else:
+            book["other"] = None
     try:
         from zeus3.v19.shadow_book_page import _sierra_flow
 
