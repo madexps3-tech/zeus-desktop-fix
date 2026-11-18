@@ -428,6 +428,9 @@ def _charts_aside():
         _ORDER_BUSY.clear()
 
 
+_LIMIT_ROWS = {"ICEBERG", "SCALP", "INTRADAY", "SWING"}
+
+
 def start(host: Any) -> None:
     global _STARTED, _HOST
     _HOST = host
@@ -515,6 +518,7 @@ def announce(payload: dict[str, Any]) -> None:
             if chart == "ICEBERG" and ice:
                 with _LOCK:
                     row_offer = _OFFERS.pop(offer)
+                row_offer["limit"] = True
                 _submit(token, chat, row_offer, "Iceberg auto. ")
                 if photo:
                     try:
@@ -522,8 +526,11 @@ def announce(payload: dict[str, Any]) -> None:
                     except Exception:
                         pass
                 continue
+            buttons = [("MARKET", f"t{offer}"), ("EDIT", f"z{offer}")]
+            if chart in _LIMIT_ROWS:
+                buttons = [("MARKET", f"t{offer}"), ("LIMIT", f"l{offer}"), ("EDIT", f"z{offer}")]
             try:
-                _send(token, chat, text, [("TRADE", f"t{offer}"), ("EDIT", f"z{offer}")], one_row=True, photo=photo)
+                _send(token, chat, text, buttons, one_row=True, photo=photo)
             except Exception:
                 with _LOCK:
                     _OFFERS.pop(offer, None)
@@ -678,9 +685,19 @@ def _handle(token: str, chat: str, risk: float, auto: bool, ice: bool, update: d
     data = str(query.get("data") or "")
     _api(token, "answerCallbackQuery", {"callback_query_id": query.get("id")})
     if data.startswith("t"):
+        with _LOCK:
+            chosen = _OFFERS.get(data[1:])
+            if chosen is not None:
+                chosen["limit"] = False
         _confirm(token, chat, data[1:])
     elif data.startswith("z"):
         _ask_edit(token, chat, data[1:])
+    elif data.startswith("l"):
+        with _LOCK:
+            chosen = _OFFERS.get(data[1:])
+            if chosen is not None:
+                chosen["limit"] = True
+        _confirm(token, chat, data[1:])
     elif data.startswith("y"):
         _place(token, chat, data[1:])
     elif data.startswith("n"):
@@ -1012,8 +1029,9 @@ def _confirm(token: str, chat: str, offer_id: str) -> None:
         token,
         chat,
         (
-            f"Send a MARKET {offer['side']} on {label}?\n"
-            f"Stop {offer['stop']}\n"
+            f"Send a {'LIMIT' if offer.get('limit') else 'MARKET'} {offer['side']} on {label}?\n"
+            + (f"Limit {offer['entry']}\n" if offer.get("limit") else "")
+            + f"Stop {offer['stop']}\n"
             f"Target {offer['target']}\n"
             f"Risk {float(offer['risk']):g}%\n"
             + (str(offer.get("money") or "") + "\n" if offer.get("money") else "")
@@ -1049,6 +1067,7 @@ def _place(token: str, chat: str, offer_id: str) -> None:
 
 def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
     live = _quote(str(offer["symbol"]))
+    limit = bool(offer.get("limit"))
     if live is not None:
         bid, ask = live
         if offer["side"] == "BUY" and not (offer["stop"] < bid and offer["target"] > ask):
@@ -1057,14 +1076,28 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
         if offer["side"] == "SELL" and not (offer["stop"] > ask and offer["target"] < bid):
             _send(token, chat, prefix + "Not sent. Price has already gone through this sell.")
             return
+        if limit and offer["side"] == "BUY" and not (float(offer["entry"]) < ask):
+            _send(token, chat, prefix + "Not sent. The buy limit is no longer below the ask.")
+            return
+        if limit and offer["side"] == "SELL" and not (float(offer["entry"]) > bid):
+            _send(token, chat, prefix + "Not sent. The sell limit is no longer above the bid.")
+            return
+    elif limit:
+        _send(token, chat, prefix + "Not sent. No live quote, so the limit cannot be checked.")
+        return
     host = _HOST
     if host is None:
         _send(token, chat, prefix + "Not sent. Zeus is not ready.")
         return
-    entry_ref = float(offer["stop"])
-    if live is not None:
-        bid, ask = live
-        entry_ref = bid if offer["side"] == "SELL" else ask
+    if limit:
+        order_type = "BUY_LIMIT" if offer["side"] == "BUY" else "SELL_LIMIT"
+        entry_ref = float(offer["entry"])
+    else:
+        order_type = "MARKET_BUY" if offer["side"] == "BUY" else "MARKET_SELL"
+        entry_ref = None
+        if live is not None:
+            bid, ask = live
+            entry_ref = bid if offer["side"] == "SELL" else ask
     try:
         from zeus3.contracts.market_data import Timeframe
 
@@ -1072,8 +1105,8 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
             result = host.runtime.execute_owner_order_fast(
                 symbol=str(offer["symbol"]),
                 timeframe=Timeframe("H4" if offer["chart"] == "SWING" else "M1"),
-                order_type="MARKET_BUY" if offer["side"] == "BUY" else "MARKET_SELL",
-                requested_entry=float(entry_ref),
+                order_type=order_type,
+                requested_entry=entry_ref,
                 stop=float(offer["stop"]),
                 targets=(float(offer["target"]),),
                 target_specs=(),
@@ -1097,8 +1130,8 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
                 result = host.runtime.execute_owner_order_clean(
                     symbol=str(offer["symbol"]),
                     timeframe=Timeframe("H4" if offer["chart"] == "SWING" else "M1"),
-                    order_type="MARKET_BUY" if offer["side"] == "BUY" else "MARKET_SELL",
-                    requested_entry=None,
+                    order_type=order_type,
+                    requested_entry=entry_ref if limit else None,
                     stop=float(offer["stop"]),
                     targets=(float(offer["target"]),),
                     target_specs=(),

@@ -486,7 +486,8 @@ function paint(){
       const side=r.side?`<span class="${r.side==="BUY"?"good":"bad"}">${r.side}</span>`:"—";
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
       const harvest=moneyLine(r);
-      const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}')">TRADE</button>`:"";
+      const limitOk=["ICEBERG","SCALP","INTRADAY","SWING"].includes(r.chart);
+      const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','MARKET')">MARKET</button>${limitOk?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','LIMIT')">LIMIT</button>`:""}`:"";
       return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${harvest}</td><td>${r.note||r.reason||"—"}</td><td>${button}</td></tr>`;
     }).join("");
   const f=data.flow||{}, ladder=data.ladder||{};
@@ -525,29 +526,34 @@ async function closeTicket(ticket){
   const j=await r.json();
   if(!r.ok||!((j.management||{}).ok)) throw Error(((j.management||{}).reason)||j.message||"the close was rejected");
 }
-async function trade(chartName){
+async function trade(chartName, mode){
   const row=(data.rows||[]).find(r=>r.chart===chartName&&r.tradeable);
   if(!row){setStatus("NOT SENT · this row has no order. A stop that price has already passed stays on the row with no button.", 8000);return}
+  const limit=mode==="LIMIT";
   const quote=(data&&data.quote)||{};
   const bid=Number(quote.bid), ask=Number(quote.ask);
   if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){setStatus("NOT SENT · a sell stop must be above the live ask, and the target below the bid. Price has already gone through this one.", 12000);return}
   if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){setStatus("NOT SENT · a buy stop must be below the live bid, and the target above the ask. Price has already gone through this one.", 12000);return}
+  if(limit && row.side==="BUY" && !(row.entry<ask)){setStatus("NOT SENT · the buy limit is no longer below the ask. MARKET is the chase.", 12000);return}
+  if(limit && row.side==="SELL" && !(row.entry>bid)){setStatus("NOT SENT · the sell limit is no longer above the bid. MARKET is the chase.", 12000);return}
   const risk=Number($("risk").value);
   if(!isFinite(risk)||risk<=0){setStatus("NOT SENT · set the risk percent", 8000);return}
   const opens=data.positions||[];
   const same=opens.filter(p=>p.side===row.side);
   const opposite=opens.filter(p=>p.side!==row.side);
-  let msg="Send a MARKET "+row.side+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\n"+row.note+"\nThis goes to the MT5 account that is logged in.";
-  if(same.length) msg="A "+row.side+" is already open. Send another?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
-  else if(opposite.length) msg="A "+opposite[0].side+" is still open. Send this "+row.side+" as well?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
+  const kind=limit?("LIMIT "+row.side+" at "+row.entry):("MARKET "+row.side);
+  let msg="Send a "+kind+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\n"+row.note+"\nThis goes to the MT5 account that is logged in.";
+  if(same.length) msg="A "+row.side+" is already open. Send another "+kind+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
+  else if(opposite.length) msg="A "+opposite[0].side+" is still open. Send this "+kind+" as well?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
   if(!confirm(msg))return;
   setStatus("SENDING...", 20000);
   const started=performance.now();
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
     const r=await fetch("/api/v19/owner-order/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
-      owner_approved:true,symbol:symbol,timeframe:row.chart==="SWING"?"H4":"M1",order_type:row.side==="BUY"?"MARKET_BUY":"MARKET_SELL",
-      entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:risk,horizon_lane:"INTRADAY",
+      owner_approved:true,symbol:symbol,timeframe:row.chart==="SWING"?"H4":"M1",
+      order_type:limit?(row.side==="BUY"?"BUY_LIMIT":"SELL_LIMIT"):(row.side==="BUY"?"MARKET_BUY":"MARKET_SELL"),
+      entry:limit?row.entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:risk,horizon_lane:"INTRADAY",
       owner_note:"SIGNALS PAGE "+row.reason+" "+row.decision
     })});
     const j=await r.json();
