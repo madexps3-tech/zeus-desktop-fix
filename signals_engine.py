@@ -51,7 +51,16 @@ WING = 2
 LOG = Path("signal_research_v2.jsonl")
 STATE = Path("signal_research_state_v2.json")
 FLOW_PAIRS = set(PAIRS)
-# How far price must move before the second score puts the stop at the entry.
+# How far a zone may sit past the value edge and still be that edge. Not five pips on every pair.
+EDGE = {
+    "XAUUSD": 5.0,
+    "XAGUSD": 0.15,
+    "NAS100": 25.0,
+    "WTI": 0.15,
+    "EURUSD": 0.0006,
+    "USDJPY": 0.06,
+    "BTCUSD": 150.0,
+}
 BE_MOVE = {
     "XAUUSD": 2.0,
     "XAGUSD": 0.20,
@@ -1219,7 +1228,9 @@ def _guide(
     remaining = [price for price in targets if price not in passed]
     at_zone = any(_touched(closed, price, side) for price in remaining or targets)
     absorption = bool(book.get("absorption")) and at_zone
-    both_against = with_60 is False and with_5 is False
+    longer_raw = book.get("delta_60s")
+    quiet = isinstance(longer_raw, (int, float)) and not isinstance(longer_raw, bool) and abs(float(longer_raw)) < 10
+    both_against = (not quiet) and with_60 is False and with_5 is False
     row["targets"] = [round(price, 5) for price in targets]
     row["legs"] = [
         {"price": round(price, 5), "r": _r_multiple(entry, stop, price)}
@@ -1241,6 +1252,8 @@ def _guide(
         line = "No 60-second delta in this book. The targets stay. Nothing says hold or bank."
     elif absorption:
         line = "Absorption at the target. Bank half. Move the stop to the entry."
+    elif quiet:
+        line = f"Hold for {round(aim, 5)}." if not (passed and remaining) else f"Hold the rest for {round(remaining[0], 5)}."
     elif both_against:
         line = "Both the 5-second and the 60-second book are against the trade. Bank half. Move the stop to the entry."
     elif with_60 is False and with_5 is not False:
@@ -1266,9 +1279,9 @@ def _coming(live: dict[str, Any] | None, zones: list[dict[str, Any]]) -> dict[st
     hits: list[tuple[float, str, dict[str, Any], bool]] = []
     for zone in zones:
         price = float(zone["price"])
-        if zone.get("kind") == "LOW" and low <= price:
+        if zone.get("kind") == "LOW" and low <= price <= high:
             hits.append((abs(price - close), "BUY", zone, close > price and close >= open_))
-        if zone.get("kind") == "HIGH" and high >= price:
+        if zone.get("kind") == "HIGH" and low <= price <= high:
             hits.append((abs(price - close), "SELL", zone, close < price and close <= open_))
     if not hits:
         return None
@@ -1297,9 +1310,10 @@ def _at_edge(row: dict[str, Any], area: tuple[float, float, float], symbol: str)
     if zone is None or not row.get("side"):
         return False
     slack = _band(symbol)
+    room = float(EDGE.get(symbol, slack))
     if row["side"] == "BUY":
-        return float(zone) <= val + slack
-    return float(zone) >= vah - slack
+        return (val - room) <= float(zone) <= (val + slack)
+    return (vah - slack) <= float(zone) <= (vah + room)
 
 
 def _scalp(
@@ -1684,6 +1698,32 @@ def place_yen(book: dict[str, Any] | None, bid: float | None, ask: float | None)
         book[name] = round(value + shift, 5)
 
 
+def place_value(book: dict[str, Any] | None, symbol: str, bid: float | None, ask: float | None) -> None:
+    """Move Sierra's value area onto the CFD. The yen is already moved. A price already on the candle stays."""
+    if symbol == "USDJPY" or not isinstance(book, dict):
+        return
+    if not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)) or isinstance(bid, bool) or isinstance(ask, bool):
+        return
+    val = _price_field(book, "val")
+    poc = _price_field(book, "poc")
+    vah = _price_field(book, "vah")
+    if val is None or poc is None or vah is None or not (val <= poc <= vah):
+        return
+    mid = (float(bid) + float(ask)) / 2.0
+    room = float(EDGE.get(symbol, 0.0))
+    if abs(poc - mid) <= max(room, 1e-9):
+        return
+    last = book.get("last")
+    if isinstance(last, bool) or not isinstance(last, (int, float)) or float(last) <= 0:
+        return
+    shift = mid - float(last)
+    if abs(shift) > float(MAX_BASIS.get(symbol, 0.0) or 0.0):
+        return
+    book["val"] = round(val + shift, 5)
+    book["poc"] = round(poc + shift, 5)
+    book["vah"] = round(vah + shift, 5)
+
+
 def _hold_full(side: str, book: dict[str, Any] | None) -> bool:
     """Both clocks with the trade, and no absorption. One clock is not a hold."""
     book = book or {}
@@ -1931,7 +1971,10 @@ def _gate(rows: list[dict[str, Any]], book: dict[str, Any] | None) -> None:
             if (val + band) < close < (vah - band):
                 _say(row, "Price is in the middle of the value area.")
         if primary and str(row["side"]) != primary:
-            _say(row, "The other side is also on the page.")
+            if row.get("tradeable"):
+                _silence(row, "The other side is also on the page.")
+            else:
+                _say(row, "The other side is also on the page.")
         if bool((book or {}).get("absorption")):
             _say(row, "Absorption is on.")
         agreed = _book_agrees(str(row["side"]), book)

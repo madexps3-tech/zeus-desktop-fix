@@ -25,6 +25,7 @@ from zeus3.v19.signals_engine import (
     mark_taken,
     manage_decision,
     place_yen,
+    place_value,
     range_dip,
     reaction,
     record,
@@ -1347,6 +1348,8 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     book = _book(symbol)
     if symbol == "USDJPY":
         place_yen(book, bid, ask)
+    else:
+        place_value(book, symbol, bid, ask)
     levels = session_levels(bars_by_chart.get("M15") or bars_by_chart.get("M5") or [])
     pools = liquidity(levels, bars_by_chart)
     rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)
