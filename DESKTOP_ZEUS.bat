@@ -28,7 +28,7 @@ if not exist "%PY%" (
 )
 echo Starting ZEUS from %CD%
 echo This does not open Chrome or Edge.
-powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8783/' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }"
+powershell -NoProfile -Command "Add-Type -Namespace Z -Name W -MemberDefinition '[DllImport(\"user32.dll\")] public static extern IntPtr FindWindow(string c, string n);'; if ([Z.W]::FindWindow($null, 'ZEUS') -ne [IntPtr]::Zero) { exit 0 } else { exit 1 }"
 if not errorlevel 1 (
   echo ZEUS is already open. Leaving it.
   exit /b 0
@@ -59,7 +59,7 @@ if errorlevel 1 (
   "%PY%" "%CD%\get-pip.py" --no-warn-script-location
   "%PY%" -m pip install pywebview
 )
-powershell -NoProfile -Command "Start-Process -FilePath '%PY%' -WorkingDirectory '%CD%' -WindowStyle Hidden -ArgumentList '%CD%\zeus_desktop.py'"
+start "" "%PY%" "%CD%\zeus_desktop.py"
 exit /b 0
 :fail
 echo.

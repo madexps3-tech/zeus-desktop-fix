@@ -186,9 +186,18 @@ def _quote(text: str) -> str:
     return text.replace("\\", "\\\\").replace("`", "\\`").replace("\r", "")
 
 
+def _hide_console() -> None:
+    """Hide this process's console. The ZEUS window is a different window and stays."""
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        return
+
+
 def main() -> int:
-    if _up():
-        return 0
+    _hide_console()
     try:
         _ico(ICON)
         _shortcut(ICON)
