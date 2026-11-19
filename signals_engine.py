@@ -1310,10 +1310,9 @@ def _at_edge(row: dict[str, Any], area: tuple[float, float, float], symbol: str)
     if zone is None or not row.get("side"):
         return False
     slack = _band(symbol)
-    room = float(EDGE.get(symbol, slack))
     if row["side"] == "BUY":
-        return (val - room) <= float(zone) <= (val + slack)
-    return (vah - slack) <= float(zone) <= (vah + room)
+        return float(zone) <= val + slack
+    return float(zone) >= vah - slack
 
 
 def _scalp(

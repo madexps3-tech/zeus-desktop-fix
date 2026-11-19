@@ -93,6 +93,7 @@ tr.pick{outline:1px solid var(--warn)}
   <button onclick="fit()">FIT</button>
   <button id="zones" onclick="toggleZones()">ZONES ON</button>
   <label>RISK % <input id="risk" value="2" style="width:72px" oninput="if(data)paint()"></label>
+  <label>RISK $ <input id="cash" value="" placeholder="opt" style="width:72px" oninput="if(data)paint()"></label>
   <button id="manage" data-on="0" onclick="toggleManage()">MANAGE OFF</button>
   <button id="ice" data-on="0" onclick="toggleIce()">ICE AUTO OFF</button>
   <span class="muted">MARKET sends now. LIMIT rests at the row price. ICE AUTO sends a gold, oil, or Nasdaq iceberg as a limit.</span>
@@ -406,11 +407,27 @@ function roundDist(n){
   if(a>=1) return String(round2(n));
   return String(Math.round(n*100000)/100000);
 }
+function orderRisk(){
+  const box=$("cash");
+  const typed=box?String(box.value||"").trim():"";
+  const acct=(data&&data.account)||{};
+  const equity=Number(acct.equity||acct.balance);
+  if(typed!==""){
+    const cash=Number(typed);
+    if(!isFinite(cash)||cash<=0) return {error:"NOT SENT · the dollar risk has to be above 0."};
+    if(!(equity>0)) return {error:"NOT SENT · the account balance is not on the page, so a dollar risk cannot be sized."};
+    return {pct:cash/equity*100, label:"$"+cash};
+  }
+  const risk=Number($("risk").value);
+  if(!isFinite(risk)||risk<=0) return {error:"NOT SENT · set the risk percent, or a dollar amount."};
+  return {pct:risk, label:risk+"%"};
+}
 function moneyLine(row, account){
   if(!row||row.entry==null||row.stop==null) return row&&row.harvest||"—";
   const entry=Number(row.entry), stop=Number(row.risk_stop!=null?row.risk_stop:row.stop);
   const riskDist=Math.abs(entry-stop);
-  const risk=Number($("risk").value);
+  const plan=orderRisk();
+  const risk=plan.error?NaN:plan.pct;
   const acct=account||(data&&data.account)||{};
   const balance=Number(acct.equity||acct.balance);
   const targets=(row.targets&&row.targets.length)?row.targets:(row.target!=null?[row.target]:[]);
@@ -557,13 +574,13 @@ async function trade(chartName, mode){
   if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){const text="NOT SENT · a sell stop must be above the live ask, and the target below the bid."; setStatus(text, 12000); alert(text); return}
   if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){const text="NOT SENT · a buy stop must be below the live bid, and the target above the ask."; setStatus(text, 12000); alert(text); return}
   const rests=row.side==="BUY"?row.entry<ask:row.entry>bid;
-  const risk=Number($("risk").value);
-  if(!isFinite(risk)||risk<=0){setStatus("NOT SENT · set the risk percent", 8000);return}
+  const plan=orderRisk();
+  if(plan.error){setStatus(plan.error, 8000);return}
   const opens=data.positions||[];
   const same=opens.filter(p=>p.side===row.side);
   const opposite=opens.filter(p=>p.side!==row.side);
   const kind=limit?((rests?"LIMIT ":"STOP ")+row.side+" at "+row.entry):("MARKET "+row.side);
-  let msg="Send a "+kind+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThis goes to the MT5 account that is logged in.";
+  let msg="Send a "+kind+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\nRisk "+plan.label+"\nThis goes to the MT5 account that is logged in.";
   if(same.length) msg="A "+row.side+" is already open. Send another "+kind+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
   else if(opposite.length) msg="A "+opposite[0].side+" is still open. Send this "+kind+" as well?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
   if(!confirm(msg))return;
@@ -574,7 +591,7 @@ async function trade(chartName, mode){
     const r=await fetch("/api/v19/owner-order/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
       owner_approved:true,symbol:symbol,timeframe:row.chart==="SWING"?"H4":"M1",
       order_type:limit?(row.side==="BUY"?"BUY_LIMIT":"SELL_LIMIT"):(row.side==="BUY"?"MARKET_BUY":"MARKET_SELL"),
-      entry:limit?row.entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:risk,horizon_lane:"INTRADAY",
+      entry:limit?row.entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:plan.pct,horizon_lane:"INTRADAY",
       owner_note:"SIGNALS PAGE "+row.reason+" "+row.decision
     })});
     const j=await r.json();

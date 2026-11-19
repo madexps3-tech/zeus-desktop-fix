@@ -69,8 +69,28 @@ def set_ice(on: bool) -> None:
     _write(token, chat, risk, auto, bool(on))
 
 
-def _write(token: str, chat: str, risk: float, auto: bool, ice: bool = False) -> None:
-    _file().write_text(f"{token}\n{chat}\n{risk}\n{'on' if auto else 'off'}\n{'on' if ice else 'off'}\n", encoding="utf-8")
+def _cash_amount() -> float:
+    path = _file()
+    if not path.is_file():
+        return 0.0
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+    if len(lines) < 6 or not lines[5]:
+        return 0.0
+    try:
+        value = float(lines[5].lstrip("$"))
+    except ValueError:
+        return 0.0
+    return value if value > 0 else 0.0
+
+
+def _write(token: str, chat: str, risk: float, auto: bool, ice: bool = False, cash: float | None = None) -> None:
+    if cash is None:
+        cash = _cash_amount()
+    amount = float(cash) if cash and float(cash) > 0 else 0.0
+    _file().write_text(
+        f"{token}\n{chat}\n{risk}\n{'on' if auto else 'off'}\n{'on' if ice else 'off'}\n{amount:g}\n",
+        encoding="utf-8",
+    )
 
 
 def _api(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -341,6 +361,20 @@ def _picture(payload: dict[str, Any], label: str, chart: str, row: dict[str, Any
         return None
 
 
+def _order_percent(offer: dict[str, Any]) -> float | None:
+    """A dollar risk becomes the percent of the live equity. The broker still sizes the lot from that percent."""
+    cash = float(offer.get("cash") or 0)
+    if cash <= 0:
+        return float(offer["risk"])
+    account = getattr(_truth(), "account", None)
+    equity = getattr(account, "equity", None) if account is not None else None
+    if not isinstance(equity, (int, float)) or isinstance(equity, bool) or float(equity) <= 0:
+        equity = getattr(account, "balance", None) if account is not None else None
+    if not isinstance(equity, (int, float)) or isinstance(equity, bool) or float(equity) <= 0:
+        return None
+    return cash / float(equity) * 100.0
+
+
 def _money(row: dict[str, Any], account: Any, risk: float) -> str:
     """Same line as the desk: each target in R, and the dollar value of that R at the chosen risk."""
     entry = row.get("entry")
@@ -504,7 +538,8 @@ def announce(payload: dict[str, Any]) -> None:
         key = f"T|{symbol}|{chart}|{row.get('side')}|{row.get('entry')}|{row.get('stop')}|{target}"
         if row.get("tradeable") and _fresh(key):
             offer = token_hex(4)
-            money = _money(row, payload.get("account"), risk)
+            money = _money(row, payload.get("account"), _order_percent({"risk": risk, "cash": _cash_amount()}) or risk)
+            cash = _cash_amount()
             with _LOCK:
                 _OFFERS[offer] = {
                     "symbol": symbol,
@@ -515,15 +550,17 @@ def announce(payload: dict[str, Any]) -> None:
                     "target": float(target),
                     "reason": str(row.get("reason") or ""),
                     "risk": risk,
+                    "cash": cash,
                     "money": money,
                     "at": time(),
                 }
+            risk_line = f"Risk ${cash:g}" if cash > 0 else f"Risk {risk:g}%"
             text = (
                 f"{label} {chart} {row.get('side')}\n"
                 f"Entry {row.get('entry')}\n"
                 f"Stop {row.get('stop')}\n"
                 f"Next {target}\n"
-                f"Risk {risk:g}%"
+                f"{risk_line}"
             )
             if money:
                 text += f"\n{money}"
@@ -688,23 +725,35 @@ def _handle(token: str, chat: str, risk: float, auto: bool, ice: bool, update: d
             return
         parts = text.split()
         if len(parts) != 2:
-            _send(token, chat, "Send /risk and the percent. The next order uses that number.")
+            _send(token, chat, "Send /risk 2 for 2 percent, or /risk $100 to risk 100 dollars.")
             return
+        raw = parts[1].strip()
+        dollar = raw.startswith("$")
         try:
-            nxt_risk = float(parts[1])
+            number = float(raw[1:] if dollar else raw)
         except ValueError:
-            nxt_risk = 0
-        if not 0 < nxt_risk:
+            number = 0
+        if not 0 < number:
             _send(token, chat, "Risk must be above 0.")
             return
-        _write(token, chat, nxt_risk, auto, ice)
+        if dollar:
+            _write(token, chat, risk, auto, ice, cash=number)
+            pending = _pending()
+            if pending is not None:
+                _touch(pending[0], cash=number)
+                _send(token, chat, f"This trade now risks ${number:g}. The lot is sized from that.")
+                _confirm(token, chat, pending[0])
+                return
+            _send(token, chat, f"Next Telegram order risks ${number:g}. The lot is sized from that.")
+            return
+        _write(token, chat, number, auto, ice, cash=0)
         pending = _pending()
         if pending is not None:
-            _touch(pending[0], risk=nxt_risk)
-            _send(token, chat, f"This trade now risks {nxt_risk:g} percent.")
+            _touch(pending[0], risk=number, cash=0)
+            _send(token, chat, f"This trade now risks {number:g} percent.")
             _confirm(token, chat, pending[0])
             return
-        _send(token, chat, f"Next Telegram order risks {nxt_risk:g} percent.")
+        _send(token, chat, f"Next Telegram order risks {number:g} percent.")
         return
     query = update.get("callback_query") if isinstance(update.get("callback_query"), dict) else None
     if query is None:
@@ -775,9 +824,10 @@ def _apply_reply(token: str, chat: str, offer_id: str, text: str) -> None:
         _send(token, chat, "That trade has expired. Wait for the next one.")
         return
     lower = text.lower()
+    dollar = bool(re.search(r"risk\s*[:=]?\s*\$", lower))
     found: dict[str, float] = {}
     for key, pattern in (
-        ("risk", r"risk\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)"),
+        ("risk", r"risk\s*[:=]?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)"),
         ("tp", r"(?:tp|target)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)"),
         ("sl", r"(?:sl|stop)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)"),
         ("r", r"(?<![a-z])r\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)"),
@@ -793,7 +843,11 @@ def _apply_reply(token: str, chat: str, offer_id: str, text: str) -> None:
         return
     changes: dict[str, Any] = {}
     if "risk" in found:
-        changes["risk"] = found["risk"]
+        if dollar:
+            changes["cash"] = found["risk"]
+        else:
+            changes["risk"] = found["risk"]
+            changes["cash"] = 0.0
     if "sl" in found:
         changes["stop"] = found["sl"]
     if "tp" in found:
@@ -807,9 +861,16 @@ def _apply_reply(token: str, chat: str, offer_id: str, text: str) -> None:
             return
         changes["target"] = entry + span * found["r"] if offer.get("side") == "BUY" else entry - span * found["r"]
     _touch(offer_id, **changes)
-    if "risk" in changes:
-        _, _, _, auto, ice = _read()
-        _write(token, chat, float(changes["risk"]), auto, ice)
+    if "cash" in changes or "risk" in changes:
+        _, _, stored, auto, ice = _read()
+        _write(
+            token,
+            chat,
+            float(changes.get("risk", stored)),
+            auto,
+            ice,
+            cash=float(changes.get("cash", 0)),
+        )
     _send(token, chat, "Updated. Confirm this one.")
     _confirm(token, chat, offer_id)
 
@@ -1056,6 +1117,8 @@ def _confirm(token: str, chat: str, offer_id: str) -> None:
         _send(token, chat, "That trade has expired. Wait for the next one.")
         return
     label = _LABELS.get(offer["symbol"], offer["symbol"])
+    cash = float(offer.get("cash") or 0)
+    risk_line = f"Risk ${cash:g}\n" if cash > 0 else f"Risk {float(offer['risk']):g}%\n"
     _send(
         token,
         chat,
@@ -1064,7 +1127,7 @@ def _confirm(token: str, chat: str, offer_id: str) -> None:
             + (f"Limit {offer['entry']}\n" if offer.get("limit") else "")
             + f"Stop {offer['stop']}\n"
             f"Target {offer['target']}\n"
-            f"Risk {float(offer['risk']):g}%\n"
+            + risk_line
             + (str(offer.get("money") or "") + "\n" if offer.get("money") else "")
             + (_stamp(str(offer.get("symbol") or ""), str(offer.get("side") or "")) + "\n" if _stamp(str(offer.get("symbol") or ""), str(offer.get("side") or "")) else "")
             + "This goes to the MT5 account that is logged in."
@@ -1114,6 +1177,10 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
     if host is None:
         _send(token, chat, prefix + "Not sent. Zeus is not ready.")
         return
+    percent = _order_percent(offer)
+    if percent is None or percent <= 0:
+        _send(token, chat, prefix + "Not sent. The account balance is not on the page, so the dollar risk cannot be sized.")
+        return
     if limit:
         order_type = "BUY_LIMIT" if offer["side"] == "BUY" else "SELL_LIMIT"
         entry_ref = float(offer["entry"])
@@ -1135,7 +1202,7 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
                 stop=float(offer["stop"]),
                 targets=(float(offer["target"]),),
                 target_specs=(),
-                requested_risk_pct=float(offer["risk"]),
+                requested_risk_pct=percent,
                 horizon_lane="INTRADAY",
                 owner_note=f"TELEGRAM {offer['chart']} {offer['reason']}",
             )
@@ -1160,7 +1227,7 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
                     stop=float(offer["stop"]),
                     targets=(float(offer["target"]),),
                     target_specs=(),
-                    requested_risk_pct=float(offer["risk"]),
+                    requested_risk_pct=percent,
                     horizon_lane="INTRADAY",
                     owner_note=f"TELEGRAM {offer['chart']} {offer['reason']}",
                 )
