@@ -83,14 +83,31 @@ def _cash_amount() -> float:
     return value if value > 0 else 0.0
 
 
+def _group() -> str:
+    """The friends' group. The private chat on line 2 is left alone."""
+    path = _file()
+    if not path.is_file():
+        return ""
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+    private = lines[1] if len(lines) > 1 else ""
+    for index in (6, 5):
+        if len(lines) <= index:
+            continue
+        group = lines[index]
+        if group.startswith("-") and group != private:
+            return group
+    return ""
+
+
 def _write(token: str, chat: str, risk: float, auto: bool, ice: bool = False, cash: float | None = None) -> None:
     if cash is None:
         cash = _cash_amount()
     amount = float(cash) if cash and float(cash) > 0 else 0.0
-    _file().write_text(
-        f"{token}\n{chat}\n{risk}\n{'on' if auto else 'off'}\n{'on' if ice else 'off'}\n{amount:g}\n",
-        encoding="utf-8",
-    )
+    group = _group()
+    text = f"{token}\n{chat}\n{risk}\n{'on' if auto else 'off'}\n{'on' if ice else 'off'}\n{amount:g}\n"
+    if group:
+        text += f"{group}\n"
+    _file().write_text(text, encoding="utf-8")
 
 
 def _api(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -114,13 +131,16 @@ def _send(
     one_row: bool = False,
     reply: bool = False,
     photo: bytes | None = None,
+    protect: bool = False,
 ) -> int | None:
     if photo:
         try:
-            return _send_photo(token, chat, photo, text, buttons, one_row=one_row)
+            return _send_photo(token, chat, photo, text, buttons, one_row=one_row, protect=protect)
         except Exception:
             pass
     payload: dict[str, Any] = {"chat_id": chat, "text": text[:4000]}
+    if protect:
+        payload["protect_content"] = True
     if buttons:
         cells = [{"text": label, "callback_data": data} for label, data in buttons]
         rows = [cells] if one_row else [[cell] for cell in cells]
@@ -146,8 +166,11 @@ def _send_photo(
     buttons: list[tuple[str, str]] | None,
     *,
     one_row: bool,
+    protect: bool = False,
 ) -> int | None:
     fields = {"chat_id": chat, "caption": caption[:1024]}
+    if protect:
+        fields["protect_content"] = "true"
     if buttons:
         cells = [{"text": label, "callback_data": data} for label, data in buttons]
         rows = [cells] if one_row else [[cell] for cell in cells]
@@ -174,6 +197,21 @@ def _send_photo(
         return int(data["result"]["message_id"])
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _share(token: str, text: str, photo: bytes | None) -> None:
+    """The same signal, with no button, in the friends' group."""
+    group = _group()
+    if not group:
+        return
+    shown = text.replace(
+        "\nTap EDIT. It shows the risk, target, and stop. Reply with only the line you want to change.",
+        "",
+    )
+    try:
+        _send(token, group, shown, photo=photo, protect=True)
+    except Exception:
+        return
 
 
 _FONT = {
@@ -581,6 +619,7 @@ def announce(payload: dict[str, Any]) -> None:
                         _send(token, chat, text, photo=photo)
                     except Exception:
                         pass
+                _share(token, text, photo)
                 continue
             if chart == "ICEBERG" and ice:
                 with _LOCK:
@@ -592,12 +631,14 @@ def announce(payload: dict[str, Any]) -> None:
                         _send(token, chat, text, photo=photo)
                     except Exception:
                         pass
+                _share(token, text, photo)
                 continue
             buttons = [("MARKET", f"t{offer}"), ("EDIT", f"z{offer}")]
             if chart in _LIMIT_ROWS:
                 buttons = [("MARKET", f"t{offer}"), ("LIMIT", f"l{offer}"), ("EDIT", f"z{offer}")]
             try:
                 _send(token, chat, text, buttons, one_row=True, photo=photo)
+                _share(token, text, photo)
             except Exception:
                 with _LOCK:
                     _OFFERS.pop(offer, None)
