@@ -1827,14 +1827,17 @@ def manage_decision(
         better = current is None or (desired > current if side == "BUY" else desired < current)
         if better and (current is None or abs(desired - current) > max(risk * 1e-6, 1e-8)):
             new_stop = desired
+    floor = mark if first_hit else first
     nxt = None
     for price in prices:
-        if side == "BUY" and price > mark:
+        if side == "BUY" and price > floor:
             nxt = price
             break
-        if side == "SELL" and price < mark:
+        if side == "SELL" and price < floor:
             nxt = price
             break
+    traveled = (mark - entry) if side == "BUY" else (entry - mark)
+    approach = (not first_hit) and distance > 0 and traveled >= distance * 0.90
     in_window = False
     if first_is_inside:
         in_window = first_hit
@@ -1842,7 +1845,17 @@ def manage_decision(
         stretch = min(dip, distance * 0.10)
         in_window = mark >= first - stretch if side == "BUY" else mark <= first + stretch
     line = ""
-    if in_window or first_hit:
+    if approach:
+        first_text = round(first, 5)
+        if nxt is None:
+            line = f"The first target {first_text} is close. The broker will close the whole trade there."
+        elif _hold_full(side, book):
+            line = f"The first target {first_text} is close. The book is with the trade. Next is {round(nxt, 5)}. Move the take profit or the broker closes the whole trade at the first target."
+        elif _both_against(side, book):
+            line = f"The first target {first_text} is close. Both clocks are against the trade. The broker will close the whole trade there."
+        else:
+            line = f"The first target {first_text} is close. Next is {round(nxt, 5)}. Move the take profit or the broker closes the whole trade at the first target."
+    elif in_window or first_hit:
         if _both_against(side, book):
             line = "Both clocks are against the trade. Bank the rest."
         elif _hold_full(side, book) and nxt is not None:

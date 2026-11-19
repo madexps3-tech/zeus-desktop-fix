@@ -1100,9 +1100,10 @@ def _run_manage(
     bid: float,
     ask: float,
 ) -> None:
-    """Move the stop when manage is on. Never close the trade from here."""
-    if not manage_enabled() or not positions:
+    """Move the stop when manage is on. The close warning is sent either way."""
+    if not positions:
         return
+    managing = manage_enabled()
     state = _load_manage_state()
     trades = state.setdefault("trades", {})
     changed = False
@@ -1160,7 +1161,7 @@ def _run_manage(
             "told": previous.get("told") or "",
         }
         new_stop = decision.get("stop")
-        if isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool):
+        if managing and isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool):
             if saved.get("sent") != float(new_stop):
                 try:
                     host.runtime.manage_physical_trade(
@@ -1175,7 +1176,8 @@ def _run_manage(
                     saved["sent"] = float(new_stop)
                     pos["stop_loss"] = float(new_stop)
                     _announce_manage(symbol, f"Stop moved to {round(float(new_stop), 5)}.", int(pos["ticket"]), entry)
-        if saved["line"] and saved["line"] != saved["told"]:
+        warn = str(saved["line"] or "")
+        if warn and warn != saved["told"] and (managing or warn.startswith("The first target")):
             _announce_manage(symbol, str(saved["line"]), int(pos["ticket"]), entry)
             saved["told"] = saved["line"]
         trades[key] = saved
