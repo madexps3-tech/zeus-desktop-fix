@@ -1125,8 +1125,9 @@ def _run_manage(
             if nearest is None or gap < nearest:
                 nearest = gap
                 match = row
-        if match is None or nearest is None or nearest > max(abs(entry) * 0.002, 1e-6):
+        if match is None or nearest is None:
             continue
+        close = nearest <= max(abs(entry) * 0.002, 1e-6)
         targets = [price for price in (match.get("targets") or []) if price is not None]
         if not targets and match.get("target") is not None:
             targets = [match.get("target")]
@@ -1161,7 +1162,7 @@ def _run_manage(
             "told": previous.get("told") or "",
         }
         new_stop = decision.get("stop")
-        if managing and isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool):
+        if managing and close and isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool):
             if saved.get("sent") != float(new_stop):
                 try:
                     host.runtime.manage_physical_trade(
@@ -1177,11 +1178,11 @@ def _run_manage(
                     pos["stop_loss"] = float(new_stop)
                     _announce_manage(symbol, f"Stop moved to {round(float(new_stop), 5)}.", int(pos["ticket"]), entry)
         warn = str(saved["line"] or "")
-        if warn and warn != saved["told"] and (managing or warn.startswith("The first target")):
+        if warn and warn != saved["told"] and ((managing and close) or warn.startswith("The first target")):
             _announce_manage(symbol, str(saved["line"]), int(pos["ticket"]), entry)
             saved["told"] = saved["line"]
         trades[key] = saved
-        if saved["line"]:
+        if saved["line"] and (close or str(saved["line"]).startswith("The first target")):
             pos["manage_line"] = saved["line"]
         if saved != previous:
             changed = True
