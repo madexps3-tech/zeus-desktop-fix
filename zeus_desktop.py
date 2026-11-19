@@ -154,7 +154,7 @@ def _start_server() -> None:
     env["PYTHONPATH"] = env.get("PYTHONPATH") or str(ROOT / "src")
     info = subprocess.STARTUPINFO()
     info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    info.wShowWindow = 7
+    info.wShowWindow = 0
     CHILD = subprocess.Popen(
         [_python(), "-u", "-m", "zeus3.v19.web"],
         cwd=str(ROOT),

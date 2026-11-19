@@ -59,7 +59,7 @@ if errorlevel 1 (
   "%PY%" "%CD%\get-pip.py" --no-warn-script-location
   "%PY%" -m pip install pywebview
 )
-start "ZEUS" /MIN "%PY%" "%CD%\zeus_desktop.py"
+powershell -NoProfile -Command "Start-Process -FilePath '%PY%' -WorkingDirectory '%CD%' -WindowStyle Hidden -ArgumentList '%CD%\zeus_desktop.py'"
 exit /b 0
 :fail
 echo.
