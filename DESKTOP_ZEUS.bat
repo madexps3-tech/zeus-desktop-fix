@@ -46,11 +46,6 @@ if errorlevel 1 goto fail
 echo Checking the loader.
 "%PY%" -c "import zeus3.v19.web; print('Loader import ok')"
 if errorlevel 1 goto fail
-echo Starting one dashboard loader.
-if exist "%CD%\ZEUS_SERVER.log" del "%CD%\ZEUS_SERVER.log"
-start "ZEUS Server" /D "%CD%" cmd /c ""%PY%" -u -m zeus3.v19.web > "%CD%\ZEUS_SERVER.log" 2>&1"
-"%PY%" "%CD%\zeus_wait.py"
-if errorlevel 1 goto fail
 echo Opening the ZEUS window.
 "%PY%" -c "import webview" >nul 2>&1
 if errorlevel 1 (
@@ -59,9 +54,12 @@ if errorlevel 1 (
   "%PY%" "%CD%\get-pip.py" --no-warn-script-location
   "%PY%" -m pip install pywebview
 )
-"%PY%" "%CD%\zeus_desktop.py"
-echo Dashboard is open. Leave the ZEUS Server window open.
-pause
+set "PYW=%CD%\runtime\python\pythonw.exe"
+if exist "%PYW%" (
+  start "" "%PYW%" "%CD%\zeus_desktop.py"
+) else (
+  powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -WorkingDirectory '%CD%' -FilePath '%PY%' -ArgumentList '%CD%\zeus_desktop.py'"
+)
 exit /b 0
 :fail
 echo.
