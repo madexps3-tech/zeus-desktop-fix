@@ -135,6 +135,16 @@ def _up() -> bool:
         return False
 
 
+def _python() -> str:
+    """MetaTrader does not answer a windowless Python. Use the console one."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        console = exe.with_name("python.exe")
+        if console.is_file():
+            return str(console)
+    return str(exe)
+
+
 def _start_server() -> None:
     global CHILD
     if _up():
@@ -142,13 +152,17 @@ def _start_server() -> None:
     handle = open(LOG, "w", encoding="utf-8")
     env = os.environ.copy()
     env["PYTHONPATH"] = env.get("PYTHONPATH") or str(ROOT / "src")
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 7
     CHILD = subprocess.Popen(
-        [sys.executable, "-u", "-m", "zeus3.v19.web"],
+        [_python(), "-u", "-m", "zeus3.v19.web"],
         cwd=str(ROOT),
         stdout=handle,
         stderr=subprocess.STDOUT,
         env=env,
-        creationflags=0x08000000,
+        startupinfo=info,
+        creationflags=0x00000010,
     )
 
 
