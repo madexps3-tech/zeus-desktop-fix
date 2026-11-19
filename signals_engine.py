@@ -2011,6 +2011,11 @@ def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, li
             continue
         key = symbol + "|" + chart
         held = active.get(key)
+        if chart == "SWING":
+            if held:
+                active.pop(key, None)
+                changed = True
+            continue
         fresh = dict(row) if row.get("side") and row.get("entry") is not None and row.get("tradeable") else None
         if held and held.get("reason") in MANUAL and held.get("entry") is not None:
             result, _be, mfe = _score_path(held, _bars_for(held, bars_by_chart), float(BE_MOVE.get(symbol, 0.0)), symbol)
