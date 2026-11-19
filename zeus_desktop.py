@@ -187,6 +187,8 @@ def _quote(text: str) -> str:
 
 
 def main() -> int:
+    if _up():
+        return 0
     try:
         _ico(ICON)
         _shortcut(ICON)
