@@ -423,7 +423,7 @@ def _rows(symbol: str = "") -> list[dict[str, Any]]:
             {
                 "label": _LABELS.get(matched, matched or broker),
                 "broker": broker or matched,
-                "side": "BUY" if int(getattr(row, "type_code", 1) or 1) == 0 else "SELL",
+                "side": "BUY" if int(getattr(row, "type_code", 1)) == 0 else "SELL",
                 "volume": getattr(row, "volume", None),
                 "price_open": getattr(row, "price_open", None),
                 "stop": getattr(row, "stop_loss", None),
