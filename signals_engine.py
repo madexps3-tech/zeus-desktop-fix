@@ -1552,6 +1552,9 @@ def _failed_test(
     entry = _num(series[close_at], "close")
     pad = max(float(spread), _band(symbol))
     stop = extreme - pad if side == "BUY" else extreme + pad
+    if symbol == "XAUUSD":
+        floor = float(GOLD_MIN_STOP)
+        stop = min(stop, entry - floor) if side == "BUY" else max(stop, entry + floor)
     risk = abs(entry - stop)
     if risk <= 0:
         return _wait("RESPONSIVE", "TESTING. The stop is not beyond the extreme. Not a trade.", "")
