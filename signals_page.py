@@ -832,16 +832,36 @@ _PRICE = {
     "HK50": (8000.0, 60000.0),
     "GER40": (4000.0, 40000.0),
 }
-_HINTS = {
-    "WTI": ("USOIL", "USOUSD", "XTIUSD", "WTICOUSD", "WTIUSD", "SPOTCRUDE", "CRUDE", "WTI", "XTI"),
-    "NG-C": ("NATGAS", "NGAS", "XNGUSD", "NATGASUSD", "NGC"),
-    "HK50": ("HK50", "HSI", "HKG33", "HANGSENG"),
-    "GER40": ("GER40", "GER30", "DE40", "DE30", "GDAXI", "DAX"),
+# The cash name is first. A future is last. StarTrader adds +. Vantage raw adds .r.
+_TRY = {
+    "XAUUSD": ("XAUUSD+", "XAUUSD", "XAUUSD.r", "XAUUSD.a", "GOLD+", "GOLD"),
+    "XAGUSD": ("XAGUSD+", "XAGUSD", "XAGUSD.r", "SILVER+", "SILVER"),
+    "NAS100": ("NAS100+", "NAS100", "NAS100.r", "US100+", "US100", "USTEC+", "USTEC", "USTECH", "NAS100ft+"),
+    "BTCUSD": ("BTCUSD", "BTCUSD+", "BTCUSD.r"),
+    "EURUSD": ("EURUSD+", "EURUSD", "EURUSD.r"),
+    "USDJPY": ("USDJPY+", "USDJPY", "USDJPY.r"),
+    "WTI": ("USOUSD+", "USOUSD", "USOIL+", "USOIL", "WTI+", "WTI", "CL-OIL"),
+    "NG-C": ("NG-C", "NG-C+", "NATGAS+", "NATGAS", "NGAS+", "NGAS"),
+    "HK50": ("HK50+", "HK50", "HK50.r", "HK50ft+"),
+    "GER40": ("GER40+", "GER40", "GER40.r", "DE40+", "DE40", "DAX40", "GER40ft+"),
 }
+_ROOTS = {
+    "XAUUSD": ("XAUUSD", "GOLD"),
+    "XAGUSD": ("XAGUSD", "SILVER"),
+    "NAS100": ("NAS100", "USTEC", "USTECH", "US100", "NDX100"),
+    "BTCUSD": ("BTCUSD",),
+    "EURUSD": ("EURUSD",),
+    "USDJPY": ("USDJPY",),
+    "WTI": ("USOUSD", "USOIL", "WTIUSD", "XTIUSD", "WTI", "CLOIL"),
+    "NG-C": ("NGC", "NATGAS", "NGAS", "XNGUSD"),
+    "HK50": ("HK50", "HKG33", "HSI"),
+    "GER40": ("GER40", "GER30", "DE40", "DAX40", "GDAXI", "DAX"),
+}
+_TAIL = {"", "R", "M", "C", "I", "P", "E", "FT", "FUT", "FUTURE", "CASH", "PRO", "RAW", "ECN", "SB"}
 
 
 def _flat_name(name: str) -> str:
-    return str(name).upper().replace(".", "").replace("+", "").replace("-", "").replace(" ", "")
+    return str(name).upper().replace(".", "").replace("+", "").replace("-", "").replace("_", "").replace(" ", "")
 
 
 def _in_band(symbol: str, bid: float) -> bool:
@@ -849,14 +869,17 @@ def _in_band(symbol: str, bid: float) -> bool:
     return low < float(bid) < high
 
 
-def _name_ok(symbol: str, flat: str) -> bool:
+def _root_match(symbol: str, flat: str) -> bool:
     if symbol == "WTI" and any(skip in flat for skip in _OIL_SKIP):
         return False
     if symbol == "NG-C" and any(skip in flat for skip in ("XAG", "XAU", "SILVER", "GOLD", "BRENT", "UKOIL")):
         return False
-    if symbol == "NG-C" and flat in {"NG", "NGC"}:
-        return True
-    return any(hint in flat for hint in _HINTS.get(symbol, ()))
+    for root in _ROOTS.get(symbol, ()):
+        if not flat.startswith(root):
+            continue
+        if flat[len(root):] in _TAIL:
+            return True
+    return False
 
 
 def _worker(host: Any) -> Any:
@@ -886,28 +909,39 @@ def _candles_from_rows(rows: Any) -> list[dict[str, Any]]:
 
 
 def _broker_feed(host: Any, symbol: str, chart: str, scan: bool) -> tuple[Any, dict[str, list[dict[str, Any]]], str] | None:
-    """The feed rarely uses the page name. Take the broker's name only when the price is that market."""
+    """Use the broker's own spelling. The cash name wins. The price has to be that market."""
     worker = _worker(host)
-    if worker is None or symbol not in _HINTS:
-        return None
-    try:
-        names = tuple(worker.symbol_catalog())
-    except Exception:
+    if worker is None:
         return None
     found: list[tuple[int, str, Any]] = []
-    for name in names:
-        flat = _flat_name(name)
-        if not _name_ok(symbol, flat):
-            continue
-        try:
-            got = worker.quote(str(name))
-        except Exception:
-            continue
+
+    def consider(name: str, got: Any) -> None:
         bid = float(getattr(got, "bid", 0) or 0)
         if not _in_band(symbol, bid):
-            continue
+            return
+        flat = _flat_name(name)
         cash = 0 if ("FT" in flat or "FUT" in flat) else 1
         found.append((cash, str(name), got))
+
+    for name in _TRY.get(symbol, ()):
+        try:
+            consider(name, worker.quote(name))
+        except Exception:
+            continue
+        if found and found[-1][0] == 1:
+            break
+    if not found:
+        try:
+            catalog = tuple(worker.symbol_catalog())
+        except Exception:
+            catalog = ()
+        for name in catalog:
+            if not _root_match(symbol, _flat_name(name)):
+                continue
+            try:
+                consider(str(name), worker.quote(str(name)))
+            except Exception:
+                continue
     if not found:
         return None
     found.sort(key=lambda item: item[0], reverse=True)
@@ -1066,10 +1100,7 @@ def _book(symbol: str) -> dict[str, Any]:
 
 
 def _same_pair(symbol: str, broker: str) -> bool:
-    broker = broker.upper().replace(".", "").replace("+", "").replace("-", "")
-    if symbol in broker or broker in symbol:
-        return True
-    return any(name in broker for name in POSITION_NAMES.get(symbol, ()))
+    return _root_match(symbol, _flat_name(broker))
 
 
 def _positions(host: Any, symbol: str) -> list[dict[str, Any]]:
