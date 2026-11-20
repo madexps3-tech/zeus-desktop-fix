@@ -427,16 +427,18 @@ def _risk_line(risk: float, cash: float, account: Any) -> str:
     """Risk $200 / 2% of $10,000. The account total is not printed on its own."""
     balance = _account_value(account)
     if cash > 0 and balance > 0:
-        return f"Risk ${cash:,.0f} / {cash / balance * 100:.2f}% of ${balance:,.0f}"
+        percent = f"{cash / balance * 100:.2f}".rstrip("0").rstrip(".")
+        return f"Risk ${cash:,.0f} / {percent}% of ${balance:,.0f}"
     if cash > 0:
         return f"Risk ${cash:,.0f}"
     if risk > 0 and balance > 0:
-        return f"Risk ${balance * risk / 100:,.0f} / {risk:g}% of ${balance:,.0f}"
+        percent = f"{risk:g}"
+        return f"Risk ${balance * risk / 100:,.0f} / {percent}% of ${balance:,.0f}"
     return f"Risk {risk:g}%"
 
 
-def _money(row: dict[str, Any], account: Any, risk: float) -> str:
-    """Same line as the desk: each target in R, and the dollar value of that R at the chosen risk."""
+def _money(row: dict[str, Any], account: Any, risk: float, cash: float = 0.0) -> str:
+    """Each target in R, and the profit at that R. A typed dollar risk does not wait for the balance."""
     entry = row.get("entry")
     stop = row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop")
     if entry is None or stop is None:
@@ -451,6 +453,7 @@ def _money(row: dict[str, Any], account: Any, risk: float) -> str:
     if risk_dist <= 0 or not targets:
         return ""
     balance = _account_value(account)
+    dollar = cash if cash > 0 else (balance * risk / 100.0 if risk > 0 and balance > 0 else 0.0)
     bits = []
     for index, price in enumerate(targets, 1):
         try:
@@ -459,8 +462,8 @@ def _money(row: dict[str, Any], account: Any, risk: float) -> str:
         except (TypeError, ValueError):
             continue
         mult = round(reward / risk_dist, 2)
-        cash = f"  profit ${round(balance * risk * mult / 100):,}" if risk > 0 and balance > 0 else ""
-        bits.append(f"T{index} {shown}  {mult:.2f}R{cash}")
+        profit = f"  profit ${round(dollar * mult):,}" if dollar > 0 else ""
+        bits.append(f"T{index} {shown}  {mult:.2f}R{profit}")
     return "\n".join(bits)
 
 
@@ -593,8 +596,8 @@ def announce(payload: dict[str, Any]) -> None:
         key = f"T|{symbol}|{chart}|{row.get('side')}|{row.get('entry')}|{row.get('stop')}|{target}"
         if row.get("tradeable") and _fresh(key):
             offer = token_hex(4)
-            money = _money(row, payload.get("account"), _order_percent({"risk": risk, "cash": _cash_amount()}) or risk)
             cash = _cash_amount()
+            money = _money(row, payload.get("account"), _order_percent({"risk": risk, "cash": cash}) or risk, cash)
             risk_line = _risk_line(risk, cash, payload.get("account"))
             with _LOCK:
                 _OFFERS[offer] = {
@@ -604,6 +607,7 @@ def announce(payload: dict[str, Any]) -> None:
                     "entry": float(row["entry"]),
                     "stop": float(row["stop"]),
                     "target": float(target),
+                    "targets": [float(price) for price in targets if price is not None] or [float(target)],
                     "reason": str(row.get("reason") or ""),
                     "risk": risk,
                     "cash": cash,
@@ -1009,9 +1013,16 @@ def _offer_money(offer: dict[str, Any]) -> str:
     if row is not None:
         account = {"equity": getattr(row, "equity", None), "balance": getattr(row, "balance", None)}
     return _money(
-        {"entry": offer.get("entry"), "stop": offer.get("stop"), "target": offer.get("target"), "targets": [offer.get("target")]},
+        {
+            "entry": offer.get("entry"),
+            "stop": offer.get("stop"),
+            "risk_stop": offer.get("risk_stop") or offer.get("stop"),
+            "target": offer.get("target"),
+            "targets": offer.get("targets") or [offer.get("target")],
+        },
         account,
         float(offer.get("risk") or 0),
+        float(offer.get("cash") or 0),
     )
 
 
