@@ -1601,14 +1601,15 @@ def _failed_test(
     row = {
         "chart": "RESPONSIVE", "side": side, "reason": "RESPONSIVE", "r": ratios[0],
         "decision": "—", "note": "", "state": "RESPONSIVE" if at_signal else "TESTING",
-        "trend": "", "tradeable": False, "entry": entry, "stop": stop, "risk_stop": stop,
-        "target": targets[0], "targets": targets,
+        "trend": "", "tradeable": bool(at_signal), "entry": entry, "stop": stop, "risk_stop": stop,
+        "target": targets[0], "targets": targets, "time": _time(series[close_at]),
     }
     if at_signal:
+        row["state"] = "READY"
         _guide(row, book, series, symbol, bid, ask)
         guide = str(row.pop("guide", "") or "")
         row["note"] = (
-            f"RESPONSIVE {side}. No button yet. Excess {round(extreme, 5)}. "
+            f"RESPONSIVE {side}. Excess {round(extreme, 5)}. "
             f"The {source} candle closed back at {round(entry, 5)}. Stop {round(stop, 5)}. {levels}. {guide}"
         ).strip()
     else:
@@ -1890,7 +1891,11 @@ def build_rows(
         if zone is not None and row.get("side") and _spent(symbol, str(row.get("chart")), str(row.get("side")), float(zone)):
             _silence(row, "Not a new order. This zone already has one.")
     _gate(rows, book)
-    rows.append(_failed_test(symbol, m1, m15, area, book, spread, bid, ask))
+    responsive = _failed_test(symbol, m1, m15, area, book, spread, bid, ask)
+    if responsive.get("side") and responsive.get("tradeable"):
+        _live_stop(responsive, bid, ask, symbol)
+        _limits(responsive, symbol, spread)
+    rows.append(responsive)
     return rows
 
 

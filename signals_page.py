@@ -479,7 +479,7 @@ function speak(text){
 let board={};
 function boardLine(payload){
   const rows=(payload&&payload.rows)||[];
-  const rank={INTRADAY:0,INTERDAY:1,SCALP:2,SWING:3,ICEBERG:4};
+  const rank={INTRADAY:0,INTERDAY:1,RESPONSIVE:2,SCALP:3,SWING:4,ICEBERG:5};
   const live=rows.filter(r=>rank[r.chart]!=null);
   const ranked=live.filter(r=>r.side&&r.entry!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
   const hit=ranked.find(r=>r.tradeable)||ranked.find(r=>r.state!=="SHOWN");
@@ -540,7 +540,7 @@ function paint(){
       const side=r.side?`<span class="${r.side==="BUY"?"good":"bad"}">${r.side}</span>`:"—";
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
       const harvest=moneyLine(r);
-      const limitOk=["ICEBERG","SCALP","INTRADAY","SWING"].includes(r.chart);
+      const limitOk=["ICEBERG","SCALP","INTRADAY","SWING","RESPONSIVE"].includes(r.chart);
       const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','MARKET')">MARKET</button>${limitOk?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','LIMIT')">LIMIT</button>`:""}`:"";
       return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${harvest}</td><td>${r.note||r.reason||"—"}</td><td>${button}</td></tr>`;
     }).join("");
@@ -561,7 +561,7 @@ function paint(){
   const pos=data.positions||[];
   $("positions").innerHTML=positionBox(pos);
   const research=data.research||{};
-  const openBits=(research.open||[]).filter(x=>x.chart==="INTRADAY"||x.chart==="SWING"||x.chart==="ICEBERG"||x.chart==="INTERDAY"||x.chart==="SCALP").map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning");
+  const openBits=(research.open||[]).filter(x=>x.chart==="INTRADAY"||x.chart==="SWING"||x.chart==="ICEBERG"||x.chart==="INTERDAY"||x.chart==="SCALP"||x.chart==="RESPONSIVE").map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning");
   $("research").textContent=(openBits.length?("OPEN · "+openBits.join(" · ")):"No open signal on this pair.")+"\nTAKEN is an order this page sent. The win and loss counts stay in the log.";
   const row=(data.rows||[]).find(r=>r.chart===pickedRow);
   const news=data.news||{};
