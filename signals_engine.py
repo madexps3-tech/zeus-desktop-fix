@@ -97,7 +97,7 @@ FUTURES_ROOTS = {
     "WTI": ("CL",),
     "EURUSD": ("6E",),
     "USDJPY": ("6J",),
-    "BTCUSD": ("BTC", "MBT"),
+    "BTCUSD": ("BTC",),
 }
 
 
@@ -1411,7 +1411,7 @@ def _value_break(
     if row is None:
         return None
     row["note"] = (
-        f"BREAK {side}. Price left value. Two 1-minute candles closed outside {round(level, 5)}. "
+        f"BREAK {side}. Price left value. Two 4-hour candles closed outside {round(level, 5)}. "
         f"Stop back inside value at {round(float(row['stop']), 5)}. "
         + str(row.get("note") or "")
     ).strip()
@@ -1734,7 +1734,7 @@ def build_rows(
     wider = _prices(lows4, "LOW", 4) + _prices(highs4, "HIGH", 4)
     swing_state = _headline(points4)
     closed_h4 = _closed(h4)
-    swing = _value_break(symbol, closed, swing_zones, spread, area)
+    swing = _value_break(symbol, closed_h4, swing_zones, spread, area)
     if swing is None:
         swing = _choose(
             symbol, "SWING", swing_state, closed_h4, swing_zones, spread, wider, wider=wider, swing_stop=True,
@@ -1751,11 +1751,6 @@ def build_rows(
         or (swing_state == "BULLISH" and swing.get("side") == "SELL")
     ):
         swing = None
-    if swing is not None and swing.get("entry") is not None and swing.get("side"):
-        live_price = ask if swing.get("side") == "BUY" else bid
-        if isinstance(live_price, (int, float)) and not isinstance(live_price, bool):
-            if abs(float(live_price) - float(swing["entry"])) > _band(symbol):
-                swing = None
     swing_miss = "No confirmed turn at the value low or the value high."
     iceberg = _iceberg(symbol, bars_by_chart, book, spread, bid, ask)
     if symbol not in ICE_ONLY:
@@ -1946,8 +1941,7 @@ def place_value(book: dict[str, Any] | None, symbol: str, bid: float | None, ask
     if val is None or poc is None or vah is None or not (val <= poc <= vah):
         return
     mid = (float(bid) + float(ask)) / 2.0
-    room = float(EDGE.get(symbol, 0.0))
-    if abs(poc - mid) <= max(room, 1e-9):
+    if abs(poc - mid) <= _band(symbol):
         return
     last = book.get("last")
     if isinstance(last, bool) or not isinstance(last, (int, float)) or float(last) <= 0:

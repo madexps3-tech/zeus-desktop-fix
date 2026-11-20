@@ -353,7 +353,7 @@ function draw(){
     ctx.fillRect(x-Math.max(2,step*0.28), top, Math.max(4,step*0.56), Math.max(1,bot-top));
     if(i%Math.ceil(rows.length/6)===0){
       ctx.fillStyle="#8ea3b8";
-      ctx.fillText(String(b.time||"").slice(5,16).replace("T"," "), x-24, 512);
+      ctx.fillText(localWhen(b.time), x-24, 512);
     }
   });
   ctx.fillStyle="#8ea3b8";
@@ -386,7 +386,7 @@ function draw(){
     ctx.fillStyle="#102033"; ctx.fillRect(plotR+2, cursor.y-9, 74, 18);
     ctx.fillStyle="#e9c66b"; ctx.fillText(label, plotR+6, cursor.y+4);
     if(bar){
-      const when=String(bar.time||"").slice(5,16).replace("T"," ");
+      const when=localWhen(bar.time);
       const info=when+"   O "+px(bar.open)+"  H "+px(bar.high)+"  L "+px(bar.low)+"  C "+px(bar.close);
       ctx.fillStyle="#e7eef5"; ctx.fillText(info, plotL, plotB+16);
     }
@@ -452,9 +452,24 @@ function remember(key){
   if(keys.length>200) delete bag[keys[0]];
   sessionStorage.setItem("sig_seen_alerts", JSON.stringify(bag));
 }
+function localStamp(){
+  const d=new Date();
+  const p=n=>String(n).padStart(2,"0");
+  return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+}
+function localWhen(value){
+  const raw=String(value||"");
+  if(!raw) return "";
+  const iso=raw.includes("T")?raw:raw.replace(" ","T");
+  const zoned=/Z|[+-]\d\d:?\d\d$/.test(iso);
+  const d=new Date(zoned?iso:iso+"Z");
+  if(isNaN(d.getTime())) return raw.slice(5,16).replace("T"," ");
+  const p=n=>String(n).padStart(2,"0");
+  return p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes());
+}
 function speak(text){
   const box=$("alerts");
-  const line=new Date().toISOString().slice(11,19)+" "+text;
+  const line=localStamp()+" "+text;
   const prior=(box.textContent||"").split("\n").filter(Boolean);
   box.textContent=[line].concat(prior).slice(0,8).join("\n");
   if(window.Notification&&Notification.permission==="granted"){
