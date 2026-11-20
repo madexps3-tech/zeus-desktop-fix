@@ -437,7 +437,7 @@ function moneyLine(row, account){
     const mult=round2(reward/riskDist);
     const pct=(isFinite(risk)&&risk>0)?round2(risk*mult):null;
     const cash=(pct!=null&&isFinite(balance)&&balance>0)?Math.round(balance*pct/100):null;
-    const ratio=mult.toFixed(2)+"R";
+    const ratio=mult.toFixed(2)+"R to "+price;
     const cashText=cash==null?"":" $"+cash;
     return "T"+(i+1)+" "+ratio+cashText;
   }).join(" · ");

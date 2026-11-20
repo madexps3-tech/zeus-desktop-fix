@@ -1034,18 +1034,18 @@ def _break_confirm(closed: list[dict[str, Any]], zones: list[dict[str, Any]], si
     return min(hits, key=lambda zone: abs(float(zone["price"]) - close))
 
 
-def _sentence(state: str, reason: str, side: str, zone: dict[str, Any], entry: float, stop: float, targets: list[float], symbol: str) -> str:
+def _sentence(state: str, reason: str, side: str, zone: dict[str, Any], entry: float, stop: float, targets: list[float], symbol: str, clock: str = "1-minute") -> str:
     edge = "buy zone" if side == "BUY" else "sell zone"
     price = round(float(zone["price"]), 5)
     if reason == "SCALP":
-        what = f"The 1-minute candle closed on the point of control at {price}."
+        what = f"The {clock} candle closed on the point of control at {price}."
     elif reason == "RANGE":
-        what = f"The 1-minute candle closed back out of the {edge} at {price}."
+        what = f"The {clock} candle closed back out of the {edge} at {price}."
     elif reason == "PULLBACK":
         way = "up" if side == "BUY" else "down"
-        what = f"The trend is {way}. The 1-minute candle closed back {way} from the {edge} at {price}."
+        what = f"The trend is {way}. The {clock} candle closed back {way} from the {edge} at {price}."
     else:
-        what = f"Two 1-minute candles closed through the {edge} at {price}."
+        what = f"Two {clock} candles closed through the {edge} at {price}."
     side_word = "below" if side == "BUY" else "above"
     listed = ", ".join(
         f"T{index} {round(target, 5)} {_harvest(symbol, entry, target)}"
@@ -1087,7 +1087,7 @@ def _pack(
     row["market"] = state
     row["score_on"] = "M1"
     row["zone"] = float(zone["price"])
-    row["note"] = _sentence(state, reason, side, zone, entry, stop, targets, symbol)
+    row["note"] = _sentence(state, reason, side, zone, entry, stop, targets, symbol, "4-hour" if chart == "SWING" else "1-minute")
     return row
 
 
@@ -1558,7 +1558,7 @@ def _failed_test(
     ladder = [val, poc, vah] if side == "BUY" else [vah, poc, val]
     targets = [price for price in ladder if (price > entry if side == "BUY" else price < entry)]
     if not targets:
-        targets = [vah if side == "BUY" else val]
+        return _wait("RESPONSIVE", "TESTING. Price is already through the value low, the point of control, and the value high. Not a new entry.", "")
     furthest = entry
     adverse = entry
     stopped = False
@@ -1739,6 +1739,24 @@ def build_rows(
         swing = _choose(
             symbol, "SWING", swing_state, closed_h4, swing_zones, spread, wider, wider=wider, swing_stop=True,
         )
+        if swing is not None and (area is None or not _at_edge(swing, area, symbol)):
+            swing = None
+        elif swing is not None and (
+            (swing_state == "BEARISH" and swing.get("side") == "BUY")
+            or (swing_state == "BULLISH" and swing.get("side") == "SELL")
+        ):
+            swing = None
+    if swing is not None and (
+        (swing_state == "BEARISH" and swing.get("side") == "BUY")
+        or (swing_state == "BULLISH" and swing.get("side") == "SELL")
+    ):
+        swing = None
+    if swing is not None and swing.get("entry") is not None and swing.get("side"):
+        live_price = ask if swing.get("side") == "BUY" else bid
+        if isinstance(live_price, (int, float)) and not isinstance(live_price, bool):
+            if abs(float(live_price) - float(swing["entry"])) > _band(symbol):
+                swing = None
+    swing_miss = "No confirmed turn at the value low or the value high."
     iceberg = _iceberg(symbol, bars_by_chart, book, spread, bid, ask)
     if symbol not in ICE_ONLY:
         iceberg_note = "Iceberg is only gold, oil, and Nasdaq."
@@ -1749,7 +1767,7 @@ def build_rows(
         "INTRADAY": intraday_note,
         "INTERDAY": "No intraday trade is still open.",
         "SCALP": "The close is not on the point of control.",
-        "SWING": "No confirmed turn at yesterday or the 4-hour swing.",
+        "SWING": swing_miss,
     }
     chosen = {"ICEBERG": iceberg, "INTRADAY": intraday, "SCALP": scalp, "SWING": swing}
     rows: list[dict[str, Any]] = []
