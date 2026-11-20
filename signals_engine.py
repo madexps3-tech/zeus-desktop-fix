@@ -1785,11 +1785,6 @@ def build_rows(
             or (swing_state == "BULLISH" and swing.get("side") == "SELL")
         ):
             swing = None
-    if swing is not None and (
-        (swing_state == "BEARISH" and swing.get("side") == "BUY")
-        or (swing_state == "BULLISH" and swing.get("side") == "SELL")
-    ):
-        swing = None
     swing_miss = "No confirmed turn at the value low or the value high."
     iceberg = _iceberg(symbol, bars_by_chart, book, spread, bid, ask)
     if symbol not in ICE_ONLY:
