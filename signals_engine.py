@@ -1460,6 +1460,209 @@ def _limits(row: dict[str, Any], symbol: str, spread: float) -> None:
         _silence(row, "The stop is inside $2. Not a trade unless it is the point-of-control scalp.")
 
 
+TEST_STATE = Path("failed_break_state.json")
+TEST_LOG = Path("failed_break_log.jsonl")
+
+
+def _flow_snap(book: dict[str, Any] | None) -> dict[str, Any]:
+    book = book or {}
+    ice = book.get("iceberg") if isinstance(book.get("iceberg"), dict) else {}
+    return {
+        "delta_5s": book.get("delta_5s"),
+        "delta_60s": book.get("delta_60s"),
+        "absorption": bool(book.get("absorption")),
+        "iceberg": ice.get("price"),
+        "iceberg_side": ice.get("side"),
+        "sweep": bool(book.get("sweep_consumed")),
+        "pulled": bool(book.get("size_pulled")),
+    }
+
+
+def _probe(bars: list[dict[str, Any]], val: float, vah: float) -> dict[str, Any] | None:
+    """The latest close back through a low under value, or a high over value."""
+    found: dict[str, Any] | None = None
+    index = 0
+    count = len(bars)
+    while index < count:
+        low = _num(bars[index], "low")
+        high = _num(bars[index], "high")
+        if low < val or high > vah:
+            side = "BUY" if low < val else "SELL"
+            if low < val and high > vah:
+                side = "BUY" if (val - low) >= (high - vah) else "SELL"
+            extreme = low if side == "BUY" else high
+            extreme_at = index
+            cursor = index
+            while cursor < count:
+                bar_low = _num(bars[cursor], "low")
+                bar_high = _num(bars[cursor], "high")
+                if side == "BUY" and bar_low > val and cursor > extreme_at:
+                    break
+                if side == "SELL" and bar_high < vah and cursor > extreme_at:
+                    break
+                if side == "BUY" and bar_low < extreme:
+                    extreme = bar_low
+                    extreme_at = cursor
+                if side == "SELL" and bar_high > extreme:
+                    extreme = bar_high
+                    extreme_at = cursor
+                cursor += 1
+            close_at = None
+            for later in range(extreme_at, count):
+                close = _num(bars[later], "close")
+                if (side == "BUY" and close > extreme) or (side == "SELL" and close < extreme):
+                    close_at = later
+                    break
+            found = {"side": side, "extreme": extreme, "extreme_at": extreme_at, "close_at": close_at, "bars": bars}
+            index = max(cursor, extreme_at + 1)
+            continue
+        index += 1
+    return found
+
+
+def _failed_test(
+    symbol: str,
+    m1: list[dict[str, Any]],
+    m15: list[dict[str, Any]],
+    area: tuple[float, float, float] | None,
+    book: dict[str, Any] | None,
+    spread: float,
+    bid: float | None,
+    ask: float | None,
+) -> dict[str, Any]:
+    """A failed break, shown as a test. It never gets a button."""
+    if area is None:
+        return _wait("TEST", "TESTING. Value area is not on this chart yet. Not a trade.", "")
+    val, poc, vah = area
+    source = "15-minute"
+    bars = _closed(m15)
+    probe = _probe(bars, val, vah) if len(bars) >= 5 else None
+    if probe is None or probe.get("close_at") is None:
+        minute = _closed(m1)
+        other = _probe(minute, val, vah) if len(minute) >= 5 else None
+        if other is not None and other.get("close_at") is not None:
+            probe = other
+            source = "1-minute"
+    if probe is None or probe.get("close_at") is None:
+        return _wait("TEST", "TESTING. No close back through a low under value or a high over value. Not a trade.", "")
+    side = str(probe["side"])
+    series: list[dict[str, Any]] = probe["bars"]
+    extreme = float(probe["extreme"])
+    close_at = int(probe["close_at"])
+    entry = _num(series[close_at], "close")
+    pad = max(float(spread), _band(symbol))
+    stop = extreme - pad if side == "BUY" else extreme + pad
+    target = val if side == "BUY" else vah
+    furthest = entry
+    stopped = False
+    live = bid if side == "BUY" else ask
+    prices = [float(live)] if isinstance(live, (int, float)) and not isinstance(live, bool) else []
+    for bar in series[close_at + 1:]:
+        prices.append(_num(bar, "high") if side == "BUY" else _num(bar, "low"))
+        if side == "BUY" and _num(bar, "low") <= stop:
+            stopped = True
+        if side == "SELL" and _num(bar, "high") >= stop:
+            stopped = True
+    if side == "BUY":
+        furthest = max([entry, *prices])
+        reached_value = furthest + 1e-9 >= val
+        reached_poc = furthest + 1e-9 >= poc
+        reached_far = furthest + 1e-9 >= vah
+    else:
+        furthest = min([entry, *prices])
+        reached_value = furthest - 1e-9 <= vah
+        reached_poc = furthest - 1e-9 <= poc
+        reached_far = furthest - 1e-9 <= val
+    at_signal = close_at >= len(series) - 1
+    record = _remember_test(
+        symbol, side, extreme, entry, stop, target, val, poc, vah, furthest, stopped,
+        reached_value, reached_poc, reached_far, _flow_snap(book), at_signal, _time(series[close_at]),
+    )
+    flow = record.get("flow") or {}
+    age = "at the close back" if record.get("flow_at_signal") else "now, not at the low"
+    note = (
+        f"TESTING. Not a trade. The {side.lower()} extreme {round(extreme, 5)} went through "
+        f"{'the value low' if side == 'BUY' else 'the value high'}. "
+        f"The {source} candle closed back at {round(entry, 5)}. Stop {round(stop, 5)}. "
+        f"The value edge was the first target. Price went to {round(furthest, 5)}. "
+        f"Value {'reached' if reached_value else 'not reached'}. "
+        f"Point of control {'reached' if reached_poc else 'not reached'}. "
+        f"The far side {'reached' if reached_far else 'not reached'}. "
+        f"{'The stop was traded. ' if stopped else ''}"
+        f"Book {age}: 5s {flow.get('delta_5s')} 60s {flow.get('delta_60s')} "
+        f"absorption {'yes' if flow.get('absorption') else 'no'} "
+        f"iceberg {flow.get('iceberg') if flow.get('iceberg') is not None else 'no'}."
+    )
+    return {
+        "chart": "TEST", "side": side, "reason": "TESTING", "r": None,
+        "decision": "—", "note": note, "state": "TESTING", "trend": "",
+        "tradeable": False, "entry": entry, "stop": stop, "target": target,
+        "targets": [target, poc, vah if side == "BUY" else val],
+    }
+
+
+def _remember_test(
+    symbol: str,
+    side: str,
+    extreme: float,
+    entry: float,
+    stop: float,
+    target: float,
+    val: float,
+    poc: float,
+    vah: float,
+    furthest: float,
+    stopped: bool,
+    reached_value: bool,
+    reached_poc: bool,
+    reached_far: bool,
+    flow: dict[str, Any],
+    at_signal: bool,
+    when: str,
+) -> dict[str, Any]:
+    """One record per extreme. A later price updates it. It does not write the same entry again."""
+    key = "|".join((symbol, side, str(round(extreme, 5))))
+    try:
+        state = json.loads(TEST_STATE.read_text(encoding="utf-8")) if TEST_STATE.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    prior = state.get(key) if isinstance(state.get(key), dict) else None
+    milestone = (reached_value, reached_poc, reached_far, stopped)
+    if prior is None:
+        prior = {
+            "symbol": symbol, "side": side, "extreme": extreme, "entry": entry, "stop": stop,
+            "target": target, "value_low": val, "poc": poc, "value_high": vah,
+            "opened": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "candle": when, "flow": flow, "flow_at_signal": at_signal,
+            "furthest": furthest, "milestone": list(milestone),
+        }
+        _test_event({"event": "OPEN", **prior})
+    else:
+        old = tuple(prior.get("milestone") or [])
+        if furthest != prior.get("furthest") or old != milestone:
+            prior["furthest"] = furthest
+            prior["milestone"] = list(milestone)
+            prior["updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            if old != milestone:
+                _test_event({"event": "UPDATE", "symbol": symbol, "side": side, "extreme": extreme, "furthest": furthest, "milestone": list(milestone)})
+    state[key] = prior
+    try:
+        TEST_STATE.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+    return prior
+
+
+def _test_event(row: dict[str, Any]) -> None:
+    try:
+        with TEST_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
+    except OSError:
+        return
+
+
 def build_rows(
     symbol: str,
     bars_by_chart: dict[str, list[dict[str, Any]]],
@@ -1659,6 +1862,7 @@ def build_rows(
         if zone is not None and row.get("side") and _spent(symbol, str(row.get("chart")), str(row.get("side")), float(zone)):
             _silence(row, "Not a new order. This zone already has one.")
     _gate(rows, book)
+    rows.append(_failed_test(symbol, m1, m15, area, book, spread, bid, ask))
     return rows
 
 
