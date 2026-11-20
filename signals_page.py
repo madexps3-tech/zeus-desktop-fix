@@ -30,6 +30,8 @@ from zeus3.v19.signals_engine import (
     reaction,
     record,
     session_levels,
+    _band,
+    _wait,
 )
 
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -146,9 +148,10 @@ function buttons(){
 }
 function remember(j){ if(j&&j.symbol)saved[j.symbol+"|"+(j.chart||chart)]=j; }
 function setPair(s){
-  symbol=s; localStorage.setItem("sig_symbol",s); pan=0;
+  symbol=s; localStorage.setItem("sig_symbol",s); pan=0; fastBid=null; fastAsk=null;
   const kept=saved[s+"|"+chart];
-  if(kept){ data=kept; draw(); paint(); }
+  if(kept && kept.symbol===s){ data=kept; draw(); paint(); }
+  else { data={symbol:s,candles:[],rows:[],quote:{},flow:{},positions:[],pools:[],broker:s}; draw(); paint(); }
   load(true);
 }
 function setChart(c){
@@ -193,7 +196,13 @@ async function load(force){
     }
     draw(); paint(); consider(j);
   }catch(e){
-    if(e.name!=="AbortError" && id===loadId)$("status").textContent="CHART ERROR · "+e.message;
+    if(e.name!=="AbortError" && id===loadId){
+      $("status").textContent="CHART ERROR · "+e.message;
+      if(!data||data.symbol!==want){
+        data={symbol:want,candles:[],rows:[],quote:{},flow:{},positions:[],pools:[],broker:want};
+        draw(); paint();
+      }
+    }
   }finally{ if(id===loadId)busy=false }
 }
 async function toggleManage(){
@@ -485,7 +494,7 @@ function boardLine(payload){
   const rank={INTRADAY:0,INTERDAY:1,RESPONSIVE:2,SCALP:3,SWING:4,ICEBERG:5};
   const live=rows.filter(r=>rank[r.chart]!=null);
   const ranked=live.filter(r=>r.side&&r.entry!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
-  const hit=ranked.find(r=>r.tradeable)||ranked.find(r=>r.state!=="SHOWN");
+  const hit=ranked.find(r=>r.tradeable);
   if(hit){
     const money=String(moneyLine(hit, payload.account)).split(" · ")[0];
     return {kind:"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
@@ -607,7 +616,7 @@ async function trade(chartName, mode){
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
     const r=await fetch("/api/v19/owner-order/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
-      owner_approved:true,symbol:symbol,timeframe:row.chart==="SWING"?"H4":"M1",
+      owner_approved:true,symbol:(data&&data.broker)||symbol,timeframe:row.chart==="SWING"?"H4":"M1",
       order_type:limit?(row.side==="BUY"?"BUY_LIMIT":"SELL_LIMIT"):(row.side==="BUY"?"MARKET_BUY":"MARKET_SELL"),
       entry:limit?row.entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:plan.pct,horizon_lane:"INTRADAY",
       owner_note:"SIGNALS PAGE "+row.reason+" "+row.decision
@@ -708,7 +717,7 @@ window.addEventListener("pagehide",()=>{clearInterval(timer);if(control)control.
 buttons();load();timer=setInterval(load,2000);
 let fastBid=null,fastAsk=null,drawnAt=0;
 async function fastQuote(){
-  if(document.visibilityState==="hidden"||!data)return;
+  if(document.visibilityState==="hidden"||!data||data.symbol!==symbol)return;
   try{
     const r=await fetch("/api/quote?symbol="+encodeURIComponent(symbol));
     const j=await r.json();
@@ -716,11 +725,15 @@ async function fastQuote(){
     const q=j.quote||{};
     const bid=Number(q.bid),ask=Number(q.ask);
     if(!isFinite(bid)||!isFinite(ask))return;
+    const rows=data.candles||[];
+    if(rows.length){
+      const lastClose=Number(rows[rows.length-1].close);
+      if(isFinite(lastClose)&&lastClose>0&&Math.abs(bid-lastClose)/lastClose>0.5)return;
+    }
     if(bid===fastBid&&ask===fastAsk)return;
     fastBid=bid;fastAsk=ask;
     data.quote={bid:bid,ask:ask};
     data.spread=ask-bid;
-    const rows=data.candles||[];
     if(rows.length){
       const last=rows[rows.length-1];
       const mid=(bid+ask)/2;
@@ -807,7 +820,43 @@ def _live_candles(bars: list[dict[str, Any]], bid: float, chart: str) -> list[di
 
 
 _OIL_SKIP = ("BRENT", "UKOIL", "XBRUSD", "UKOUSD")
-_OIL_HINT = ("USOIL", "USOUSD", "XTIUSD", "WTICOUSD", "WTIUSD", "SPOTCRUDE", "CRUDE", "WTI", "XTI")
+_PRICE = {
+    "XAUUSD": (500.0, 20000.0),
+    "XAGUSD": (5.0, 200.0),
+    "NAS100": (3000.0, 80000.0),
+    "BTCUSD": (1000.0, 1000000.0),
+    "EURUSD": (0.5, 2.5),
+    "USDJPY": (50.0, 300.0),
+    "WTI": (20.0, 200.0),
+    "NG-C": (0.5, 20.0),
+    "HK50": (8000.0, 60000.0),
+    "GER40": (4000.0, 40000.0),
+}
+_HINTS = {
+    "WTI": ("USOIL", "USOUSD", "XTIUSD", "WTICOUSD", "WTIUSD", "SPOTCRUDE", "CRUDE", "WTI", "XTI"),
+    "NG-C": ("NATGAS", "NGAS", "XNGUSD", "NATGASUSD", "NGC"),
+    "HK50": ("HK50", "HSI", "HKG33", "HANGSENG"),
+    "GER40": ("GER40", "GER30", "DE40", "DE30", "GDAXI", "DAX"),
+}
+
+
+def _flat_name(name: str) -> str:
+    return str(name).upper().replace(".", "").replace("+", "").replace("-", "").replace(" ", "")
+
+
+def _in_band(symbol: str, bid: float) -> bool:
+    low, high = _PRICE.get(symbol, (0.0, 0.0))
+    return low < float(bid) < high
+
+
+def _name_ok(symbol: str, flat: str) -> bool:
+    if symbol == "WTI" and any(skip in flat for skip in _OIL_SKIP):
+        return False
+    if symbol == "NG-C" and any(skip in flat for skip in ("XAG", "XAU", "SILVER", "GOLD", "BRENT", "UKOIL")):
+        return False
+    if symbol == "NG-C" and flat in {"NG", "NGC"}:
+        return True
+    return any(hint in flat for hint in _HINTS.get(symbol, ()))
 
 
 def _worker(host: Any) -> Any:
@@ -836,34 +885,33 @@ def _candles_from_rows(rows: Any) -> list[dict[str, Any]]:
     return found
 
 
-def _oil_feed(host: Any, chart: str, scan: bool) -> tuple[Any, dict[str, list[dict[str, Any]]], str] | None:
-    """The feed has no symbol named WTI. Use the broker's crude name, and only if the price is oil."""
+def _broker_feed(host: Any, symbol: str, chart: str, scan: bool) -> tuple[Any, dict[str, list[dict[str, Any]]], str] | None:
+    """The feed rarely uses the page name. Take the broker's name only when the price is that market."""
     worker = _worker(host)
-    if worker is None:
+    if worker is None or symbol not in _HINTS:
         return None
     try:
         names = tuple(worker.symbol_catalog())
     except Exception:
         return None
-    chosen = None
-    quote = None
+    found: list[tuple[int, str, Any]] = []
     for name in names:
-        flat = str(name).upper().replace(".", "").replace("+", "").replace("-", "").replace(" ", "")
-        if any(skip in flat for skip in _OIL_SKIP):
-            continue
-        if not any(hint in flat for hint in _OIL_HINT):
+        flat = _flat_name(name)
+        if not _name_ok(symbol, flat):
             continue
         try:
             got = worker.quote(str(name))
         except Exception:
             continue
         bid = float(getattr(got, "bid", 0) or 0)
-        if 20 <= bid <= 200:
-            chosen = str(name)
-            quote = got
-            break
-    if quote is None or chosen is None:
+        if not _in_band(symbol, bid):
+            continue
+        cash = 0 if ("FT" in flat or "FUT" in flat) else 1
+        found.append((cash, str(name), got))
+    if not found:
         return None
+    found.sort(key=lambda item: item[0], reverse=True)
+    _rank, chosen, quote = found[0]
     bars_by_chart: dict[str, list[dict[str, Any]]] = {}
     names = ("M1", "M15", "H1", "H4", "D1") if scan else CHARTS
     for name in names:
@@ -1339,6 +1387,25 @@ def _broker_protection(rows: list[dict[str, Any]], positions: list[dict[str, Any
     inter["note"] = f"{close} {detail}".strip()
 
 
+def _drop_left(symbol: str, rows: list[dict[str, Any]], bid: float, ask: float, positions: list[dict[str, Any]]) -> None:
+    """An entry price the market has left is not a current order, unless that side is already open."""
+    band = _band(symbol)
+    for index, row in enumerate(rows):
+        if not row.get("side") or row.get("entry") is None:
+            continue
+        side = str(row.get("side"))
+        if any(str(position.get("side")) == side for position in positions):
+            continue
+        live = bid if side == "BUY" else ask
+        try:
+            away = abs(float(live) - float(row["entry"]))
+        except (TypeError, ValueError):
+            continue
+        if away <= band:
+            continue
+        rows[index] = _wait(str(row.get("chart") or ""), "Price has left that entry. Not a trade.", str(row.get("market") or ""))
+
+
 def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str, Any]:
     core = host.runtime.projection.market_data
     try:
@@ -1367,12 +1434,14 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         except Exception:
             quote = None
     direct = None
+    broker = symbol
     bid_now = float(getattr(quote, "bid", 0) or 0) if quote is not None else 0.0
-    if symbol == "WTI" and not (20 <= bid_now <= 200):
-        direct = _oil_feed(host, chart, scan)
+    if not _in_band(symbol, bid_now):
+        direct = _broker_feed(host, symbol, chart, scan)
         if direct is None:
-            raise RuntimeError("quote is not cached: WTI")
-        quote, bars_by_chart, _broker = direct
+            label = LABELS.get(symbol, symbol)
+            raise RuntimeError(f"{label} is not on this MetaTrader feed. Show it in Market Watch. The page name is {symbol}.")
+        quote, bars_by_chart, broker = direct
     elif quote is None:
         raise RuntimeError(f"quote is not cached: {symbol}")
     if direct is None:
@@ -1392,6 +1461,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     pools = liquidity(levels, bars_by_chart)
     rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)
     positions = _positions(host, symbol)
+    _drop_left(symbol, rows, bid, ask, positions)
     _broker_protection(rows, positions)
     _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
     if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:
@@ -1423,6 +1493,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     return {
         "ok": True,
         "symbol": symbol,
+        "broker": broker,
         "label": LABELS.get(symbol, symbol),
         "chart": chart,
         "candles": [] if scan else (bars_by_chart.get(chart) or []),

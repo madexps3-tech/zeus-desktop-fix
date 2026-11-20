@@ -1654,6 +1654,9 @@ def _failed_test(
             f"absorption {'yes' if flow.get('absorption') else 'no'} "
             f"iceberg {flow.get('iceberg') if flow.get('iceberg') is not None else 'no'}."
         )
+    live_px = bid if side == "BUY" else ask
+    if isinstance(live_px, (int, float)) and not isinstance(live_px, bool) and abs(float(live_px) - entry) > _band(symbol):
+        return _wait("RESPONSIVE", "Price has left that entry. Not a trade.", "")
     return row
 
 
@@ -1748,7 +1751,13 @@ def build_rows(
         intraday_note = "Value area is not on this chart yet."
     elif intraday is not None and not _at_edge(intraday, area, symbol):
         intraday = None
-        intraday_note = "Price is in the middle of the value area. Not a trade."
+        val, _poc, vah = area
+        outside = mid is not None and (float(mid) < val or float(mid) > vah)
+        intraday_note = (
+            "Price is outside the value area. No close back from the value low or the value high."
+            if outside
+            else "Price is in the middle of the value area. Not a trade."
+        )
     scalp = _scalp(symbol, closed, intraday_zones, spread, area, state)
     swing_levels = {
         "levels": [level for level in (day_levels.get("levels") or []) if str(level.get("name")) == "YESTERDAY"]
