@@ -1532,7 +1532,7 @@ def _failed_test(
 ) -> dict[str, Any]:
     """A failed break, shown as a test. It never gets a button."""
     if area is None:
-        return _wait("TEST", "TESTING. Value area is not on this chart yet. Not a trade.", "")
+        return _wait("RESPONSIVE", "TESTING. Value area is not on this chart yet. Not a trade.", "")
     val, poc, vah = area
     source = "15-minute"
     bars = _closed(m15)
@@ -1544,7 +1544,7 @@ def _failed_test(
             probe = other
             source = "1-minute"
     if probe is None or probe.get("close_at") is None:
-        return _wait("TEST", "TESTING. No close back through a low under value or a high over value. Not a trade.", "")
+        return _wait("RESPONSIVE", "TESTING. No close back through a low under value or a high over value. Not a trade.", "")
     side = str(probe["side"])
     series: list[dict[str, Any]] = probe["bars"]
     extreme = float(probe["extreme"])
@@ -1552,76 +1552,84 @@ def _failed_test(
     entry = _num(series[close_at], "close")
     pad = max(float(spread), _band(symbol))
     stop = extreme - pad if side == "BUY" else extreme + pad
-    target = val if side == "BUY" else vah
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return _wait("RESPONSIVE", "TESTING. The stop is not beyond the extreme. Not a trade.", "")
+    ladder = [val, poc, vah] if side == "BUY" else [vah, poc, val]
+    targets = [price for price in ladder if (price > entry if side == "BUY" else price < entry)]
+    if not targets:
+        targets = [vah if side == "BUY" else val]
     furthest = entry
+    adverse = entry
     stopped = False
     live = bid if side == "BUY" else ask
-    prices = [float(live)] if isinstance(live, (int, float)) and not isinstance(live, bool) else []
+    if isinstance(live, (int, float)) and not isinstance(live, bool):
+        furthest = max(furthest, float(live)) if side == "BUY" else min(furthest, float(live))
+        adverse = min(adverse, float(live)) if side == "BUY" else max(adverse, float(live))
     for bar in series[close_at + 1:]:
-        prices.append(_num(bar, "high") if side == "BUY" else _num(bar, "low"))
-        if side == "BUY" and _num(bar, "low") <= stop:
-            stopped = True
-        if side == "SELL" and _num(bar, "high") >= stop:
-            stopped = True
+        if side == "BUY":
+            furthest = max(furthest, _num(bar, "high"))
+            adverse = min(adverse, _num(bar, "low"))
+            if _num(bar, "low") <= stop:
+                stopped = True
+        else:
+            furthest = min(furthest, _num(bar, "low"))
+            adverse = max(adverse, _num(bar, "high"))
+            if _num(bar, "high") >= stop:
+                stopped = True
     if side == "BUY":
-        furthest = max([entry, *prices])
         reached_value = furthest + 1e-9 >= val
         reached_poc = furthest + 1e-9 >= poc
         reached_far = furthest + 1e-9 >= vah
     else:
-        furthest = min([entry, *prices])
         reached_value = furthest - 1e-9 <= vah
         reached_poc = furthest - 1e-9 <= poc
         reached_far = furthest - 1e-9 <= val
+    ratios = [round(abs(price - entry) / risk, 2) for price in targets]
     at_signal = close_at >= len(series) - 1
-    record = _remember_test(
-        symbol, side, extreme, entry, stop, target, val, poc, vah, furthest, stopped,
-        reached_value, reached_poc, reached_far, _flow_snap(book), at_signal, _time(series[close_at]),
-    )
+    record = _remember_test({
+        "symbol": symbol, "side": side, "extreme": extreme, "entry": entry, "stop": stop,
+        "target": targets[0], "targets": targets, "r": ratios, "value_low": val, "poc": poc,
+        "value_high": vah, "candle": _time(series[close_at]), "candle_size": source,
+        "spread": spread, "mae": round(abs(entry - adverse), 5), "furthest": furthest,
+        "stopped": stopped, "reached_value": reached_value, "reached_poc": reached_poc,
+        "reached_far": reached_far, "flow": _flow_snap(book), "flow_at_signal": at_signal,
+    })
     flow = record.get("flow") or {}
     age = "at the close back" if record.get("flow_at_signal") else "now, not at the low"
-    note = (
-        f"TESTING. Not a trade. The {side.lower()} extreme {round(extreme, 5)} went through "
-        f"{'the value low' if side == 'BUY' else 'the value high'}. "
-        f"The {source} candle closed back at {round(entry, 5)}. Stop {round(stop, 5)}. "
-        f"The value edge was the first target. Price went to {round(furthest, 5)}. "
-        f"Value {'reached' if reached_value else 'not reached'}. "
-        f"Point of control {'reached' if reached_poc else 'not reached'}. "
-        f"The far side {'reached' if reached_far else 'not reached'}. "
-        f"{'The stop was traded. ' if stopped else ''}"
-        f"Book {age}: 5s {flow.get('delta_5s')} 60s {flow.get('delta_60s')} "
-        f"absorption {'yes' if flow.get('absorption') else 'no'} "
-        f"iceberg {flow.get('iceberg') if flow.get('iceberg') is not None else 'no'}."
-    )
-    return {
-        "chart": "TEST", "side": side, "reason": "TESTING", "r": None,
-        "decision": "—", "note": note, "state": "TESTING", "trend": "",
-        "tradeable": False, "entry": entry, "stop": stop, "target": target,
-        "targets": [target, poc, vah if side == "BUY" else val],
+    levels = " ".join(f"T{index} {round(price, 5)} {ratio:.2f}R" for index, (price, ratio) in enumerate(zip(targets, ratios), 1))
+    row = {
+        "chart": "RESPONSIVE", "side": side, "reason": "RESPONSIVE", "r": ratios[0],
+        "decision": "—", "note": "", "state": "RESPONSIVE" if at_signal else "TESTING",
+        "trend": "", "tradeable": False, "entry": entry, "stop": stop, "risk_stop": stop,
+        "target": targets[0], "targets": targets,
     }
+    if at_signal:
+        _guide(row, book, series, symbol, bid, ask)
+        guide = str(row.pop("guide", "") or "")
+        row["note"] = (
+            f"RESPONSIVE {side}. No button yet. Excess {round(extreme, 5)}. "
+            f"The {source} candle closed back at {round(entry, 5)}. Stop {round(stop, 5)}. {levels}. {guide}"
+        ).strip()
+    else:
+        row["note"] = (
+            f"RESPONSIVE {side}. Not a new entry. Excess {round(extreme, 5)}. "
+            f"The close back was {round(entry, 5)}. Stop {round(stop, 5)}. {levels}. "
+            f"Price went to {round(furthest, 5)}. "
+            f"Value {'reached' if reached_value else 'not reached'}. "
+            f"Point of control {'reached' if reached_poc else 'not reached'}. "
+            f"The far side {'reached' if reached_far else 'not reached'}. "
+            f"{'The stop was traded. ' if stopped else ''}"
+            f"Book {age}: 5s {flow.get('delta_5s')} 60s {flow.get('delta_60s')} "
+            f"absorption {'yes' if flow.get('absorption') else 'no'} "
+            f"iceberg {flow.get('iceberg') if flow.get('iceberg') is not None else 'no'}."
+        )
+    return row
 
 
-def _remember_test(
-    symbol: str,
-    side: str,
-    extreme: float,
-    entry: float,
-    stop: float,
-    target: float,
-    val: float,
-    poc: float,
-    vah: float,
-    furthest: float,
-    stopped: bool,
-    reached_value: bool,
-    reached_poc: bool,
-    reached_far: bool,
-    flow: dict[str, Any],
-    at_signal: bool,
-    when: str,
-) -> dict[str, Any]:
-    """One record per extreme. A later price updates it. It does not write the same entry again."""
-    key = "|".join((symbol, side, str(round(extreme, 5))))
+def _remember_test(fields: dict[str, Any]) -> dict[str, Any]:
+    """One record per excess low or high. A later price updates it. The same entry is not written again."""
+    key = "|".join((str(fields["symbol"]), str(fields["side"]), str(round(float(fields["extreme"]), 5))))
     try:
         state = json.loads(TEST_STATE.read_text(encoding="utf-8")) if TEST_STATE.exists() else {}
     except (OSError, json.JSONDecodeError):
@@ -1629,24 +1637,31 @@ def _remember_test(
     if not isinstance(state, dict):
         state = {}
     prior = state.get(key) if isinstance(state.get(key), dict) else None
-    milestone = (reached_value, reached_poc, reached_far, stopped)
+    milestone = (
+        bool(fields["reached_value"]), bool(fields["reached_poc"]),
+        bool(fields["reached_far"]), bool(fields["stopped"]),
+    )
     if prior is None:
         prior = {
-            "symbol": symbol, "side": side, "extreme": extreme, "entry": entry, "stop": stop,
-            "target": target, "value_low": val, "poc": poc, "value_high": vah,
+            **fields,
             "opened": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-            "candle": when, "flow": flow, "flow_at_signal": at_signal,
-            "furthest": furthest, "milestone": list(milestone),
+            "milestone": list(milestone),
         }
         _test_event({"event": "OPEN", **prior})
     else:
         old = tuple(prior.get("milestone") or [])
-        if furthest != prior.get("furthest") or old != milestone:
-            prior["furthest"] = furthest
-            prior["milestone"] = list(milestone)
+        moved = prior.get("furthest") != fields["furthest"] or old != milestone
+        prior["furthest"] = fields["furthest"]
+        prior["mae"] = fields["mae"]
+        prior["milestone"] = list(milestone)
+        if moved and old != milestone:
             prior["updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            if old != milestone:
-                _test_event({"event": "UPDATE", "symbol": symbol, "side": side, "extreme": extreme, "furthest": furthest, "milestone": list(milestone)})
+            _test_event({
+                "event": "UPDATE", "symbol": fields["symbol"], "side": fields["side"],
+                "extreme": fields["extreme"], "entry": fields["entry"], "stop": fields["stop"],
+                "targets": fields["targets"], "r": fields["r"], "furthest": fields["furthest"],
+                "mae": fields["mae"], "milestone": list(milestone),
+            })
     state[key] = prior
     try:
         TEST_STATE.write_text(json.dumps(state), encoding="utf-8")
@@ -2366,7 +2381,7 @@ def _empty_bucket() -> dict[str, int]:
 
 def _score_path(row: dict[str, Any], bars: list[dict[str, Any]], be_move: float, symbol: str = "") -> tuple[str, str, float]:
     """The first target is the winner. Within five pips of it is banked, even on the bar that also hits the stop."""
-    later = [bar for bar in bars if _time(bar) > str(row.get("time"))]
+    later = [bar for bar in bars if _time(bar) >= str(row.get("time") or "")]
     entry = float(row["entry"])
     stop = float(row["stop"])
     targets = [float(price) for price in (row.get("targets") or []) if price is not None]
@@ -2442,7 +2457,9 @@ def _finish(state: dict[str, Any], store: str, summary_name: str, bars_by_chart:
         _append({
             "event": result, "book": summary_name, "symbol": symbol, "at": now,
             "chart": chart, "reason": row.get("reason"), "side": row.get("side"),
-            "r": row.get("r"), "be": be_result, "mfe": mfe, "next_vote": vote,
+            "entry": row.get("entry"), "stop": row.get("stop"), "target": row.get("target"),
+            "targets": row.get("targets"), "r": row.get("r"), "be": be_result, "mfe": mfe,
+            "next_vote": vote,
         })
         done.append(key)
     for key in done:
@@ -2460,9 +2477,11 @@ def record(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, lis
             continue
         if row.get("entry") is None:
             continue
-        key = "|".join((symbol, row["chart"], row["reason"], row["side"], str(row["entry"]), str(row["time"])))
-        if key in if_open:
+        seen = state.setdefault("seen_entries", {})
+        key = "|".join((symbol, str(row.get("chart")), str(row.get("side")), str(round(float(row["entry"]), 5))))
+        if key in if_open or key in seen:
             continue
+        seen[key] = now
         if_open[key] = {**row, "symbol": symbol, "opened": now}
         if row.get("chart") in ("INTRADAY", "INTERDAY", "SCALP") and row.get("zone") is not None:
             zone_key = "|".join((symbol, str(row.get("chart")), str(row.get("side")), str(round(float(row["zone"]), 5))))
