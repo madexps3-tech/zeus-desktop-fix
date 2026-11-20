@@ -413,6 +413,28 @@ def _order_percent(offer: dict[str, Any]) -> float | None:
     return cash / float(equity) * 100.0
 
 
+def _account_value(account: Any) -> float:
+    if not isinstance(account, dict):
+        return 0.0
+    raw = account.get("equity") if account.get("equity") not in (None, 0) else account.get("balance")
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _risk_line(risk: float, cash: float, account: Any) -> str:
+    """Risk $200 / 2% of $10,000. The account total is not printed on its own."""
+    balance = _account_value(account)
+    if cash > 0 and balance > 0:
+        return f"Risk ${cash:,.0f} / {cash / balance * 100:.2f}% of ${balance:,.0f}"
+    if cash > 0:
+        return f"Risk ${cash:,.0f}"
+    if risk > 0 and balance > 0:
+        return f"Risk ${balance * risk / 100:,.0f} / {risk:g}% of ${balance:,.0f}"
+    return f"Risk {risk:g}%"
+
+
 def _money(row: dict[str, Any], account: Any, risk: float) -> str:
     """Same line as the desk: each target in R, and the dollar value of that R at the chosen risk."""
     entry = row.get("entry")
@@ -428,23 +450,18 @@ def _money(row: dict[str, Any], account: Any, risk: float) -> str:
         targets = [row.get("target")]
     if risk_dist <= 0 or not targets:
         return ""
-    balance = 0.0
-    if isinstance(account, dict):
-        raw = account.get("equity") if account.get("equity") not in (None, 0) else account.get("balance")
-        try:
-            balance = float(raw or 0)
-        except (TypeError, ValueError):
-            balance = 0.0
+    balance = _account_value(account)
     bits = []
     for index, price in enumerate(targets, 1):
         try:
             reward = abs(float(price) - float(entry))
+            shown = float(price)
         except (TypeError, ValueError):
             continue
         mult = round(reward / risk_dist, 2)
-        cash = f" ${round(balance * risk * mult / 100)}" if risk > 0 and balance > 0 else ""
-        bits.append(f"T{index} {mult:.2f}R{cash}")
-    return " · ".join(bits)
+        cash = f"  profit ${round(balance * risk * mult / 100):,}" if risk > 0 and balance > 0 else ""
+        bits.append(f"T{index} {shown}  {mult:.2f}R{cash}")
+    return "\n".join(bits)
 
 
 def _truth() -> Any:
@@ -578,6 +595,7 @@ def announce(payload: dict[str, Any]) -> None:
             offer = token_hex(4)
             money = _money(row, payload.get("account"), _order_percent({"risk": risk, "cash": _cash_amount()}) or risk)
             cash = _cash_amount()
+            risk_line = _risk_line(risk, cash, payload.get("account"))
             with _LOCK:
                 _OFFERS[offer] = {
                     "symbol": symbol,
@@ -590,9 +608,9 @@ def announce(payload: dict[str, Any]) -> None:
                     "risk": risk,
                     "cash": cash,
                     "money": money,
+                    "risk_line": risk_line,
                     "at": time(),
                 }
-            risk_line = f"Risk ${cash:g}" if cash > 0 else f"Risk {risk:g}%"
             text = (
                 f"{label} {chart} {row.get('side')}\n"
                 f"Entry {row.get('entry')}\n"
@@ -602,9 +620,6 @@ def announce(payload: dict[str, Any]) -> None:
             )
             if money:
                 text += f"\n{money}"
-            held = _stamp(symbol, str(row.get("side") or ""))
-            if held:
-                text += f"\n{held}"
             if guide:
                 text += f"\n{guide}"
                 _mark(f"G|{symbol}|{chart}|{row.get('side')}|{guide}")
@@ -648,9 +663,6 @@ def announce(payload: dict[str, Any]) -> None:
             buttons = _manage_buttons(symbol, str(row.get("side") or ""))
             if buttons:
                 text += "\nBE moves the stop to the entry. 50% banks half. Or send /sl, /tp, or /r."
-            held = _stamp(symbol, str(row.get("side") or ""))
-            if held:
-                text += f"\n{held}"
             photo = _picture(payload, label, chart, row, target, targets)
             try:
                 _send(token, chat, text, buttons or None, photo=photo)
@@ -1159,7 +1171,7 @@ def _confirm(token: str, chat: str, offer_id: str) -> None:
         return
     label = _LABELS.get(offer["symbol"], offer["symbol"])
     cash = float(offer.get("cash") or 0)
-    risk_line = f"Risk ${cash:g}\n" if cash > 0 else f"Risk {float(offer['risk']):g}%\n"
+    risk_line = str(offer.get("risk_line") or (_risk_line(float(offer["risk"]), cash, None)))
     _send(
         token,
         chat,
@@ -1168,9 +1180,8 @@ def _confirm(token: str, chat: str, offer_id: str) -> None:
             + (f"Limit {offer['entry']}\n" if offer.get("limit") else "")
             + f"Stop {offer['stop']}\n"
             f"Target {offer['target']}\n"
-            + risk_line
+            + risk_line + "\n"
             + (str(offer.get("money") or "") + "\n" if offer.get("money") else "")
-            + (_stamp(str(offer.get("symbol") or ""), str(offer.get("side") or "")) + "\n" if _stamp(str(offer.get("symbol") or ""), str(offer.get("side") or "")) else "")
             + "This goes to the MT5 account that is logged in."
         ),
         [("CONFIRM", f"y{offer_id}"), ("CANCEL", f"n{offer_id}")],
@@ -1252,7 +1263,7 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
         return
     label = _LABELS.get(offer["symbol"], offer["symbol"])
     if not isinstance(result, dict):
-        _send(token, chat, prefix + f"Sent. {offer['side']} {label}.\n" + _stamp(str(offer["symbol"]), str(offer["side"])))
+        _send(token, chat, prefix + f"Sent. {offer['side']} {label}.")
         return
     execution = result.get("execution") if isinstance(result.get("execution"), dict) else result
     blockers = [str(item) for item in (execution.get("blockers") or result.get("blockers") or []) if item]
@@ -1285,5 +1296,4 @@ def _submit(token: str, chat: str, offer: dict[str, Any], prefix: str) -> None:
         return
     timings = result.get("timings_ms") if isinstance(result.get("timings_ms"), dict) else {}
     ms = f"\n{timings.get('total')} ms" if timings.get("total") is not None else ""
-    held = _stamp(str(offer["symbol"]), str(offer["side"]))
-    _send(token, chat, prefix + f"Sent. {offer['side']} {label}.\n" + (held + "\n" if held else "") + ms.strip())
+    _send(token, chat, prefix + f"Sent. {offer['side']} {label}.{ms}")
