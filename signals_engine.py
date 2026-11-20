@@ -861,15 +861,15 @@ def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None, symbol
         passed = ask is not None and target is not None and float(ask) >= float(target) - _band(symbol)
     if not (dead or passed):
         return
-    row["tradeable"] = False
-    row["state"] = "SHOWN"
-    if dead:
-        reason = "Price is already through this stop, so the broker will not take it."
-    else:
-        reason = "The first target is already reached. Not a new order."
-    note = str(row.get("note") or "")
-    if reason not in note:
-        row["note"] = (reason + " " + note).strip()
+    chart = str(row.get("chart") or "")
+    trend = str(row.get("trend") or "")
+    note = (
+        "Price is already through this stop. Not a trade."
+        if dead
+        else "The first target is already reached. Not a new order."
+    )
+    row.clear()
+    row.update(_wait(chart, note, trend))
 
 
 def _headline(points: list[dict[str, Any]]) -> str:
