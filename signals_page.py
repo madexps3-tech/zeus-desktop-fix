@@ -45,6 +45,9 @@ LABELS = {
     "EURUSD": "EURO",
     "USDJPY": "USDJPY",
     "WTI": "OIL",
+    "NG-C": "GAS",
+    "HK50": "HANG SENG",
+    "GER40": "DAX",
 }
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
@@ -109,13 +112,13 @@ tr.pick{outline:1px solid var(--warn)}
     <canvas id="cv" width="1100" height="520"></canvas>
     <div id="status" class="muted"></div>
     <div class="muted">WATCHER</div>
-    <div id="alerts" class="muted">Quiet until a new signal on one of the seven pairs.</div>
+    <div id="alerts" class="muted">Quiet until a new signal on one of the ten pairs.</div>
     <table id="grid"></table>
     <div id="research" class="muted" style="margin-top:8px"></div>
   </section>
   <aside>
     <section class="card">
-      <div class="muted">SEVEN PAIRS</div>
+      <div class="muted">TEN PAIRS</div>
       <div id="board"></div>
     </section>
     <section class="card flow" id="flow" style="margin-top:10px"></section>
@@ -126,7 +129,7 @@ tr.pick{outline:1px solid var(--warn)}
   </aside>
 </main>
 <script>
-const PAIRS=[["XAUUSD","GOLD"],["XAGUSD","SILVER"],["NAS100","NASDAQ"],["BTCUSD","BITCOIN"],["EURUSD","EURO"],["USDJPY","USDJPY"],["WTI","OIL"]];
+const PAIRS=[["XAUUSD","GOLD"],["XAGUSD","SILVER"],["NAS100","NASDAQ"],["BTCUSD","BITCOIN"],["EURUSD","EURO"],["USDJPY","USDJPY"],["WTI","OIL"],["NG-C","GAS"],["HK50","HK50"],["GER40","DAX"]];
 const CHARTS=["M1","M5","M15","M30","H1","H4","D1"];
 const LEVEL_COLOR={ASIA:"#7aa2d6",LONDON:"#e9c66b",NEW_YORK:"#67d6a3",YESTERDAY:"#c084fc",LATE:"#8ea3b8"};
 let symbol=localStorage.getItem("sig_symbol")||"XAUUSD";

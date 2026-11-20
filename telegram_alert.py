@@ -33,6 +33,9 @@ _LABELS = {
     "EURUSD": "EURO",
     "USDJPY": "USDJPY",
     "WTI": "OIL",
+    "NG-C": "GAS",
+    "HK50": "HANG SENG",
+    "GER40": "DAX",
 }
 
 

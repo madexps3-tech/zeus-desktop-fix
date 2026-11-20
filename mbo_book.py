@@ -21,6 +21,9 @@ MBO_ROOT = {
     "EURUSD": "6E",
     "USDJPY": "6J",
     "BTCUSD": "BTC",
+    "NG-C": "NG",
+    "HK50": "HSI",
+    "GER40": "DAX",
 }
 
 

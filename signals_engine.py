@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-PAIRS = ("XAUUSD", "XAGUSD", "NAS100", "BTCUSD", "EURUSD", "USDJPY", "WTI")
+PAIRS = ("XAUUSD", "XAGUSD", "NAS100", "BTCUSD", "EURUSD", "USDJPY", "WTI", "NG-C", "HK50", "GER40")
 CHARTS = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 ROWS = ("ICEBERG", "INTRADAY", "INTERDAY", "SCALP", "SWING")
 MIN_R = 0.5
@@ -22,6 +22,9 @@ PIP = {
     "EURUSD": 0.0001,
     "USDJPY": 0.01,
     "BTCUSD": 10.0,
+    "NG-C": 0.01,
+    "HK50": 5.0,
+    "GER40": 1.0,
 }
 # A gold stop inside this is not a button, except on the point-of-control scalp.
 GOLD_MIN_STOP = 2.0
@@ -34,10 +37,13 @@ MAX_WICK = {
     "EURUSD": 0.0012,
     "USDJPY": 0.20,
     "BTCUSD": 200.0,
+    "NG-C": 0.10,
+    "HK50": 150.0,
+    "GER40": 80.0,
 }
 # Gold and oil stop just past the iceberg. Nasdaq is wider because one tick is run through.
-ICE_ONLY = {"XAUUSD", "WTI", "NAS100"}
-ICE_STOP = {"XAUUSD": 3.0, "WTI": 0.30, "NAS100": 20.0}
+ICE_ONLY = {"XAUUSD", "WTI", "NAS100", "NG-C"}
+ICE_STOP = {"XAUUSD": 3.0, "WTI": 0.30, "NAS100": 20.0, "NG-C": 0.05}
 ICE_TICK = {
     "XAUUSD": 0.1,
     "XAGUSD": 0.005,
@@ -46,6 +52,9 @@ ICE_TICK = {
     "EURUSD": 0.0001,
     "USDJPY": 0.01,
     "BTCUSD": 1.0,
+    "NG-C": 0.001,
+    "HK50": 1.0,
+    "GER40": 1.0,
 }
 WING = 2
 LOG = Path("signal_research_v2.jsonl")
@@ -60,6 +69,9 @@ EDGE = {
     "EURUSD": 0.0006,
     "USDJPY": 0.06,
     "BTCUSD": 150.0,
+    "NG-C": 0.05,
+    "HK50": 75.0,
+    "GER40": 25.0,
 }
 BE_MOVE = {
     "XAUUSD": 2.0,
@@ -69,6 +81,9 @@ BE_MOVE = {
     "EURUSD": 0.0020,
     "USDJPY": 0.20,
     "BTCUSD": 20.0,
+    "NG-C": 0.05,
+    "HK50": 50.0,
+    "GER40": 20.0,
 }
 # A futures price this far from the CFD is not drawn. The gap is measured live.
 MAX_BASIS = {
@@ -79,6 +94,9 @@ MAX_BASIS = {
     "EURUSD": 0.02,
     "USDJPY": 2.0,
     "BTCUSD": 2000.0,
+    "NG-C": 0.50,
+    "HK50": 400.0,
+    "GER40": 250.0,
 }
 POSITION_NAMES = {
     "XAUUSD": ("XAUUSD", "XAU"),
@@ -88,6 +106,9 @@ POSITION_NAMES = {
     "EURUSD": ("EURUSD",),
     "USDJPY": ("USDJPY",),
     "WTI": ("WTI", "USOIL", "USOUSD", "XTIUSD", "XTI", "CL"),
+    "NG-C": ("NG-C", "NATGAS", "NGAS"),
+    "HK50": ("HK50", "HSI"),
+    "GER40": ("GER40", "GER30", "DE40", "DAX"),
 }
 # The file the new study can write. Bitcoin is checked under both names.
 FUTURES_ROOTS = {
@@ -98,6 +119,9 @@ FUTURES_ROOTS = {
     "EURUSD": ("6E",),
     "USDJPY": ("6J",),
     "BTCUSD": ("BTC",),
+    "NG-C": ("NG",),
+    "HK50": ("HSI",),
+    "GER40": ("DAX",),
 }
 
 
@@ -929,8 +953,10 @@ def _harvest(symbol: str, entry: float, target: float) -> str:
         return f"${round(dist)}"
     if symbol == "XAGUSD":
         return f"{dist:.3f}"
-    if symbol == "WTI":
+    if symbol == "WTI" or symbol == "NG-C":
         return f"{dist:.2f}"
+    if symbol in ("HK50", "GER40"):
+        return f"{round(dist)} points"
     return f"{dist:.5f}"
 
 
@@ -1758,7 +1784,7 @@ def build_rows(
     swing_miss = "No confirmed turn at the value low or the value high."
     iceberg = _iceberg(symbol, bars_by_chart, book, spread, bid, ask)
     if symbol not in ICE_ONLY:
-        iceberg_note = "Iceberg is only gold, oil, and Nasdaq."
+        iceberg_note = "Iceberg is only gold, oil, Nasdaq, and natural gas."
     else:
         iceberg_note = "No iceberg price in the file."
     notes = {
