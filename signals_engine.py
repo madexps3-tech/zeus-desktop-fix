@@ -1587,8 +1587,13 @@ def _failed_test(
     targets = [price for price in ladder if (price > entry if side == "BUY" else price < entry)]
     if not targets:
         return _wait("RESPONSIVE", "TESTING. Price is already through the value low, the point of control, and the value high. Not a new entry.", "")
-    if abs(float(targets[0]) - entry) <= risk:
-        return _wait("RESPONSIVE", "TESTING. The value edge is not further than the stop. Not a trade.", "")
+    far = vah if side == "BUY" else val
+    deciding = [
+        price for price in (poc, far)
+        if (price > entry if side == "BUY" else price < entry) and abs(float(price) - entry) > risk
+    ]
+    if not deciding:
+        return _wait("RESPONSIVE", "TESTING. The point of control and the far side are not further than the stop. Not a trade.", "")
     furthest = entry
     adverse = entry
     stopped = False
