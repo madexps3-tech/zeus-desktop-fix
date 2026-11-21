@@ -27,10 +27,10 @@ static int RootFromSymbol(const SCString& symbol, char* root, int rootSize)
     const char* pairs[][2] = {
         {"MGC", "GC"}, {"SIL", "SI"}, {"MNQ", "NQ"}, {"MCL", "CL"},
         {"M6E", "6E"}, {"M6J", "6J"}, {"MBT", "MBT"}, {"QG", "NG"},
-        {"FDAX", "DAX"}, {"FDXM", "DAX"}, {"MHI", "HSI"},
+        {"FDAX", "DAX"}, {"FDXM", "DAX"},
         {"BTC", "BTC"}, {"GC", "GC"}, {"SI", "SI"}, {"NQ", "NQ"},
         {"CL", "CL"}, {"6E", "6E"}, {"6J", "6J"}, {"NG", "NG"},
-        {"HSI", "HSI"}, {"DAX", "DAX"},
+        {"DAX", "DAX"},
     };
     for (unsigned int index = 0; index < sizeof(pairs) / sizeof(pairs[0]); ++index)
     {
