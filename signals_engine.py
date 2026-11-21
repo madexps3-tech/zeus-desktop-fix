@@ -1556,40 +1556,29 @@ def _failed_test(
     bid: float | None,
     ask: float | None,
 ) -> dict[str, Any]:
-    """A close back through an excess. The button is only on the candle that just closed."""
+    """A 1-minute close back through an excess. The button is only on that candle, and only while value is still ahead."""
     if area is None:
         return _wait("RESPONSIVE", "TESTING. Value area is not on this chart yet. Not a trade.", "")
     val, poc, vah = area
-
-    def _fresh(found: dict[str, Any] | None) -> bool:
-        if found is None or found.get("close_at") is None:
-            return False
-        return int(found["close_at"]) >= len(found["bars"]) - 1
-
-    bars15 = _closed(m15)
     minute = _closed(m1)
-    probe15 = _probe(bars15, val, vah) if len(bars15) >= 5 else None
-    probe1 = _probe(minute, val, vah) if len(minute) >= 5 else None
-    show = True
-    if _fresh(probe15):
-        probe, source = probe15, "15-minute"
-    elif _fresh(probe1):
-        probe, source = probe1, "1-minute"
-    elif probe15 is not None and probe15.get("close_at") is not None:
-        probe, source, show = probe15, "15-minute", False
-    elif probe1 is not None and probe1.get("close_at") is not None:
-        probe, source, show = probe1, "1-minute", False
-    else:
+    probe = _probe(minute, val, vah) if len(minute) >= 5 else None
+    source = "1-minute"
+    if probe is None or probe.get("close_at") is None:
         return _wait("RESPONSIVE", "TESTING. No close back through a low under value or a high over value. Not a trade.", "")
+    show = int(probe["close_at"]) >= len(probe["bars"]) - 1
     side = str(probe["side"])
     series: list[dict[str, Any]] = probe["bars"]
     extreme = float(probe["extreme"])
     close_at = int(probe["close_at"])
     entry = _num(series[close_at], "close")
+    if side == "BUY" and not entry < val:
+        return _wait("RESPONSIVE", "TESTING. The close is already through the value low. Not a trade.", "")
+    if side == "SELL" and not entry > vah:
+        return _wait("RESPONSIVE", "TESTING. The close is already through the value high. Not a trade.", "")
     pad = max(float(spread), _band(symbol))
     stop = extreme - pad if side == "BUY" else extreme + pad
-    if symbol == "XAUUSD":
-        floor = float(GOLD_MIN_STOP)
+    floor = float(BE_MOVE.get(symbol, 0.0) or 0.0)
+    if floor > 0:
         stop = min(stop, entry - floor) if side == "BUY" else max(stop, entry + floor)
     risk = abs(entry - stop)
     if risk <= 0:
@@ -1598,6 +1587,8 @@ def _failed_test(
     targets = [price for price in ladder if (price > entry if side == "BUY" else price < entry)]
     if not targets:
         return _wait("RESPONSIVE", "TESTING. Price is already through the value low, the point of control, and the value high. Not a new entry.", "")
+    if abs(float(targets[0]) - entry) <= risk:
+        return _wait("RESPONSIVE", "TESTING. The value edge is not further than the stop. Not a trade.", "")
     furthest = entry
     adverse = entry
     stopped = False
