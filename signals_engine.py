@@ -1556,20 +1556,30 @@ def _failed_test(
     bid: float | None,
     ask: float | None,
 ) -> dict[str, Any]:
-    """A failed break, shown as a test. It never gets a button."""
+    """A close back through an excess. The button is only on the candle that just closed."""
     if area is None:
         return _wait("RESPONSIVE", "TESTING. Value area is not on this chart yet. Not a trade.", "")
     val, poc, vah = area
-    source = "15-minute"
-    bars = _closed(m15)
-    probe = _probe(bars, val, vah) if len(bars) >= 5 else None
-    if probe is None or probe.get("close_at") is None:
-        minute = _closed(m1)
-        other = _probe(minute, val, vah) if len(minute) >= 5 else None
-        if other is not None and other.get("close_at") is not None:
-            probe = other
-            source = "1-minute"
-    if probe is None or probe.get("close_at") is None:
+
+    def _fresh(found: dict[str, Any] | None) -> bool:
+        if found is None or found.get("close_at") is None:
+            return False
+        return int(found["close_at"]) >= len(found["bars"]) - 1
+
+    bars15 = _closed(m15)
+    minute = _closed(m1)
+    probe15 = _probe(bars15, val, vah) if len(bars15) >= 5 else None
+    probe1 = _probe(minute, val, vah) if len(minute) >= 5 else None
+    show = True
+    if _fresh(probe15):
+        probe, source = probe15, "15-minute"
+    elif _fresh(probe1):
+        probe, source = probe1, "1-minute"
+    elif probe15 is not None and probe15.get("close_at") is not None:
+        probe, source, show = probe15, "15-minute", False
+    elif probe1 is not None and probe1.get("close_at") is not None:
+        probe, source, show = probe1, "1-minute", False
+    else:
         return _wait("RESPONSIVE", "TESTING. No close back through a low under value or a high over value. Not a trade.", "")
     side = str(probe["side"])
     series: list[dict[str, Any]] = probe["bars"]
@@ -1616,7 +1626,7 @@ def _failed_test(
         reached_far = furthest - 1e-9 <= val
     ratios = [round(abs(price - entry) / risk, 2) for price in targets]
     at_signal = close_at >= len(series) - 1
-    record = _remember_test({
+    _remember_test({
         "symbol": symbol, "side": side, "extreme": extreme, "entry": entry, "stop": stop,
         "target": targets[0], "targets": targets, "r": ratios, "value_low": val, "poc": poc,
         "value_high": vah, "candle": _time(series[close_at]), "candle_size": source,
@@ -1624,36 +1634,21 @@ def _failed_test(
         "stopped": stopped, "reached_value": reached_value, "reached_poc": reached_poc,
         "reached_far": reached_far, "flow": _flow_snap(book), "flow_at_signal": at_signal,
     })
-    flow = record.get("flow") or {}
-    age = "at the close back" if record.get("flow_at_signal") else "now, not at the low"
+    if not show:
+        return _wait("RESPONSIVE", "TESTING. The close back is no longer the latest candle. Not a trade.", "")
     levels = " ".join(f"T{index} {round(price, 5)} {ratio:.2f}R" for index, (price, ratio) in enumerate(zip(targets, ratios), 1))
     row = {
         "chart": "RESPONSIVE", "side": side, "reason": "RESPONSIVE", "r": ratios[0],
-        "decision": "—", "note": "", "state": "RESPONSIVE" if at_signal else "TESTING",
-        "trend": "", "tradeable": bool(at_signal), "entry": entry, "stop": stop, "risk_stop": stop,
+        "decision": "—", "note": "", "state": "READY",
+        "trend": "", "tradeable": True, "entry": entry, "stop": stop, "risk_stop": stop,
         "target": targets[0], "targets": targets, "time": _time(series[close_at]),
     }
-    if at_signal:
-        row["state"] = "READY"
-        _guide(row, book, series, symbol, bid, ask)
-        guide = str(row.pop("guide", "") or "")
-        row["note"] = (
-            f"RESPONSIVE {side}. Excess {round(extreme, 5)}. "
-            f"The {source} candle closed back at {round(entry, 5)}. Stop {round(stop, 5)}. {levels}. {guide}"
-        ).strip()
-    else:
-        row["note"] = (
-            f"RESPONSIVE {side}. Not a new entry. Excess {round(extreme, 5)}. "
-            f"The close back was {round(entry, 5)}. Stop {round(stop, 5)}. {levels}. "
-            f"Price went to {round(furthest, 5)}. "
-            f"Value {'reached' if reached_value else 'not reached'}. "
-            f"Point of control {'reached' if reached_poc else 'not reached'}. "
-            f"The far side {'reached' if reached_far else 'not reached'}. "
-            f"{'The stop was traded. ' if stopped else ''}"
-            f"Book {age}: 5s {flow.get('delta_5s')} 60s {flow.get('delta_60s')} "
-            f"absorption {'yes' if flow.get('absorption') else 'no'} "
-            f"iceberg {flow.get('iceberg') if flow.get('iceberg') is not None else 'no'}."
-        )
+    _guide(row, book, series, symbol, bid, ask)
+    guide = str(row.pop("guide", "") or "")
+    row["note"] = (
+        f"RESPONSIVE {side}. Excess {round(extreme, 5)}. "
+        f"The {source} candle closed back at {round(entry, 5)}. Stop {round(stop, 5)}. {levels}. {guide}"
+    ).strip()
     live_px = bid if side == "BUY" else ask
     if isinstance(live_px, (int, float)) and not isinstance(live_px, bool) and abs(float(live_px) - entry) > _band(symbol):
         return _wait("RESPONSIVE", "Price has left that entry. Not a trade.", "")
