@@ -163,6 +163,8 @@ static void WriteMarks(FILE* file, SCStudyInterfaceRef sc, const char* root, dou
     bool haveStack = false;
     for (int index = 0; index + 2 < static_cast<int>(rows.size()); ++index)
     {
+        if (rows[index + 1].first != rows[index].first + 1) continue;
+        if (rows[index + 2].first != rows[index].first + 2) continue;
         bool bidStack = true;
         bool askStack = true;
         for (int step = 0; step < 3; ++step)
