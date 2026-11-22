@@ -1293,31 +1293,80 @@ def _guide(
     return line
 
 
-def _coming(live: dict[str, Any] | None, zones: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The live candle is in a zone. That is not an order until the candle closes."""
-    if not live or not zones:
+def _coming(
+    live: dict[str, Any] | None,
+    zones: list[dict[str, Any]],
+    area: tuple[float, float, float] | None,
+    symbol: str,
+    spread: float,
+    beyond: list[float],
+) -> dict[str, Any] | None:
+    """The live candle is at the value low or the value high. A swing in the middle stays quiet."""
+    if not live or area is None:
         return None
+    val, _poc, vah = area
+    slack = _band(symbol)
+    watched = [dict(zone) for zone in zones if zone.get("price") is not None]
+    watched.append({"name": "VALUE LOW", "price": float(val), "kind": "LOW"})
+    watched.append({"name": "VALUE HIGH", "price": float(vah), "kind": "HIGH"})
     low = _num(live, "low")
     high = _num(live, "high")
     close = _num(live, "close")
     open_ = _num(live, "open")
     hits: list[tuple[float, str, dict[str, Any], bool]] = []
-    for zone in zones:
+    for zone in watched:
         price = float(zone["price"])
-        if zone.get("kind") == "LOW" and low <= price <= high:
+        if zone.get("kind") == "LOW" and price <= val + slack and low <= price <= high:
             hits.append((abs(price - close), "BUY", zone, close > price and close >= open_))
-        if zone.get("kind") == "HIGH" and low <= price <= high:
+        if zone.get("kind") == "HIGH" and price >= vah - slack and low <= price <= high:
             hits.append((abs(price - close), "SELL", zone, close < price and close <= open_))
     if not hits:
         return None
     _distance, side, zone, back = min(hits, key=lambda item: item[0])
     price = round(float(zone["price"]), 5)
+    entry = float(price)
+    wick = low if side == "BUY" else high
+    stop = _stop_price(side, entry, wick, spread, beyond)
+    if stop is not None:
+        targets = _targets_ahead(side, entry, stop, watched)
+        preview = {"side": side, "entry": entry, "stop": stop, "targets": targets, "target": targets[0] if targets else None}
+        _use_value_target(preview, area)
+        targets = [float(level) for level in (preview.get("targets") or [])]
+    else:
+        ahead = []
+        for level in watched:
+            level_price = float(level["price"])
+            if side == "BUY" and level_price > entry:
+                ahead.append(level_price)
+            elif side == "SELL" and level_price < entry:
+                ahead.append(level_price)
+        other = float(vah if side == "BUY" else val)
+        if (side == "BUY" and other > entry) or (side == "SELL" and other < entry):
+            ahead.append(other)
+        targets = []
+        for level_price in sorted(ahead, reverse=(side == "SELL")):
+            if any(abs(level_price - kept) <= max(abs(entry) * 1e-8, 1e-8) for kept in targets):
+                continue
+            targets.append(level_price)
+            if len(targets) == 4:
+                break
+    risk = abs(entry - float(stop)) if stop is not None else 0.0
+    planned = []
+    for level_price in targets:
+        multiple = round(abs(level_price - entry) / risk, 2) if risk > 0 else None
+        planned.append({"price": round(level_price, 5), "r": multiple})
+    listed = " · ".join(
+        f"TP{index} {item['price']} {item['r']}R" if item["r"] is not None else f"TP{index} {item['price']}"
+        for index, item in enumerate(planned, 1)
+    )
     if back:
         text = f"The 1-minute candle has closed back out of {price}. It is a trade when that candle finishes."
         state = "CLOSING BACK"
     else:
         text = f"Price is trading into {price}. Not a trade until the 1-minute candle closes back out."
         state = "COMING"
+    if listed:
+        text = text + " " + listed + "."
     return {
         "side": side,
         "zone": price,
@@ -1325,6 +1374,9 @@ def _coming(live: dict[str, Any] | None, zones: list[dict[str, Any]]) -> dict[st
         "state": state,
         "time": _time(live),
         "text": text,
+        "stop": None if stop is None else round(float(stop), 5),
+        "targets": planned,
+        "tps": listed,
     }
 
 
@@ -1903,9 +1955,11 @@ def build_rows(
     for row in rows:
         row["market"] = state
         if row["chart"] == "INTRADAY":
-            row["coming"] = _coming(live, intraday_zones)
+            row["coming"] = _coming(live, intraday_zones, area, symbol, spread, beyond)
         elif row["chart"] == "SWING":
-            row["coming"] = _coming(live, swing_zones)
+            row["coming"] = _coming(live, swing_zones, area, symbol, spread, wider)
+        if row.get("coming") and not row.get("side"):
+            row["note"] = str(row["coming"].get("text") or row.get("note") or "")
         if row.get("side") and (row["chart"] != "INTERDAY" or row.get("tradeable")):
             _live_stop(row, bid, ask, symbol)
     for row in rows:

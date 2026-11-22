@@ -508,7 +508,10 @@ function boardLine(payload){
     return {kind:"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
   }
   const coming=live.find(r=>r.coming&&r.coming.side);
-  if(coming) return {kind:"INCOMING", side:coming.coming.side, text:coming.chart+" "+coming.coming.side+" into "+px(coming.coming.zone), sub:"not a trade yet"};
+  if(coming){
+    const tps=coming.coming.tps?coming.coming.tps+" · ":"";
+    return {kind:"INCOMING", side:coming.coming.side, text:coming.chart+" "+coming.coming.side+" into "+px(coming.coming.zone), sub:tps+"not a trade yet"};
+  }
   return {kind:"QUIET", text:"quiet", sub:""};
 }
 function paintBoard(){
@@ -531,7 +534,7 @@ function consider(payload){
       const key="C|"+payload.symbol+"|"+row.chart+"|"+coming.side+"|"+coming.zone;
       if(!same&&!bag[key]){
         remember(key);
-        speak(name+" "+row.chart+" "+coming.side+" coming into "+coming.zone+". Not a trade yet.");
+        speak(name+" "+row.chart+" "+coming.side+" coming into "+coming.zone+". Not a trade yet."+(coming.tps?" "+coming.tps+".":""));
       }
     }
     let announced=false;
