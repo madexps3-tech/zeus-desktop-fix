@@ -459,12 +459,23 @@ def align_ladder(symbol: str, book: dict[str, Any] | None, bid: float, ask: floa
     book = book or {}
     levels = list(book.get("levels") or [])
     icebergs = list(book.get("icebergs") or [])
+    if not icebergs:
+        for item in (book.get("iceberg"), book.get("other")):
+            if not isinstance(item, dict) or item.get("price") is None:
+                continue
+            side_name = str(item.get("side") or "").lower()
+            chart_side = "BUY" if side_name in {"bid", "buy"} else "SELL" if side_name in {"ask", "sell"} else ""
+            if chart_side:
+                icebergs.append({"price": item.get("price"), "side": chart_side, "shown": item.get("bid_size")})
     if not levels and not icebergs:
         return {"shown": False, "reason": "NO_LADDER", "levels": [], "icebergs": []}
     try:
         futures = (float(book.get("futures_bid")) + float(book.get("futures_ask"))) / 2.0
     except (TypeError, ValueError):
-        return {"shown": False, "reason": "NO_FUTURES_QUOTE", "levels": [], "icebergs": []}
+        last = book.get("last")
+        if isinstance(last, bool) or not isinstance(last, (int, float)) or float(last) <= 0:
+            return {"shown": False, "reason": "NO_FUTURES_QUOTE", "levels": [], "icebergs": []}
+        futures = float(last)
     if symbol == "USDJPY":
         futures = _yen_spot(futures)
     shift = ((bid + ask) / 2.0) - futures
@@ -846,10 +857,6 @@ def _iceberg(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], book: 
         row["tradeable"] = False
         row["state"] = "SHOWN"
         row["note"] = "The iceberg file is stale. " + str(row.get("note") or "")
-    if int(ice.get("refills") or 0) < 1:
-        row["tradeable"] = False
-        row["state"] = "SHOWN"
-        row["note"] = "The size has not refilled, so this is not an iceberg yet. " + str(row.get("note") or "")
     return row
 
 

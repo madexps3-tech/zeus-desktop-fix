@@ -10,6 +10,10 @@ SCDLLName("ZeusMboFlags")
 struct OrderSnap { uint64_t id; double qty; double price; int bid; };
 struct IceLevel { int active; double price; int bid; int refills; double until; double peak; };
 struct MboState { OrderSnap prev[400]; int prevCount; double sweepUntil; double icebergUntil; double pulledUntil; IceLevel bidIce; IceLevel askIce; int primaryBid; };
+struct LevelQty { double price; double qty; int bid; };
+struct IceWatch { double price; double qty; double refilled; int bid; int active; };
+struct ShownIce { double price; double qty; double refilled; int bid; };
+struct IceBook { int ready; double lastSales; int count; int shown; IceWatch row[64]; ShownIce out[8]; };
 
 struct ValueArea { int have; double poc; double vah; double val; };
 
@@ -232,6 +236,209 @@ static int IceShown(const IceLevel* ice, double now)
     return ice != nullptr && ice->active && ice->until >= now && ice->price > 0.0;
 }
 
+static bool IceRoot(const char* root)
+{
+    return std::strcmp(root, "GC") == 0 || std::strcmp(root, "CL") == 0 || std::strcmp(root, "NQ") == 0 || std::strcmp(root, "NG") == 0;
+}
+
+static void CollectLevels(SCStudyInterfaceRef sc, int bidSide, int levels, LevelQty* rows, int& count, double tick, double& adjust, int& haveAdjust)
+{
+    const int kMaxOrders = 16;
+    n_ACSIL::s_MarketOrderData orders[kMaxOrders];
+    if (levels > 32) levels = 32;
+    for (int level = 0; level < levels && count < 64; ++level)
+    {
+        s_MarketDepthEntry entry;
+        if (bidSide) sc.GetBidMarketDepthEntryAtLevel(entry, level);
+        else sc.GetAskMarketDepthEntryAtLevel(entry, level);
+        if (entry.AdjustedPrice <= 0.0) continue;
+        if (!haveAdjust && entry.Price > 0.0)
+        {
+            adjust = entry.AdjustedPrice - entry.Price;
+            haveAdjust = 1;
+        }
+        double qty = entry.Quantity;
+        if (qty <= 0.0)
+        {
+            int ticks = sc.Round(entry.AdjustedPrice / tick);
+            int found = bidSide ? sc.GetBidMarketLimitOrdersForPrice(ticks, kMaxOrders, orders) : sc.GetAskMarketLimitOrdersForPrice(ticks, kMaxOrders, orders);
+            for (int i = 0; i < found; ++i) qty += orders[i].OrderQuantity;
+        }
+        if (qty <= 0.0) continue;
+        bool duplicate = false;
+        for (int earlier = 0; earlier < count; ++earlier)
+        {
+            if (rows[earlier].bid == bidSide && std::fabs(rows[earlier].price - entry.AdjustedPrice) <= tick * 0.51)
+                duplicate = true;
+        }
+        if (duplicate) continue;
+        rows[count].price = entry.AdjustedPrice;
+        rows[count].qty = qty;
+        rows[count].bid = bidSide;
+        ++count;
+    }
+}
+
+static void WatchIcebergs(SCStudyInterfaceRef sc, MboState* state, IceBook* book, const char* root, double tradePrice, double tick, double now)
+{
+    state->bidIce.active = 0;
+    state->askIce.active = 0;
+    state->primaryBid = -1;
+    book->shown = 0;
+    if (!IceRoot(root) || tick <= 0.0)
+    {
+        book->count = 0;
+        state->icebergUntil = 0.0;
+        return;
+    }
+    const char* symbol = sc.Symbol.GetChars();
+    double floorQty = std::strcmp(root, "NQ") == 0 ? 30.0 : 10.0;
+    if (std::strstr(symbol, "MNQ") != nullptr) floorQty = 300.0;
+    else if (std::strstr(symbol, "MGC") != nullptr) floorQty = 100.0;
+    else if (std::strstr(symbol, "MCL") != nullptr) floorQty = 100.0;
+    LevelQty levels[64];
+    int levelCount = 0;
+    double adjust = 0.0;
+    int haveAdjust = 0;
+    CollectLevels(sc, 1, sc.GetBidMarketDepthNumberOfLevels(), levels, levelCount, tick, adjust, haveAdjust);
+    CollectLevels(sc, 0, sc.GetAskMarketDepthNumberOfLevels(), levels, levelCount, tick, adjust, haveAdjust);
+    if (!book->ready)
+    {
+        book->ready = 1;
+        book->lastSales = sc.CurrentSystemDateTime.GetAsDouble();
+        book->count = 0;
+        for (int i = 0; i < levelCount && book->count < 64; ++i)
+        {
+            IceWatch& row = book->row[book->count++];
+            row.price = levels[i].price;
+            row.qty = levels[i].qty;
+            row.refilled = 0.0;
+            row.bid = levels[i].bid;
+            row.active = 0;
+        }
+        state->icebergUntil = 0.0;
+        return;
+    }
+    double traded[64];
+    for (int i = 0; i < 64; ++i) traded[i] = 0.0;
+    c_SCTimeAndSalesArray sales;
+    sc.GetTimeAndSales(sales);
+    double newest = book->lastSales;
+    for (int index = sales.Size() - 1; index >= 0; --index)
+    {
+        const s_TimeAndSales& trade = sales[index];
+        if (trade.Volume <= 0) continue;
+        const double when = trade.DateTime.GetAsDouble();
+        if (when <= book->lastSales) break;
+        if (when > newest) newest = when;
+        const int bidSide = trade.Type == SC_TS_BID ? 1 : trade.Type == SC_TS_ASK ? 0 : -1;
+        if (bidSide < 0) continue;
+        const double price = trade.Price + adjust;
+        for (int i = 0; i < levelCount; ++i)
+        {
+            if (levels[i].bid != bidSide) continue;
+            if (std::fabs(levels[i].price - price) <= tick * 0.51) traded[i] += trade.Volume;
+        }
+    }
+    book->lastSales = newest;
+    IceWatch next[64];
+    int nextCount = 0;
+    for (int i = 0; i < levelCount && nextCount < 64; ++i)
+    {
+        if (levels[i].qty <= 0.0) continue;
+        int found = -1;
+        for (int w = 0; w < book->count; ++w)
+        {
+            if (book->row[w].bid == levels[i].bid && std::fabs(book->row[w].price - levels[i].price) <= tick * 0.51)
+            {
+                found = w;
+                break;
+            }
+        }
+        IceWatch row = {};
+        row.price = levels[i].price;
+        row.qty = levels[i].qty;
+        row.bid = levels[i].bid;
+        if (found >= 0)
+        {
+            const IceWatch& prev = book->row[found];
+            row.refilled = prev.refilled;
+            row.active = prev.active;
+            if (prev.qty >= floorQty)
+            {
+                double drop = prev.qty - levels[i].qty;
+                if (drop < 0.0) drop = 0.0;
+                const double added = traded[i] - drop;
+                if (added > 0.0) row.refilled += added;
+            }
+            if (row.refilled >= floorQty) row.active = 1;
+        }
+        next[nextCount++] = row;
+    }
+    book->count = nextCount;
+    for (int i = 0; i < nextCount; ++i) book->row[i] = next[i];
+    int order[64];
+    int activeCount = 0;
+    for (int i = 0; i < book->count; ++i)
+    {
+        if (book->row[i].active && book->row[i].qty > 0.0) order[activeCount++] = i;
+    }
+    for (int i = 0; i < activeCount; ++i)
+    {
+        for (int j = i + 1; j < activeCount; ++j)
+        {
+            const double left = std::fabs(book->row[order[i]].price - tradePrice);
+            const double right = std::fabs(book->row[order[j]].price - tradePrice);
+            if (right < left)
+            {
+                const int swap = order[i];
+                order[i] = order[j];
+                order[j] = swap;
+            }
+        }
+    }
+    book->shown = activeCount > 8 ? 8 : activeCount;
+    for (int i = 0; i < book->shown; ++i)
+    {
+        const IceWatch& row = book->row[order[i]];
+        book->out[i].price = row.price;
+        book->out[i].qty = row.qty;
+        book->out[i].refilled = row.refilled;
+        book->out[i].bid = row.bid;
+    }
+    int bestBid = -1;
+    int bestAsk = -1;
+    for (int i = 0; i < book->shown; ++i)
+    {
+        if (book->out[i].bid && bestBid < 0) bestBid = i;
+        if (!book->out[i].bid && bestAsk < 0) bestAsk = i;
+    }
+    if (bestBid >= 0)
+    {
+        state->bidIce.active = 1;
+        state->bidIce.price = book->out[bestBid].price;
+        state->bidIce.bid = 1;
+        state->bidIce.refills = book->out[bestBid].refilled >= 1.0 ? static_cast<int>(book->out[bestBid].refilled) : 1;
+        state->bidIce.until = now + 86400.0;
+    }
+    if (bestAsk >= 0)
+    {
+        state->askIce.active = 1;
+        state->askIce.price = book->out[bestAsk].price;
+        state->askIce.bid = 0;
+        state->askIce.refills = book->out[bestAsk].refilled >= 1.0 ? static_cast<int>(book->out[bestAsk].refilled) : 1;
+        state->askIce.until = now + 86400.0;
+    }
+    const bool bidNear = bestBid >= 0 && (bestAsk < 0 || std::fabs(book->out[bestBid].price - tradePrice) <= std::fabs(book->out[bestAsk].price - tradePrice));
+    if (bestBid >= 0 || bestAsk >= 0)
+    {
+        state->primaryBid = bidNear ? 1 : 0;
+        state->icebergUntil = now + 86400.0;
+    }
+    else
+        state->icebergUntil = 0.0;
+}
+
 static void CollectSide(SCStudyInterfaceRef sc, int bidSide, int levels, OrderSnap* rows, int& count)
 {
     const int kMaxOrders = 16;
@@ -279,6 +486,14 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
         state->primaryBid = -1;
         sc.SetPersistentPointer(3, state);
     }
+    IceBook* iceBook = static_cast<IceBook*>(sc.GetPersistentPointer(4));
+    if (iceBook == nullptr)
+    {
+        iceBook = static_cast<IceBook*>(sc.AllocateMemory(sizeof(IceBook)));
+        if (iceBook == nullptr) return;
+        std::memset(iceBook, 0, sizeof(IceBook));
+        sc.SetPersistentPointer(4, iceBook);
+    }
     OrderSnap current[400];
     int count = 0;
     CollectSide(sc, 1, sc.GetBidMarketDepthNumberOfLevels(), current, count);
@@ -296,82 +511,13 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
             if (current[newIndex].id == oldOrder.id) { match = &current[newIndex]; break; }
         }
         const bool tradedHere = std::fabs(oldOrder.price - tradePrice) <= tick * 2.0;
-        IceLevel* ice = oldOrder.bid ? &state->bidIce : &state->askIce;
-        const bool sameIce = ice->active && ice->until >= now && std::fabs(ice->price - oldOrder.price) <= tick * 2.0;
         if (match == nullptr)
         {
             if (tradedHere) state->sweepUntil = now + 60.0;
             else if (oldOrder.qty >= large) state->pulledUntil = now + 60.0;
-            continue;
-        }
-        if (oldOrder.qty >= large && match->qty < oldOrder.qty * 0.7 && tradedHere)
-        {
-            if (!sameIce)
-            {
-                ice->price = oldOrder.price;
-                ice->bid = oldOrder.bid;
-                ice->refills = 0;
-            }
-            ice->active = 1;
-            ice->until = now + 60.0;
-            state->icebergUntil = now + 60.0;
-            state->primaryBid = oldOrder.bid;
-        }
-        if (oldOrder.qty >= large && match->qty >= oldOrder.qty * 0.9 && tradedHere && sameIce)
-        {
-            ice->refills += 1;
-            ice->until = now + 60.0;
-            state->icebergUntil = now + 60.0;
-            state->primaryBid = oldOrder.bid;
         }
     }
-    const double life = 180.0;
-    for (int side = 0; side <= 1; ++side)
-    {
-        for (int i = 0; i < state->prevCount; ++i)
-        {
-            if (state->prev[i].bid != side) continue;
-            bool seen = false;
-            for (int earlier = 0; earlier < i; ++earlier)
-            {
-                if (state->prev[earlier].bid == side && std::fabs(state->prev[earlier].price - state->prev[i].price) <= tick * 0.51)
-                {
-                    seen = true;
-                    break;
-                }
-            }
-            if (seen) continue;
-            const double price = state->prev[i].price;
-            const double was = QtyAt(state->prev, state->prevCount, side, price, tick);
-            const double nowQty = QtyAt(current, count, side, price, tick);
-            if (std::fabs(price - tradePrice) > tick * 2.0) continue;
-            IceLevel* ice = side ? &state->bidIce : &state->askIce;
-            const bool same = ice->active && ice->until >= now && std::fabs(ice->price - price) <= tick * 2.0;
-            if (was >= large && nowQty < was * 0.7)
-            {
-                if (!same)
-                {
-                    ice->price = price;
-                    ice->bid = side;
-                    ice->refills = 0;
-                    ice->peak = was;
-                }
-                else if (was > ice->peak)
-                    ice->peak = was;
-                ice->active = 1;
-                ice->until = now + life;
-                state->icebergUntil = now + life;
-                state->primaryBid = side;
-            }
-            if (same && ice->peak >= large && was < ice->peak * 0.9 && nowQty >= ice->peak * 0.9)
-            {
-                ice->refills += 1;
-                ice->until = now + life;
-                state->icebergUntil = now + life;
-                state->primaryBid = side;
-            }
-        }
-    }
+    WatchIcebergs(sc, state, iceBook, root, tradePrice, tick, now);
     state->prevCount = count;
     if (count > 0) std::memcpy(state->prev, current, sizeof(OrderSnap) * static_cast<size_t>(count));
     SCString path;
@@ -395,6 +541,17 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
         std::fprintf(file, "\"other\":{\"price\":%.10g,\"side\":\"%s\",\"refills\":%d,\"time\":%.0f},", other->price, other->bid ? "bid" : "ask", other->refills, other->until);
     else
         std::fprintf(file, "\"other\":null,");
+    if (sc.Bid > 0.0 && sc.Ask > 0.0)
+        std::fprintf(file, "\"bid\":%.10g,\"ask\":%.10g,", sc.Bid, sc.Ask);
+    else
+        std::fprintf(file, "\"bid\":null,\"ask\":null,");
+    std::fprintf(file, "\"icebergs\":[");
+    for (int i = 0; i < iceBook->shown; ++i)
+    {
+        if (i > 0) std::fprintf(file, ",");
+        std::fprintf(file, "{\"price\":%.10g,\"side\":\"%s\",\"shown\":%.10g}", iceBook->out[i].price, iceBook->out[i].bid ? "BUY" : "SELL", iceBook->out[i].qty);
+    }
+    std::fprintf(file, "],");
     WriteMarks(file, sc, root, tradePrice);
     if (area.have)
         std::fprintf(file, "\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g,\"last\":%.10g,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", area.poc, area.vah, area.val, tradePrice, delta5, delta60);
