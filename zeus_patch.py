@@ -204,6 +204,43 @@ if "/api/v19/signals/ice" not in text:
     )
     print("Iceberg auto route added.", flush=True)
 
+if "def auto_page" not in text:
+    auto_method = (
+        "    async def auto_page(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import render_auto_page" + newline
+        + "        return web.Response(text=render_auto_page(), content_type='text/html')" + newline
+        + newline
+        + "    async def auto_state(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import auto_state" + newline
+        + "        return await auto_state(self, request)" + newline
+        + newline
+        + "    async def auto_save(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import auto_save" + newline
+        + "        return await auto_save(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the auto page.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, auto_method + marker, 1)
+    print("Auto handlers added.", flush=True)
+
+if "/v19/auto" not in text:
+    old_ice = 'app.router.add_post("/api/v19/signals/ice", self.signals_ice)'
+    if old_ice not in text:
+        print("Could not find the iceberg route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_ice,
+        old_ice + newline
+        + '        app.router.add_get("/v19/auto", self.auto_page)' + newline
+        + '        app.router.add_get("/api/v19/auto", self.auto_state)' + newline
+        + '        app.router.add_post("/api/v19/auto", self.auto_save)',
+        1,
+    )
+    print("Auto route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
 
 shell = Path("src") / "zeus3" / "v19" / "shell.py"
@@ -222,6 +259,21 @@ if "/v19/signals" not in nav:
     print("Signals tab added.", flush=True)
 else:
     print("Signals tab is already there.", flush=True)
+
+if "/v19/auto" not in nav:
+    old_nav = '("SIGNALS", "/v19/signals"),'
+    if old_nav not in nav:
+        old_nav = '("CHART", "/v19/chart"),'
+    if old_nav not in nav:
+        print("Could not find a tab to place AUTO next to.", flush=True)
+    else:
+        nav = nav.replace(
+            old_nav,
+            old_nav + ("\r\n" if "\r\n" in nav else "\n") + '    ("AUTO", "/v19/auto"),',
+            1,
+        )
+        shell.write_bytes(nav.encode("utf-8"))
+        print("Auto tab added.", flush=True)
 
 resolver = Path("src") / "zeus3" / "instruments" / "resolver.py"
 mapping = resolver.read_text(encoding="utf-8")

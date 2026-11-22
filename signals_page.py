@@ -85,7 +85,7 @@ tr.pick{outline:1px solid var(--warn)}
 .pairq .sub{display:block;color:var(--muted);font:11px Consolas,monospace}
 </style></head><body>
 <header>
-  <a href="/v19/chart">CHART</a><a href="/v19/trade-desk">TRADE DESK</a><a href="/v19/shadow">SHADOW</a>
+  <a href="/v19/chart">CHART</a><a href="/v19/trade-desk">TRADE DESK</a><a href="/v19/auto">AUTO</a><a href="/v19/shadow">SHADOW</a>
   <h1>SIGNALS</h1>
   <span class="muted" id="clock"></span>
 </header>
@@ -1606,6 +1606,7 @@ async def signals_positions(host: Any, request: web.Request) -> web.Response:
 
 
 async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
+    _auto_ensure(host)
     symbol = str(request.query.get("symbol") or "XAUUSD").upper()
     chart = str(request.query.get("chart") or "M5").upper()
     scan = str(request.query.get("scan") or "") == "1"
@@ -1667,3 +1668,434 @@ async def signals_taken(host: Any, request: web.Request) -> web.Response:
     except ValueError as exc:
         return web.json_response({"ok": False, "message": str(exc)}, status=400)
     return web.json_response({"ok": True, "research": research})
+
+_AUTO_HOST: Any = None
+_AUTO_THREAD: threading.Thread | None = None
+_AUTO_GUARD = threading.Lock()
+
+
+def _auto_file() -> Any:
+    from pathlib import Path
+
+    return Path("zeus_auto.json")
+
+
+def _auto_default() -> dict[str, Any]:
+    return {
+        "armed": False,
+        "symbols": [],
+        "unit": "usd",
+        "risk": 200.0,
+        "max_risk": 400.0,
+        "compound": False,
+        "base_balance": None,
+        "sent": {},
+        "log": [],
+    }
+
+
+def _auto_load() -> dict[str, Any]:
+    cfg = _auto_default()
+    try:
+        found = json.loads(_auto_file().read_text(encoding="utf-8"))
+    except Exception:
+        return cfg
+    if isinstance(found, dict):
+        cfg.update(found)
+    cfg["armed"] = bool(cfg.get("armed"))
+    cfg["compound"] = bool(cfg.get("compound"))
+    cfg["symbols"] = [name for name in (cfg.get("symbols") or []) if name in PAIRS]
+    cfg["unit"] = "pct" if str(cfg.get("unit")) == "pct" else "usd"
+    cfg["sent"] = cfg.get("sent") if isinstance(cfg.get("sent"), dict) else {}
+    cfg["log"] = list(cfg.get("log") or [])[-40:]
+    return cfg
+
+
+def _auto_store(cfg: dict[str, Any]) -> None:
+    cfg["log"] = list(cfg.get("log") or [])[-40:]
+    _auto_file().write_text(json.dumps(cfg), encoding="utf-8")
+
+
+def _auto_say(cfg: dict[str, Any], line: str) -> None:
+    previous = list(cfg.get("log") or [])
+    if previous and previous[-1].endswith("  " + line):
+        return
+    stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    previous.append(stamp + "  " + line)
+    cfg["log"] = previous[-40:]
+
+
+def _auto_ensure(host: Any) -> None:
+    global _AUTO_HOST, _AUTO_THREAD
+    _AUTO_HOST = host
+    with _AUTO_GUARD:
+        if _AUTO_THREAD is not None and _AUTO_THREAD.is_alive():
+            return
+        _AUTO_THREAD = threading.Thread(target=_auto_loop, name="zeus-auto", daemon=True)
+        _AUTO_THREAD.start()
+
+
+def _auto_money(cfg: dict[str, Any], account: dict[str, Any]) -> tuple[float, float, float]:
+    balance = float(account.get("balance") or 0)
+    equity = float(account.get("equity") or balance or 0)
+    base = float(cfg.get("base_balance") or balance or 0)
+    pot = equity if cfg.get("compound") else (base or balance)
+    risk = float(cfg.get("risk") or 0)
+    cap = float(cfg.get("max_risk") or 0)
+    if str(cfg.get("unit")) == "pct":
+        return pot * risk / 100.0, pot * cap / 100.0, pot
+    return risk, cap, pot
+
+
+def _auto_positions(host: Any) -> list[dict[str, Any]]:
+    found = []
+    for symbol in PAIRS:
+        for row in _positions(host, symbol):
+            row["symbol"] = symbol
+            row["protected"] = _broker_protected(row)
+            found.append(row)
+    return found
+
+
+def _auto_hit(side: str, target: float, bid: float, ask: float) -> bool:
+    if side == "BUY":
+        return bid >= target
+    if side == "SELL":
+        return ask <= target
+    return False
+
+
+def _auto_choose(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for row in rows:
+        if not row.get("tradeable"):
+            continue
+        if str(row.get("reason") or "") == "POTENTIAL":
+            continue
+        if str(row.get("side") or "") not in {"BUY", "SELL"}:
+            continue
+        try:
+            if float(row.get("stop") or 0) <= 0 or float(row.get("target") or row.get("targets", [0])[0] or 0) <= 0:
+                continue
+        except (TypeError, ValueError, IndexError):
+            continue
+        return row
+    return None
+
+
+def _auto_pass(host: Any, cfg: dict[str, Any]) -> None:
+    account = _account(host)
+    if not account.get("balance"):
+        _auto_say(cfg, "No broker balance yet.")
+        return
+    risk_usd, cap_usd, pot = _auto_money(cfg, account)
+    if risk_usd <= 0 or cap_usd <= 0:
+        _auto_say(cfg, "Risk or the max is not set.")
+        return
+    if risk_usd > cap_usd:
+        _auto_say(cfg, "One trade is larger than the max. Nothing sent.")
+        return
+    positions = _auto_positions(host)
+    by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for row in positions:
+        by_symbol.setdefault(str(row.get("symbol")), []).append(row)
+    sent = cfg.setdefault("sent", {})
+    for symbol, rows in by_symbol.items():
+        remembered = sent.get(symbol) if isinstance(sent.get(symbol), dict) else {}
+        target = float(remembered.get("target") or 0)
+        if target <= 0:
+            continue
+        for row in rows:
+            if row.get("protected"):
+                continue
+            if str(row.get("side")) != str(remembered.get("side")):
+                continue
+            bid = 0.0
+            ask = 0.0
+            try:
+                quote = host.runtime.projection.market_data.quote(symbol)
+                bid = float(quote.bid)
+                ask = float(quote.ask)
+            except Exception:
+                continue
+            if not _auto_hit(str(row.get("side")), target, bid, ask):
+                continue
+            try:
+                host.runtime.manage_physical_trade(
+                    ticket=int(row.get("ticket") or 0),
+                    action="BREAK_EVEN",
+                    stop_loss=float(row.get("price_open") or 0),
+                    entry_price=float(row.get("price_open") or 0),
+                    reason="ZEUS AUTO FIRST TARGET",
+                    include_physical_snapshot=False,
+                )
+                row["protected"] = True
+                _auto_say(cfg, symbol + " at the first target. Stop moved to the entry.")
+            except Exception as exc:
+                _auto_say(cfg, symbol + " could not move the stop. " + str(exc))
+    open_risk = 0.0
+    for row in positions:
+        if row.get("protected"):
+            continue
+        remembered = sent.get(str(row.get("symbol"))) if isinstance(sent.get(str(row.get("symbol"))), dict) else {}
+        open_risk += float(remembered.get("risk_usd") or risk_usd)
+    chosen_symbols = [name for name in cfg.get("symbols") or [] if name in PAIRS]
+    if not chosen_symbols:
+        _auto_say(cfg, "Auto is on. No symbol is selected.")
+        return
+    said = len(cfg.get("log") or [])
+    placed = False
+    for symbol in chosen_symbols:
+        if by_symbol.get(symbol):
+            continue
+        if open_risk + risk_usd > cap_usd + 0.01:
+            _auto_say(cfg, symbol + " waits. Open risk is already " + format(open_risk, ".0f") + " of " + format(cap_usd, ".0f") + ".")
+            continue
+        try:
+            payload = _payload(symbol, "M1", host, scan=True)
+        except Exception as exc:
+            _auto_say(cfg, symbol + " could not be read. " + str(exc))
+            continue
+        feed = payload.get("feed") or {}
+        if feed.get("market") != "OPEN":
+            _auto_say(cfg, symbol + " feed is " + str(feed.get("market") or "not open") + ".")
+            continue
+        row = _auto_choose(list(payload.get("rows") or []))
+        if row is None:
+            continue
+        target = float((row.get("targets") or [row.get("target")])[0])
+        mark = symbol + "|" + str(row.get("chart")) + "|" + str(row.get("side")) + "|" + format(float(row.get("entry") or 0), ".5f")
+        previous = sent.get(symbol) if isinstance(sent.get(symbol), dict) else {}
+        if previous.get("mark") == mark:
+            continue
+        balance = float(account.get("balance") or 0)
+        pct = (risk_usd / balance) * 100.0 if balance else None
+        try:
+            result = host.runtime.execute_owner_order_clean(
+                symbol=symbol,
+                timeframe=Timeframe.M1,
+                order_type="MARKET_BUY" if row.get("side") == "BUY" else "MARKET_SELL",
+                requested_entry=None,
+                stop=float(row.get("stop")),
+                targets=(target,),
+                target_specs=(),
+                requested_risk_pct=pct,
+                horizon_lane="INTRADAY",
+                owner_note="ZEUS AUTO " + str(row.get("chart") or ""),
+            )
+        except Exception as exc:
+            _auto_say(cfg, symbol + " was not sent. " + str(exc))
+            continue
+        blockers = []
+        if isinstance(result, dict):
+            blockers = [str(item) for item in (result.get("blockers") or []) if item]
+        if blockers:
+            _auto_say(cfg, symbol + " blocked. " + " · ".join(blockers))
+            continue
+        sent[symbol] = {"mark": mark, "side": row.get("side"), "target": target, "risk_usd": risk_usd}
+        open_risk += risk_usd
+        placed = True
+        _auto_say(cfg, "SENT " + symbol + " " + str(row.get("chart")) + " " + str(row.get("side")) + " risk " + format(risk_usd, ".0f"))
+        break
+    if not placed and len(cfg.get("log") or []) == said:
+        _auto_say(cfg, "Looking. Nothing new to send.")
+
+
+def _auto_loop() -> None:
+    import time
+
+    while True:
+        host = _AUTO_HOST
+        cfg = _auto_load()
+        if host is not None and cfg.get("armed"):
+            with _AUTO_GUARD:
+                fresh = _auto_load()
+                if fresh.get("armed"):
+                    try:
+                        _auto_pass(host, fresh)
+                    except Exception as exc:
+                        _auto_say(fresh, "Auto stopped this pass. " + str(exc))
+                    _auto_store(fresh)
+        time.sleep(20)
+
+
+def _auto_view(host: Any) -> dict[str, Any]:
+    cfg = _auto_load()
+    account = _account(host) if host is not None else {}
+    risk_usd, cap_usd, pot = _auto_money(cfg, account) if account else (0.0, 0.0, 0.0)
+    positions = _auto_positions(host) if host is not None else []
+    return {
+        "ok": True,
+        "armed": cfg["armed"],
+        "symbols": cfg["symbols"],
+        "pairs": [{"symbol": name, "label": LABELS.get(name, name)} for name in PAIRS],
+        "unit": cfg["unit"],
+        "risk": cfg["risk"],
+        "max_risk": cfg["max_risk"],
+        "compound": cfg["compound"],
+        "base_balance": cfg.get("base_balance"),
+        "account": account,
+        "risk_usd": risk_usd,
+        "max_usd": cap_usd,
+        "pot": pot,
+        "positions": positions,
+        "log": list(cfg.get("log") or [])[-12:],
+    }
+
+
+def render_auto_page() -> str:
+    return r"""<!doctype html><html><head><meta charset="utf-8"><title>ZEUS Auto</title>
+<style>
+:root{--bg:#071019;--panel:#0c1824;--line:#24384c;--text:#e7eef5;--muted:#8ea3b8;--good:#67d6a3;--bad:#ef7f88}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}
+header{display:flex;gap:14px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+a{color:#9fb3c8;text-decoration:none;font-size:12px;font-weight:800}
+h1{font-size:16px;margin:0;letter-spacing:.08em}
+main{display:grid;grid-template-columns:340px 1fr;gap:12px;padding:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px}
+label{display:block;color:var(--muted);font-size:12px;margin:10px 0 4px}
+input,select,button{background:#10202e;color:var(--text);border:1px solid #34506a;border-radius:6px;padding:8px 10px;font-weight:700}
+button.on{border-color:var(--good);color:var(--good)}
+.pair{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:1px solid #1a2c3c}
+.muted{color:var(--muted)} .good{color:var(--good)} .bad{color:var(--bad)}
+#log{font:12px Consolas,monospace;white-space:pre-wrap}
+table{width:100%;border-collapse:collapse;font:12px Consolas,monospace}
+td{padding:6px;border-top:1px solid #1a2c3c}
+</style></head><body>
+<header>
+  <a href="/v19/signals">SIGNALS</a><a href="/v19/chart">CHART</a><a href="/v19/trade-desk">TRADE DESK</a>
+  <h1>AUTO</h1><span class="muted" id="arm">OFF</span>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <button id="armbtn" onclick="arm()">AUTO OFF</button>
+      <p class="muted">Off does nothing. On sends a confirmed row for a ticked symbol. A line that only says a trade is coming is not sent. CLOSE on the signals page still closes it.</p>
+      <label>BROKER ON METATRADER</label>
+      <select id="broker" onchange="useBroker(this.value)"><option value="">The account that is logged in</option></select>
+      <div class="muted" id="brokerline"></div>
+      <label>SYMBOLS</label>
+      <div id="pairs"></div>
+      <label>RISK PER TRADE</label>
+      <input id="risk" value="200">
+      <label>MAX OPEN RISK</label>
+      <input id="max" value="400">
+      <label>UNIT</label>
+      <select id="unit"><option value="usd">Dollars</option><option value="pct">Percent of the account</option></select>
+      <label><input id="compound" type="checkbox"> Compound. A percent uses the account now. Off uses the balance from when you saved.</label>
+      <button onclick="save()">SAVE</button>
+      <div class="muted" id="money"></div>
+    </div>
+  </section>
+  <section>
+    <div class="card">
+      <div class="muted">OPEN</div>
+      <table id="open"></table>
+    </div>
+    <div class="card">
+      <div class="muted">WHAT AUTO DID</div>
+      <div id="log">Quiet.</div>
+    </div>
+  </section>
+</main>
+<script>
+let state=null;
+function money(n){return n==null?"—":Number(n).toLocaleString(undefined,{maximumFractionDigits:0})}
+async function refresh(){
+  const r=await fetch("/api/v19/auto");
+  state=await r.json();
+  document.getElementById("arm").textContent=state.armed?"ON":"OFF";
+  document.getElementById("arm").className=state.armed?"good":"muted";
+  const btn=document.getElementById("armbtn");
+  btn.textContent=state.armed?"AUTO ON":"AUTO OFF";
+  btn.className=state.armed?"on":"";
+  if(!document.getElementById("pairs").childElementCount){
+    document.getElementById("pairs").innerHTML=(state.pairs||[]).map(p=>`<div class="pair"><b>${p.label}</b><input type="checkbox" data-symbol="${p.symbol}" ${state.symbols.includes(p.symbol)?"checked":""}></div>`).join("");
+    document.getElementById("risk").value=state.risk;
+    document.getElementById("max").value=state.max_risk;
+    document.getElementById("unit").value=state.unit;
+    document.getElementById("compound").checked=!!state.compound;
+  }
+  const acct=state.account||{};
+  document.getElementById("money").textContent="Balance "+money(acct.balance)+" · equity "+money(acct.equity)+" · one trade "+money(state.risk_usd)+" · max open "+money(state.max_usd);
+  const rows=state.positions||[];
+  document.getElementById("open").innerHTML=rows.length?rows.map(p=>`<tr><td>${p.symbol}</td><td>${p.side}</td><td>${p.volume}</td><td>${p.protected?"AT ENTRY":"OPEN RISK"}</td><td>${money(p.profit)}</td></tr>`).join(""):"<tr><td class='muted'>No open position on these pairs.</td></tr>";
+  document.getElementById("log").textContent=(state.log||[]).join("\n")||"Quiet.";
+}
+async function save(armed){
+  const symbols=[...document.querySelectorAll("[data-symbol]:checked")].map(x=>x.dataset.symbol);
+  const body={
+    armed: armed==null?!!(state&&state.armed):armed,
+    symbols,
+    risk: Number(document.getElementById("risk").value),
+    max_risk: Number(document.getElementById("max").value),
+    unit: document.getElementById("unit").value,
+    compound: document.getElementById("compound").checked
+  };
+  const r=await fetch("/api/v19/auto",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  state=await r.json();
+  document.getElementById("pairs").innerHTML="";
+  await refresh();
+}
+function arm(){save(!(state&&state.armed))}
+async function brokers(){
+  try{
+    const r=await fetch("/api/v19/system/terminal-identities");
+    const j=await r.json();
+    const box=document.getElementById("broker");
+    (j.terminal_identities||[]).forEach(row=>{
+      const o=document.createElement("option");
+      o.value=row.terminal_path||"";
+      o.textContent=(row.company||row.server||"MetaTrader")+" · "+(row.login||"")+(row.current_runtime?" · IN USE":"");
+      if(row.current_runtime) o.selected=true;
+      box.appendChild(o);
+    });
+    const acct=j.account||{};
+    document.getElementById("brokerline").textContent=acct.login?(acct.company||acct.server||"")+" "+acct.login:"No terminal answered.";
+  }catch(e){
+    document.getElementById("brokerline").textContent="The broker list did not load.";
+  }
+}
+async function useBroker(path){
+  if(!path) return;
+  const r=await fetch("/api/v19/system/switch-account",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({owner_approved:true,terminal_path:path})});
+  const j=await r.json();
+  document.getElementById("brokerline").textContent=j.ok===false?(j.message||"The switch was refused"):"That account is now the one Zeus uses.";
+}
+brokers();
+refresh();
+setInterval(refresh, 3000);
+</script></body></html>"""
+
+
+async def auto_state(host: Any, request: web.Request) -> web.Response:
+    _auto_ensure(host)
+    return web.json_response(_auto_view(host))
+
+
+async def auto_save(host: Any, request: web.Request) -> web.Response:
+    _auto_ensure(host)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "message": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"ok": False, "message": "bad json"}, status=400)
+    with _AUTO_GUARD:
+        cfg = _auto_load()
+        cfg["armed"] = bool(body.get("armed"))
+        cfg["symbols"] = [str(name).upper() for name in (body.get("symbols") or []) if str(name).upper() in PAIRS]
+        cfg["unit"] = "pct" if str(body.get("unit")) == "pct" else "usd"
+        try:
+            cfg["risk"] = float(body.get("risk") or 0)
+            cfg["max_risk"] = float(body.get("max_risk") or 0)
+        except (TypeError, ValueError):
+            return web.json_response({"ok": False, "message": "risk must be a number"}, status=400)
+        cfg["compound"] = bool(body.get("compound"))
+        if not cfg["compound"]:
+            account = _account(host)
+            if account.get("balance"):
+                cfg["base_balance"] = float(account["balance"])
+        _auto_say(cfg, "Saved. Auto is " + ("on." if cfg["armed"] else "off."))
+        _auto_store(cfg)
+    return web.json_response(_auto_view(host))
+
