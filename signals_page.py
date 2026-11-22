@@ -443,6 +443,7 @@ function orderRisk(){
   return {pct:risk, label:risk+"%"};
 }
 function moneyLine(row, account){
+  if(row&&row.push) return row.harvest||"—";
   if(!row||row.entry==null||row.stop==null) return row&&row.harvest||"—";
   const entry=Number(row.entry), stop=Number(row.risk_stop!=null?row.risk_stop:row.stop);
   const riskDist=Math.abs(entry-stop);
@@ -507,6 +508,12 @@ function boardLine(payload){
     const money=String(moneyLine(hit, payload.account)).split(" · ")[0];
     return {kind:"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
   }
+  const push=live.find(r=>r.push&&r.side&&r.entry!=null);
+  if(push){
+    const tp=(push.targets&&push.targets.length)?push.targets[0]:push.target;
+    const mult=push.r!=null?push.r+"R · ":"";
+    return {kind:"PUSH", side:push.side, text:"PUSH "+push.side+" "+px(push.entry), sub:"high risk · stop "+px(push.stop)+" · TP "+px(tp)+" "+mult+"not a trade"};
+  }
   const coming=live.find(r=>r.coming&&r.coming.side);
   if(coming){
     const tps=coming.coming.tps?coming.coming.tps+" · ":"";
@@ -519,7 +526,7 @@ function paintBoard(){
   if(!box) return;
   box.innerHTML=PAIRS.map(p=>{
     const item=board[p[0]]||{kind:"QUIET", text:"reading", sub:""};
-    const tone=item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"?"warn":"muted");
+    const tone=item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"?"warn":"muted");
     return `<div class="pairq" onclick="setPair('${p[0]}')"><b class="${tone}">${p[1]} · ${item.text}</b>${item.sub?`<span class="sub">${item.sub}</span>`:""}</div>`;
   }).join("");
 }
@@ -535,6 +542,13 @@ function consider(payload){
       if(!same&&!bag[key]){
         remember(key);
         speak(name+" "+row.chart+" "+coming.side+" coming into "+coming.zone+". Not a trade yet."+(coming.tps?" "+coming.tps+".":""));
+      }
+    }
+    if(row.push&&row.side&&row.entry!=null){
+      const key="P|"+payload.symbol+"|"+row.side+"|"+row.entry+"|"+row.stop+"|"+row.time;
+      if(!bag[key]){
+        remember(key);
+        speak(name+" intraday push "+row.side+". High risk. Entry "+row.entry+" stop "+row.stop+" "+(row.harvest||"")+". Not a trade.");
       }
     }
     let announced=false;
@@ -560,7 +574,8 @@ function paint(){
   const rows=data.rows||[];
   $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
-      const side=r.side?`<span class="${r.side==="BUY"?"good":"bad"}">${r.side}</span>`:"—";
+      const tone=r.push?"warn":(r.side==="BUY"?"good":"bad");
+      const side=r.side?`<span class="${tone}">${r.side}</span>`:"—";
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
       const harvest=moneyLine(r);
       const limitOk=["ICEBERG","SCALP","INTRADAY","SWING","RESPONSIVE"].includes(r.chart);
@@ -1851,7 +1866,7 @@ def _auto_hit(side: str, target: float, bid: float, ask: float) -> bool:
 
 def _auto_choose(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     for row in rows:
-        if not row.get("tradeable"):
+        if not row.get("tradeable") or str(row.get("reason") or "") in {"POTENTIAL", "PUSH"}:
             continue
         if str(row.get("reason") or "") == "POTENTIAL":
             continue
@@ -2026,7 +2041,7 @@ td{padding:6px;border-top:1px solid #1a2c3c}
   <section>
     <div class="card">
       <button id="armbtn" onclick="arm()">AUTO OFF</button>
-      <p class="muted">Off does nothing. On sends a confirmed row for a ticked symbol. A line that only says a trade is coming is not sent. CLOSE on the signals page still closes it.</p>
+      <p class="muted">Off does nothing. On sends a confirmed row for a ticked symbol. A line that only says a trade is coming is not sent. A yellow push is not sent. CLOSE on the signals page still closes it.</p>
       <label>BROKER ON METATRADER</label>
       <select id="broker" onchange="useBroker(this.value)"><option value="">The account that is logged in</option></select>
       <div class="muted" id="brokerline"></div>

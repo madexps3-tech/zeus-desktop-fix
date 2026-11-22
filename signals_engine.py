@@ -1380,6 +1380,104 @@ def _coming(
     }
 
 
+def _both_against(side: str, book: dict[str, Any] | None) -> bool:
+    """Both clocks are against the trade, and the 60-second book is not quiet."""
+    def signed(name: str) -> float | None:
+        value = (book or {}).get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    short = signed("delta_5s")
+    longer = signed("delta_60s")
+    if short is None or longer is None or abs(longer) < 10:
+        return False
+    if side == "BUY":
+        return short < 0 and longer < 0
+    return short > 0 and longer > 0
+
+
+def _push(
+    symbol: str,
+    closed: list[dict[str, Any]],
+    zones: list[dict[str, Any]],
+    spread: float,
+    area: tuple[float, float, float] | None,
+    book: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """A finished close back out of a middle swing. The wick is the stop. Not an order."""
+    if area is None or not closed or not zones:
+        return None
+    last = closed[-1]
+    close = _num(last, "close")
+    found: list[tuple[str, dict[str, Any]]] = []
+    for side in ("BUY", "SELL"):
+        zone = _turn(last, zones, side)
+        if zone is None:
+            continue
+        if _at_edge({"side": side, "zone": float(zone["price"])}, area, symbol):
+            continue
+        found.append((side, zone))
+    if not found:
+        return None
+    side, zone = min(found, key=lambda item: abs(float(item[1]["price"]) - close))
+    if _both_against(side, book):
+        return None
+    entry = close
+    stop = _num(last, "low") if side == "BUY" else _num(last, "high")
+    if side == "BUY" and stop >= entry:
+        return None
+    if side == "SELL" and stop <= entry:
+        return None
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    if symbol == "EURUSD" and risk <= _band(symbol, 1.5):
+        return None
+    if symbol == "XAUUSD" and risk + 1e-9 < GOLD_MIN_STOP:
+        return None
+    targets = _targets_ahead(side, entry, stop, zones)
+    if not targets or abs(float(targets[0]) - entry) <= risk:
+        return None
+    multiples = [round(abs(float(price) - entry) / risk, 2) for price in targets]
+    listed = " · ".join(
+        f"TP{index} {round(float(price), 5)} {multiple}R"
+        for index, (price, multiple) in enumerate(zip(targets, multiples), 1)
+    )
+    longer = (book or {}).get("delta_60s")
+    quiet = isinstance(longer, (int, float)) and not isinstance(longer, bool) and abs(float(longer)) < 10
+    extra = ""
+    if spread and float(spread) > risk / 3.0:
+        extra += " The spread is a large part of the stop."
+    if quiet:
+        extra += " The book is quiet."
+    note = (
+        f"HIGH RISK. The 1-minute candle closed back out of {round(float(zone['price']), 5)}. "
+        f"The stop is the wick, not 10 times the spread. Not an order.{extra} {listed}."
+    )
+    return {
+        "chart": "INTRADAY",
+        "side": side,
+        "reason": "PUSH",
+        "r": multiples[0],
+        "decision": "HIGH RISK",
+        "note": note.strip(),
+        "state": "HIGH RISK",
+        "trend": "",
+        "tradeable": False,
+        "entry": round(entry, 5),
+        "stop": round(stop, 5),
+        "risk_stop": round(stop, 5),
+        "target": round(float(targets[0]), 5),
+        "targets": [round(float(price), 5) for price in targets],
+        "time": _time(last),
+        "zone": round(float(zone["price"]), 5),
+        "harvest": listed,
+        "push": True,
+        "score_on": "M1",
+    }
+
+
 def _at_edge(row: dict[str, Any], area: tuple[float, float, float], symbol: str) -> bool:
     """A buy only at the value low. A sell only at the value high. The middle is not this row."""
     val, _poc, vah = area
@@ -1955,6 +2053,12 @@ def build_rows(
     for row in rows:
         row["market"] = state
         if row["chart"] == "INTRADAY":
+            if not row.get("side"):
+                push = _push(symbol, closed, intraday_zones, spread, area, book)
+                if push:
+                    push["market"] = state
+                    row.clear()
+                    row.update(push)
             row["coming"] = _coming(live, intraday_zones, area, symbol, spread, beyond)
         elif row["chart"] == "SWING":
             row["coming"] = _coming(live, swing_zones, area, symbol, spread, wider)
