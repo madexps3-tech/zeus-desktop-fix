@@ -121,6 +121,99 @@ static void TradeDelta(SCStudyInterfaceRef sc, double& buy5, double& buy60)
     }
 }
 
+static bool LadderRoot(const char* root)
+{
+    return std::strcmp(root, "GC") == 0 || std::strcmp(root, "CL") == 0 || std::strcmp(root, "NQ") == 0;
+}
+
+static void WriteMarks(FILE* file, SCStudyInterfaceRef sc, const char* root, double tradePrice)
+{
+    if (!LadderRoot(root) || sc.VolumeAtPriceForBars == nullptr || sc.TickSize <= 0.0 || sc.ArraySize < 1)
+    {
+        std::fprintf(file, "\"ladder\":null,\"stack\":null,\"unfinished_high\":null,\"unfinished_low\":null,");
+        return;
+    }
+    c_VAPContainer* vap = sc.VolumeAtPriceForBars;
+    const int last = sc.ArraySize - 1;
+    const SCDateTime sessionStart = sc.GetTradingDayStartDateTimeOfBar(sc.BaseDateTimeIn[last]);
+    std::map<int, std::pair<unsigned int, unsigned int>> atTick;
+    for (int bar = last; bar >= 0; --bar)
+    {
+        if (sc.BaseDateTimeIn[bar] < sessionStart) break;
+        const int levels = vap->GetSizeAtBarIndex(bar);
+        for (int level = 0; level < levels; ++level)
+        {
+            s_VolumeAtPriceV2* row = nullptr;
+            if (!vap->GetVAPElementAtIndex(bar, level, &row) || row == nullptr) continue;
+            atTick[row->PriceInTicks].first += row->BidVolume;
+            atTick[row->PriceInTicks].second += row->AskVolume;
+        }
+    }
+    if (atTick.empty())
+    {
+        std::fprintf(file, "\"ladder\":[],\"stack\":null,\"unfinished_high\":null,\"unfinished_low\":null,");
+        return;
+    }
+    std::vector<std::pair<int, std::pair<unsigned int, unsigned int>>> rows(atTick.begin(), atTick.end());
+    const double ticks = tradePrice / sc.TickSize;
+    const int tradeTick = static_cast<int>(ticks >= 0.0 ? ticks + 0.5 : ticks - 0.5);
+    int stackTick = 0;
+    int stackBid = 0;
+    int bestDistance = 0;
+    bool haveStack = false;
+    for (int index = 0; index + 2 < static_cast<int>(rows.size()); ++index)
+    {
+        bool bidStack = true;
+        bool askStack = true;
+        for (int step = 0; step < 3; ++step)
+        {
+            const unsigned int bid = rows[index + step].second.first;
+            const unsigned int ask = rows[index + step].second.second;
+            if (!(bid > 0 && bid >= ask * 3)) bidStack = false;
+            if (!(ask > 0 && ask >= bid * 3)) askStack = false;
+        }
+        if (!bidStack && !askStack) continue;
+        const int tick = rows[index + 1].first;
+        const int distance = tick > tradeTick ? tick - tradeTick : tradeTick - tick;
+        if (!haveStack || distance < bestDistance)
+        {
+            haveStack = true;
+            bestDistance = distance;
+            stackTick = tick;
+            stackBid = bidStack ? 1 : 0;
+        }
+    }
+    const unsigned int lowBid = rows.front().second.first;
+    const unsigned int lowAsk = rows.front().second.second;
+    const unsigned int highBid = rows.back().second.first;
+    const unsigned int highAsk = rows.back().second.second;
+    const bool unfinishedLow = lowBid > 0 && lowAsk == 0;
+    const bool unfinishedHigh = highAsk > 0 && highBid == 0;
+    std::fprintf(file, "\"ladder\":[");
+    const int count = static_cast<int>(rows.size());
+    const int start = count > 800 ? (count - 800) / 2 : 0;
+    const int stop = count > 800 ? start + 800 : count;
+    for (int index = start; index < stop; ++index)
+    {
+        if (index > start) std::fprintf(file, ",");
+        const double price = rows[index].first * sc.TickSize;
+        std::fprintf(file, "{\"p\":%.10g,\"b\":%u,\"a\":%u}", price, rows[index].second.first, rows[index].second.second);
+    }
+    std::fprintf(file, "],");
+    if (haveStack)
+        std::fprintf(file, "\"stack\":{\"price\":%.10g,\"side\":\"%s\"},", stackTick * sc.TickSize, stackBid ? "bid" : "ask");
+    else
+        std::fprintf(file, "\"stack\":null,");
+    if (unfinishedHigh)
+        std::fprintf(file, "\"unfinished_high\":%.10g,", rows.back().first * sc.TickSize);
+    else
+        std::fprintf(file, "\"unfinished_high\":null,");
+    if (unfinishedLow)
+        std::fprintf(file, "\"unfinished_low\":%.10g,", rows.front().first * sc.TickSize);
+    else
+        std::fprintf(file, "\"unfinished_low\":null,");
+}
+
 static double QtyAt(const OrderSnap* rows, int count, int bidSide, double price, double tick)
 {
     double qty = 0.0;
@@ -300,6 +393,7 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
         std::fprintf(file, "\"other\":{\"price\":%.10g,\"side\":\"%s\",\"refills\":%d,\"time\":%.0f},", other->price, other->bid ? "bid" : "ask", other->refills, other->until);
     else
         std::fprintf(file, "\"other\":null,");
+    WriteMarks(file, sc, root, tradePrice);
     if (area.have)
         std::fprintf(file, "\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g,\"last\":%.10g,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", area.poc, area.vah, area.val, tradePrice, delta5, delta60);
     else

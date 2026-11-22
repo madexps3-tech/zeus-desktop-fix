@@ -84,7 +84,7 @@ BE_MOVE = {
 MAX_BASIS = {
     "XAUUSD": 80.0,
     "XAGUSD": 2.0,
-    "NAS100": 400.0,
+    "NAS100": 80.0,
     "WTI": 5.0,
     "EURUSD": 0.02,
     "USDJPY": 2.0,
@@ -2023,6 +2023,69 @@ def range_dip(bars: list[dict[str, Any]] | None) -> float | None:
     return average * 2.0
 
 
+LADDER_PAIRS = {"XAUUSD", "WTI", "NAS100"}
+
+
+def _basis_shift(book: dict[str, Any], symbol: str, bid: float, ask: float) -> float | None:
+    """The live futures-to-CFD gap. A gap wider than the pair's cap is not a price."""
+    last = book.get("last")
+    if isinstance(last, bool) or not isinstance(last, (int, float)) or float(last) <= 0:
+        return None
+    shift = ((float(bid) + float(ask)) / 2.0) - float(last)
+    if abs(shift) > float(MAX_BASIS.get(symbol, 0.0) or 0.0):
+        return None
+    return shift
+
+
+def place_marks(book: dict[str, Any] | None, symbol: str, bid: float | None, ask: float | None) -> None:
+    """Shift a stack and an unfinished high or low onto the CFD. Other pairs get neither."""
+    if not isinstance(book, dict):
+        return
+    if symbol not in LADDER_PAIRS or not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)):
+        book["stack"] = None
+        book["unfinished_high"] = None
+        book["unfinished_low"] = None
+        return
+    shift = _basis_shift(book, symbol, float(bid), float(ask))
+    if shift is None:
+        book["stack"] = None
+        book["unfinished_high"] = None
+        book["unfinished_low"] = None
+        return
+    stack = book.get("stack") if isinstance(book.get("stack"), dict) else None
+    if stack and isinstance(stack.get("price"), (int, float)) and not isinstance(stack.get("price"), bool):
+        stack["price"] = round(float(stack["price"]) + shift, 5)
+        book["stack"] = stack
+    else:
+        book["stack"] = None
+    for name in ("unfinished_high", "unfinished_low"):
+        value = book.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) <= 0:
+            book[name] = None
+        else:
+            book[name] = round(float(value) + shift, 5)
+
+
+def stack_line(symbol: str, side: str, stack: dict[str, Any] | None) -> str:
+    """A check on a row that is already a trade. Not a button and not a new signal."""
+    if symbol not in LADDER_PAIRS or side not in {"BUY", "SELL"} or not isinstance(stack, dict):
+        return ""
+    try:
+        price = float(stack.get("price"))
+    except (TypeError, ValueError):
+        return ""
+    if price <= 0:
+        return ""
+    book_side = str(stack.get("side") or "")
+    stands = (side == "BUY" and book_side == "bid") or (side == "SELL" and book_side == "ask")
+    if not stands:
+        return "Stack " + str(price) + ". It is the other way, so this row does not stand."
+    if symbol == "NAS100":
+        stop = price - 20.0 if side == "BUY" else price + 20.0
+        return "Stack " + str(price) + ". This row stands. The stop is 20 points beyond it, at " + str(stop) + "."
+    return "Stack " + str(price) + ". This row stands. The stop is just beyond the stack."
+
+
 def manage_decision(
     *,
     side: str,
@@ -2035,92 +2098,162 @@ def manage_decision(
     dip: float | None,
     book: dict[str, Any] | None,
     volume: float,
+    symbol: str = "",
+    magnet: float | None = None,
+    magnet_open: bool = False,
 ) -> dict[str, Any]:
-    """The stop moves. The half does not. T1 stays the first target."""
+    """The first R is the stop distance. A magnet price stays the target until its missing side prints."""
     prices = []
     for price in targets:
         try:
             prices.append(float(price))
         except (TypeError, ValueError):
             continue
-    if side not in {"BUY", "SELL"} or entry <= 0 or not prices:
-        return {"stop": None, "line": "", "risk": risk, "dip": dip}
-    first = prices[0]
-    distance = abs(first - entry)
-    if distance <= 0:
-        return {"stop": None, "line": "", "risk": risk, "dip": dip}
+    blank = {"stop": None, "take_profit": None, "bank": False, "line": "", "risk": risk, "dip": dip}
+    if side not in {"BUY", "SELL"} or entry <= 0:
+        return blank
     if risk is None or risk <= 0:
         if isinstance(stop, (int, float)) and not isinstance(stop, bool):
             gap = abs(entry - float(stop))
             protective = (side == "BUY" and float(stop) < entry) or (side == "SELL" and float(stop) > entry)
-            if protective and gap > distance * 1e-4:
+            if protective and gap > 0:
                 risk = gap
     if risk is None or risk <= 0:
-        return {"stop": None, "line": "No original stop, so 1R cannot be found.", "risk": risk, "dip": dip}
-    one_r = entry + risk if side == "BUY" else entry - risk
+        blank["line"] = "No original stop, so 1R cannot be found."
+        blank["risk"] = risk
+        return blank
     mark = bid if side == "BUY" else ask
-    made = mark >= one_r if side == "BUY" else mark <= one_r
-    first_hit = mark >= first if side == "BUY" else mark <= first
-    first_is_inside = distance <= risk + 1e-9
-    paid = [price for price in prices if (mark >= price if side == "BUY" else mark <= price)]
-    desired = None
-    if first_is_inside:
-        if first_hit:
-            desired = entry
-    elif made:
-        desired = entry
-    if dip and dip > 0 and paid:
-        furthest = max(paid) if side == "BUY" else min(paid)
-        if abs(mark - furthest) + 1e-9 >= dip and ((side == "BUY" and furthest > entry) or (side == "SELL" and furthest < entry)):
-            desired = furthest
-    new_stop = None
-    if desired is not None and ((side == "BUY" and desired < mark) or (side == "SELL" and desired > mark)):
-        current = float(stop) if isinstance(stop, (int, float)) and not isinstance(stop, bool) else None
-        better = current is None or (desired > current if side == "BUY" else desired < current)
-        if better and (current is None or abs(desired - current) > max(risk * 1e-6, 1e-8)):
-            new_stop = desired
-    floor = mark if first_hit else first
-    nxt = None
-    for price in prices:
-        if side == "BUY" and price > floor:
-            nxt = price
-            break
-        if side == "SELL" and price < floor:
-            nxt = price
-            break
     traveled = (mark - entry) if side == "BUY" else (entry - mark)
-    approach = (not first_hit) and distance > 0 and traveled >= distance * 0.90
-    in_window = False
-    if first_is_inside:
-        in_window = first_hit
-    elif made and dip and dip <= distance:
-        stretch = min(dip, distance * 0.10)
-        in_window = mark >= first - stretch if side == "BUY" else mark <= first + stretch
-    line = ""
-    if approach:
-        first_text = round(first, 5)
-        if nxt is None:
-            line = f"The first target {first_text} is close. The broker will close the whole trade there."
-        elif _hold_full(side, book):
-            line = f"The first target {first_text} is close. The book is with the trade. Next is {round(nxt, 5)}. Move the take profit or the broker closes the whole trade at the first target."
-        elif _both_against(side, book):
-            line = f"The first target {first_text} is close. Both clocks are against the trade. The broker will close the whole trade there."
-        else:
-            line = f"The first target {first_text} is close. Next is {round(nxt, 5)}. Move the take profit or the broker closes the whole trade at the first target."
-    elif in_window or first_hit:
+    if traveled < 0:
+        traveled = 0.0
+    band = _band(symbol) if symbol else 0.0
+    current = float(stop) if isinstance(stop, (int, float)) and not isinstance(stop, bool) else None
+
+    def better(desired: float | None) -> float | None:
+        if desired is None:
+            return None
+        if side == "BUY" and not desired < mark:
+            return None
+        if side == "SELL" and not desired > mark:
+            return None
+        if current is None:
+            return desired
+        step = max(float(risk) * 1e-6, 1e-8)
+        if side == "BUY" and desired <= current + step:
+            return None
+        if side == "SELL" and desired >= current - step:
+            return None
+        return desired
+
+    def reached(price: float) -> bool:
+        return mark >= price if side == "BUY" else mark <= price
+
+    result = {"stop": None, "take_profit": None, "bank": False, "line": "", "risk": risk, "dip": dip}
+    if traveled < float(risk) * 0.90:
+        return result
+    if traveled < float(risk):
         if _both_against(side, book):
-            line = "Both clocks are against the trade. Bank the rest."
-        elif _hold_full(side, book) and nxt is not None:
-            line = f"Hold the full position for {round(nxt, 5)}. The stop stays at the entry."
-        elif nxt is None:
-            line = "The last target is reached. Bank the trade."
-        elif volume < 0.02:
-            line = "Half is below the minimum lot. Bank all or hold all."
+            result["bank"] = True
+            result["line"] = "90% of the first R. Both clocks are against the trade. Bank."
+            return result
+        if _hold_full(side, book):
+            result["line"] = "90% of the first R. The book is with the trade. Let the first R print."
+            return result
+        locked = entry + (traveled * 0.5) if side == "BUY" else entry - (traveled * 0.5)
+        result["stop"] = better(locked)
+        result["line"] = "90% of the first R. The book is quiet. Half of the open profit is locked."
+        return result
+    magnet_price = None
+    if isinstance(magnet, (int, float)) and not isinstance(magnet, bool) and float(magnet) > 0:
+        magnet_price = float(magnet)
+
+    def same_price(left: float, right: float) -> bool:
+        return abs(left - right) <= max(band, float(risk) * 1e-6)
+
+    secured = entry
+    pending = None
+    printed_magnet = False
+    for price in prices:
+        magnet_here = magnet_price is not None and same_price(price, magnet_price)
+        if magnet_here and magnet_open:
+            pending = price
+            break
+        if reached(price):
+            secured = price
+            if magnet_here:
+                printed_magnet = True
+        elif pending is None:
+            pending = price
+            break
+    if printed_magnet and not magnet_open:
+        result["stop"] = better(magnet_price)
+        following = None
+        for price in prices:
+            if side == "BUY" and price > magnet_price + max(band, float(risk) * 1e-6):
+                following = price
+                break
+            if side == "SELL" and price < magnet_price - max(band, float(risk) * 1e-6):
+                following = price
+                break
+        if _hold_full(side, book) and following is not None:
+            result["take_profit"] = following
+            result["line"] = "The missing side printed. The take profit leaves " + str(round(magnet_price, 5)) + " for " + str(round(following, 5)) + "."
+            return result
+        result["bank"] = True
+        result["line"] = str(round(magnet_price, 5)) + " stays the target. Bank there."
+        return result
+    result["stop"] = better(secured)
+    if pending is None and prices and reached(prices[-1]):
+        result["bank"] = True
+        result["line"] = "The last target is reached. Bank the trade."
+        return result
+    if pending is None:
+        result["line"] = "The first R is made. The stop belongs at the entry."
+        return result
+    span = abs(pending - entry)
+    if span <= float(risk) * 1.25:
+        close_to = traveled >= span * 0.90
+    elif band > 0:
+        close_to = abs(mark - pending) <= band
+    else:
+        close_to = False
+    on_magnet = magnet_price is not None and pending is not None and abs(pending - magnet_price) <= max(band, float(risk) * 1e-6)
+    trading_magnet = on_magnet and abs(mark - magnet_price) <= max(band, float(risk) * 1e-4)
+    following = None
+    for price in prices:
+        if side == "BUY" and price > pending:
+            following = price
+            break
+        if side == "SELL" and price < pending:
+            following = price
+            break
+    if on_magnet and magnet_open:
+        if trading_magnet:
+            result["line"] = str(round(magnet_price, 5)) + " is being traded."
         else:
-            line = f"Bank half. The rest stays for {round(nxt, 5)} with the stop at the entry."
-    elif made and not first_is_inside:
-        line = "1R is made. The stop belongs at the entry."
-    return {"stop": new_stop, "line": line, "risk": risk, "dip": dip}
+            result["line"] = "The first R is made. The stop is at " + str(round(secured, 5)) + "."
+        return result
+    if on_magnet:
+        if _hold_full(side, book) and following is not None:
+            result["take_profit"] = following
+            result["line"] = "The missing side printed. The take profit leaves " + str(round(magnet_price, 5)) + " for " + str(round(following, 5)) + "."
+            return result
+        result["line"] = str(round(magnet_price, 5)) + " stays the target."
+        return result
+    if not close_to and not trading_magnet:
+        result["line"] = "The first R is made. The stop is at " + str(round(secured, 5)) + "."
+        return result
+    if _both_against(side, book):
+        result["bank"] = True
+        result["line"] = "Both clocks are against the trade. Bank the rest."
+        return result
+    if _hold_full(side, book) and following is not None:
+        result["take_profit"] = following
+        result["line"] = "Let " + str(round(pending, 5)) + " print. The book is with the trade. Next is " + str(round(following, 5)) + "."
+        return result
+    result["line"] = "The stop stays at " + str(round(secured, 5)) + "."
+    return result
+
 
 
 def _band(symbol: str, pips: float = 5.0) -> float:

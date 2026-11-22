@@ -24,9 +24,11 @@ from zeus3.v19.signals_engine import (
     liquidity,
     mark_taken,
     manage_decision,
+    place_marks,
     place_yen,
     place_value,
     range_dip,
+    stack_line,
     reaction,
     record,
     session_levels,
@@ -333,6 +335,13 @@ function draw(){
     if(!isFinite(price)||price<lo||price>hi) return;
     ctx.setLineDash([2,4]); ctx.strokeStyle=line[0]; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
     ctx.setLineDash([]); ctx.fillStyle=line[0]; ctx.fillText(line[2]+" "+price, plotL+4, y(price)-4);
+  });
+  const magnetHigh=Number(flowNow.unfinished_high), magnetLow=Number(flowNow.unfinished_low);
+  [[magnetHigh,"UNFINISHED HIGH"],[magnetLow,"UNFINISHED LOW"]].forEach(line=>{
+    const price=line[0];
+    if(!isFinite(price)||price<lo||price>hi) return;
+    ctx.setLineDash([6,3]); ctx.strokeStyle="#d7c4ff"; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle="#d7c4ff"; ctx.fillText(line[1]+" "+price, plotL+4, y(price)+12);
   });
   if(row){
     ctx.setLineDash([4,4]);
@@ -1080,6 +1089,13 @@ def _book(symbol: str) -> dict[str, Any]:
             }
         else:
             book["other"] = None
+        stack = raw.get("stack")
+        if isinstance(stack, dict) and stack.get("price") is not None:
+            book["stack"] = {"price": float(stack["price"]), "side": str(stack.get("side") or "")}
+        for name in ("unfinished_high", "unfinished_low"):
+            value = raw.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0:
+                book[name] = float(value)
     try:
         from zeus3.v19.shadow_book_page import _sierra_flow
 
@@ -1234,6 +1250,26 @@ def _run_manage(
         risk = previous.get("risk")
         if isinstance(risk, bool) or not isinstance(risk, (int, float)):
             risk = None
+        saved = {
+            "symbol": symbol,
+            "line": "",
+            "risk": previous.get("risk"),
+            "dip": previous.get("dip"),
+            "sent": previous.get("sent"),
+            "told": previous.get("told") or "",
+            "magnet": previous.get("magnet"),
+            "tp": previous.get("tp"),
+        }
+        magnet = None
+        magnet_open = False
+        ahead = book.get("unfinished_high") if side == "BUY" else book.get("unfinished_low")
+        if isinstance(ahead, (int, float)) and not isinstance(ahead, bool):
+            magnet = float(ahead)
+            magnet_open = True
+            saved["magnet"] = magnet
+        elif isinstance(previous.get("magnet"), (int, float)):
+            magnet = float(previous["magnet"])
+            magnet_open = False
         decision = manage_decision(
             side=side,
             entry=entry,
@@ -1245,37 +1281,73 @@ def _run_manage(
             dip=None if dip is None else float(dip),
             book=book,
             volume=float(pos.get("volume") or 0),
+            symbol=symbol,
+            magnet=magnet,
+            magnet_open=magnet_open,
         )
-        saved = {
-            "symbol": symbol,
-            "line": decision.get("line") or "",
-            "risk": decision.get("risk"),
-            "dip": decision.get("dip"),
-            "sent": previous.get("sent"),
-            "told": previous.get("told") or "",
-        }
-        new_stop = decision.get("stop")
-        if managing and close and isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool):
-            if saved.get("sent") != float(new_stop):
+        saved["line"] = decision.get("line") or ""
+        saved["risk"] = decision.get("risk")
+        saved["dip"] = decision.get("dip")
+        armed = False
+        try:
+            cfg = _auto_load()
+            armed = bool(cfg.get("armed")) and symbol in (cfg.get("symbols") or [])
+        except Exception:
+            armed = False
+        acting = (managing or armed) and close
+        if acting and decision.get("bank"):
+            try:
+                host.runtime.manage_physical_trade(
+                    ticket=int(pos["ticket"]),
+                    action="CLOSE",
+                    reason="ZEUS BANK",
+                    include_physical_snapshot=False,
+                )
+            except Exception:
+                pass
+            else:
+                _announce_manage(symbol, saved["line"] or "Bank.", int(pos["ticket"]), entry)
+                saved["told"] = saved["line"]
+        else:
+            new_stop = decision.get("stop")
+            if acting and isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool):
+                if saved.get("sent") != float(new_stop):
+                    try:
+                        host.runtime.manage_physical_trade(
+                            ticket=int(pos["ticket"]),
+                            action="MODIFY_POSITION",
+                            stop_loss=float(new_stop),
+                            reason="ZEUS MANAGE",
+                            include_physical_snapshot=False,
+                        )
+                    except Exception:
+                        new_stop = None
+                    else:
+                        saved["sent"] = float(new_stop)
+                        pos["stop_loss"] = float(new_stop)
+                        _announce_manage(symbol, f"Stop moved to {round(float(new_stop), 5)}.", int(pos["ticket"]), entry)
+            nxt = decision.get("take_profit")
+            if acting and isinstance(nxt, (int, float)) and not isinstance(nxt, bool) and saved.get("tp") != float(nxt):
                 try:
                     host.runtime.manage_physical_trade(
                         ticket=int(pos["ticket"]),
                         action="MODIFY_POSITION",
-                        stop_loss=float(new_stop),
-                        reason="ZEUS MANAGE",
+                        take_profits=(float(nxt),),
+                        reason="ZEUS NEXT TARGET",
+                        include_physical_snapshot=False,
                     )
                 except Exception:
-                    new_stop = None
+                    nxt = None
                 else:
-                    saved["sent"] = float(new_stop)
-                    pos["stop_loss"] = float(new_stop)
-                    _announce_manage(symbol, f"Stop moved to {round(float(new_stop), 5)}.", int(pos["ticket"]), entry)
+                    saved["tp"] = float(nxt)
+                    _announce_manage(symbol, saved["line"], int(pos["ticket"]), entry)
+                    saved["told"] = saved["line"]
         warn = str(saved["line"] or "")
-        if warn and warn != saved["told"] and ((managing and close) or warn.startswith("The first target")):
-            _announce_manage(symbol, str(saved["line"]), int(pos["ticket"]), entry)
-            saved["told"] = saved["line"]
+        if warn and warn != saved["told"] and (acting or "is being traded" in warn or warn.startswith("90%")):
+            _announce_manage(symbol, warn, int(pos["ticket"]), entry)
+            saved["told"] = warn
         trades[key] = saved
-        if saved["line"] and (close or str(saved["line"]).startswith("The first target")):
+        if saved["line"] and close:
             pos["manage_line"] = saved["line"]
         if saved != previous:
             changed = True
@@ -1484,9 +1556,16 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         place_yen(book, bid, ask)
     else:
         place_value(book, symbol, bid, ask)
+    place_marks(book, symbol, bid, ask)
     levels = session_levels(bars_by_chart.get("M15") or bars_by_chart.get("M5") or [])
     pools = liquidity(levels, bars_by_chart)
     rows = build_rows(symbol, bars_by_chart, book, spread, levels, bid, ask)
+    for row in rows:
+        if not row.get("tradeable"):
+            continue
+        note = stack_line(symbol, str(row.get("side") or ""), book.get("stack") if isinstance(book.get("stack"), dict) else None)
+        if note:
+            row["note"] = (str(row.get("note") or "") + " " + note).strip()
     positions = _positions(host, symbol)
     _drop_left(symbol, rows, bid, ask, positions)
     _broker_protection(rows, positions)
@@ -1546,6 +1625,8 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
             "poc": book.get("poc"),
             "vah": book.get("vah"),
             "val": book.get("val"),
+            "unfinished_high": book.get("unfinished_high"),
+            "unfinished_low": book.get("unfinished_low"),
             "stepping": stepping,
             "note": str(book.get("reason") or ""),
         },
@@ -1799,39 +1880,12 @@ def _auto_pass(host: Any, cfg: dict[str, Any]) -> None:
     for row in positions:
         by_symbol.setdefault(str(row.get("symbol")), []).append(row)
     sent = cfg.setdefault("sent", {})
-    for symbol, rows in by_symbol.items():
-        remembered = sent.get(symbol) if isinstance(sent.get(symbol), dict) else {}
-        target = float(remembered.get("target") or 0)
-        if target <= 0:
-            continue
-        for row in rows:
-            if row.get("protected"):
-                continue
-            if str(row.get("side")) != str(remembered.get("side")):
-                continue
-            bid = 0.0
-            ask = 0.0
-            try:
-                quote = host.runtime.projection.market_data.quote(symbol)
-                bid = float(quote.bid)
-                ask = float(quote.ask)
-            except Exception:
-                continue
-            if not _auto_hit(str(row.get("side")), target, bid, ask):
-                continue
-            try:
-                host.runtime.manage_physical_trade(
-                    ticket=int(row.get("ticket") or 0),
-                    action="BREAK_EVEN",
-                    stop_loss=float(row.get("price_open") or 0),
-                    entry_price=float(row.get("price_open") or 0),
-                    reason="ZEUS AUTO FIRST TARGET",
-                    include_physical_snapshot=False,
-                )
-                row["protected"] = True
-                _auto_say(cfg, symbol + " at the first target. Stop moved to the entry.")
-            except Exception as exc:
-                _auto_say(cfg, symbol + " could not move the stop. " + str(exc))
+    for symbol in list(by_symbol):
+        try:
+            _payload(symbol, "M1", host, scan=True)
+        except Exception as exc:
+            _auto_say(cfg, symbol + " was not managed. " + str(exc))
+    positions = _auto_positions(host)
     open_risk = 0.0
     for row in positions:
         if row.get("protected"):
