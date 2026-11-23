@@ -1141,6 +1141,26 @@ def _read_raw(symbol: str) -> dict[str, Any] | None:
     return payload
 
 
+def _ladder_levels(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """The study writes bid and ask as ladder p/b/a. Older files used levels."""
+    rows = raw.get("ladder")
+    if not isinstance(rows, list) or not rows:
+        rows = raw.get("levels") or []
+    levels = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        price = item.get("price", item.get("p"))
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or float(price) <= 0:
+            continue
+        levels.append({
+            "price": float(price),
+            "bid_contracts": item.get("bid_contracts", item.get("b")),
+            "ask_contracts": item.get("ask_contracts", item.get("a")),
+        })
+    return levels
+
+
 def _book(symbol: str) -> dict[str, Any]:
     try:
         from gold_shadow.mbo_book import read_mbo
@@ -1157,7 +1177,7 @@ def _book(symbol: str) -> dict[str, Any]:
             "sweep_consumed": bool(raw.get("sweep_consumed")),
             "iceberg_refresh": bool(raw.get("iceberg_refresh")),
             "size_pulled": bool(raw.get("size_pulled")),
-            "levels": raw.get("levels") or [],
+            "levels": _ladder_levels(raw),
             "icebergs": raw.get("icebergs") or [],
             "futures_bid": raw.get("bid"),
             "futures_ask": raw.get("ask"),

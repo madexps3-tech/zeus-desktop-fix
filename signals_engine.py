@@ -509,6 +509,8 @@ def align_ladder(symbol: str, book: dict[str, Any] | None, bid: float, ask: floa
             })
         except (TypeError, ValueError):
             continue
+    mid = (bid + ask) / 2.0
+    moved_levels.sort(key=lambda level: abs(float(level["price"]) - mid))
     return {
         "shown": bool(moved_levels or moved_ice),
         "reason": "ALIGNED",
