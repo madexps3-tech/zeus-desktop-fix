@@ -1096,8 +1096,11 @@ def _chart_bars(host: Any, symbol: str, chart: str, scan: bool) -> dict[str, lis
             if not cached:
                 missing.append(name)
     if missing and not _ORDER_BUSY.is_set():
-        name = missing[0]
-        found[name] = _bars(host, symbol, name, 90.0, 80 if scan else 120)
+        for name in missing:
+            try:
+                found[name] = _bars(host, symbol, name, 90.0, 120)
+            except Exception:
+                found[name] = []
     return found
 
 
@@ -1818,6 +1821,18 @@ async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
     quick = _quick_view(symbol, chart) if view and not scan else None
     if quick is not None:
         return web.json_response(quick)
+    if view and not scan and isinstance(_VIEW.get(symbol), dict):
+        locked = _LOCK.acquire(timeout=2)
+        if locked:
+            try:
+                await asyncio.to_thread(_bars, host, symbol, chart, 25.0, 200)
+            except Exception:
+                pass
+            finally:
+                _LOCK.release()
+            quick = _quick_view(symbol, chart)
+            if quick is not None:
+                return web.json_response(quick)
     if _ORDER_BUSY.is_set():
         cached = _LAST.get(symbol + "|" + chart)
         if cached and cached.get("candles"):
