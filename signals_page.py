@@ -281,13 +281,15 @@ function draw(){
   paintQuote();
   if(!rows.length){ctx.fillStyle="#8ea3b8";ctx.fillText("No candles for "+symbol+" "+chart, 20, 40);return}
   let lo=Infinity, hi=-Infinity;
-  rows.forEach(b=>{lo=Math.min(lo,b.low);hi=Math.max(hi,b.high)});
+  const priceOf=v=>{const n=Number(v); return isFinite(n)&&n>0?n:null};
+  rows.forEach(b=>{const low=priceOf(b.low), high=priceOf(b.high); if(low!=null)lo=Math.min(lo,low); if(high!=null)hi=Math.max(hi,high)});
   const q=data.quote||{};
-  if(q.bid!=null){lo=Math.min(lo,Number(q.bid));hi=Math.max(hi,Number(q.bid))}
+  const bidPx=priceOf(q.bid);
+  if(bidPx!=null){lo=Math.min(lo,bidPx);hi=Math.max(hi,bidPx)}
   const span=Math.max(hi-lo, 0.00001);
   const row=(data.rows||[]).find(r=>r.chart===pickedRow&&r.entry!=null);
-  if(row&&Math.abs(row.entry-((lo+hi)/2))<span*1.2){
-    lo=Math.min(lo,row.stop,row.target,row.entry);hi=Math.max(hi,row.stop,row.target,row.entry)
+  if(row&&isFinite(lo)&&Math.abs(Number(row.entry)-((lo+hi)/2))<span*1.2){
+    [row.stop,row.target,row.entry].forEach(v=>{const n=priceOf(v); if(n!=null){lo=Math.min(lo,n);hi=Math.max(hi,n)}});
   }
   const levels=(data.pools)||[];
   const pad=(hi-lo)*0.08||span*0.08; lo-=pad; hi+=pad;
@@ -360,10 +362,11 @@ function draw(){
   ctx.restore();
   if(row){
     ctx.setLineDash([4,4]);
-    [["#67d6a3",row.entry,"ENTRY"],["#ef7f88",row.stop,"STOP"],["#e9c66b",row.target,"TARGET "+row.r+"R"]].forEach(line=>{
-      if(line[1]<lo||line[1]>hi)return;
-      ctx.strokeStyle=line[0]; ctx.beginPath(); ctx.moveTo(plotL,y(line[1])); ctx.lineTo(plotR,y(line[1])); ctx.stroke();
-      ctx.fillStyle=line[0]; ctx.fillText(line[2]+" "+line[1], plotR-170, y(line[1])-4);
+    [["#67d6a3",row.entry,"ENTRY"],["#ef7f88",row.stop,"STOP"],["#e9c66b",row.target,row.r==null?"TARGET":"TARGET "+row.r+"R"]].forEach(line=>{
+      const price=priceOf(line[1]);
+      if(price==null||price<lo||price>hi)return;
+      ctx.strokeStyle=line[0]; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+      ctx.fillStyle=line[0]; ctx.fillText(line[2]+" "+price, plotR-170, y(price)-4);
     });
     ctx.setLineDash([]);
   }
