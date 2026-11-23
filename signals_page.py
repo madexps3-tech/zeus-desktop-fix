@@ -574,7 +574,7 @@ function paint(){
   const rows=data.rows||[];
   $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
-      const tone=r.push?"warn":(r.side==="BUY"?"good":"bad");
+      const tone=r.push&&!r.tradeable?"warn":(r.side==="BUY"?"good":"bad");
       const side=r.side?`<span class="${tone}">${r.side}</span>`:"—";
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
       const harvest=moneyLine(r);
@@ -1866,7 +1866,7 @@ def _auto_hit(side: str, target: float, bid: float, ask: float) -> bool:
 
 def _auto_choose(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     for row in rows:
-        if not row.get("tradeable") or str(row.get("reason") or "") in {"POTENTIAL", "PUSH"}:
+        if not row.get("tradeable") or str(row.get("reason") or "") == "POTENTIAL":
             continue
         if str(row.get("reason") or "") == "POTENTIAL":
             continue
@@ -2041,7 +2041,7 @@ td{padding:6px;border-top:1px solid #1a2c3c}
   <section>
     <div class="card">
       <button id="armbtn" onclick="arm()">AUTO OFF</button>
-      <p class="muted">Off does nothing. On sends a confirmed row for a ticked symbol. A line that only says a trade is coming is not sent. A yellow push is not sent. CLOSE on the signals page still closes it.</p>
+      <p class="muted">Off does nothing. On sends a confirmed row for a ticked symbol, including a push whose next swing is at least 2R. A yellow push under 2R is not sent. CLOSE on the signals page still closes it.</p>
       <label>BROKER ON METATRADER</label>
       <select id="broker" onchange="useBroker(this.value)"><option value="">The account that is logged in</option></select>
       <div class="muted" id="brokerline"></div>

@@ -12,7 +12,7 @@ CHARTS = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 ROWS = ("ICEBERG", "INTRADAY", "INTERDAY", "SCALP", "SWING")
 MIN_R = 0.5
 TRADE_R = 0.5
-MANUAL = {"PULLBACK", "BREAK", "RANGE", "SWING", "ICEBERG", "CHOCH", "SCALP"}
+MANUAL = {"PULLBACK", "BREAK", "RANGE", "SWING", "ICEBERG", "CHOCH", "SCALP", "PUSH"}
 # One price step. Five of these is close enough to bank the first target.
 PIP = {
     "XAUUSD": 0.1,
@@ -1421,8 +1421,6 @@ def _push(
     if not found:
         return None
     side, zone = min(found, key=lambda item: abs(float(item[1]["price"]) - close))
-    if _both_against(side, book):
-        return None
     entry = close
     stop = _num(last, "low") if side == "BUY" else _num(last, "high")
     if side == "BUY" and stop >= entry:
@@ -1436,44 +1434,74 @@ def _push(
         return None
     if symbol == "XAUUSD" and risk + 1e-9 < GOLD_MIN_STOP:
         return None
-    targets = _targets_ahead(side, entry, stop, zones)
-    if not targets or abs(float(targets[0]) - entry) <= risk:
+    ahead: list[float] = []
+    for level in zones:
+        level_price = float(level["price"])
+        if side == "BUY" and level_price > entry:
+            ahead.append(level_price)
+        elif side == "SELL" and level_price < entry:
+            ahead.append(level_price)
+    if not ahead:
         return None
-    multiples = [round(abs(float(price) - entry) / risk, 2) for price in targets]
-    listed = " · ".join(
-        f"TP{index} {round(float(price), 5)} {multiple}R"
-        for index, (price, multiple) in enumerate(zip(targets, multiples), 1)
-    )
-    longer = (book or {}).get("delta_60s")
-    quiet = isinstance(longer, (int, float)) and not isinstance(longer, bool) and abs(float(longer)) < 10
-    extra = ""
+    nearest = min(ahead) if side == "BUY" else max(ahead)
+    multiple = round(abs(nearest - entry) / risk, 2)
+    if multiple < 2:
+        if _both_against(side, book):
+            return None
+        listed = f"TP1 {round(nearest, 5)} {multiple}R"
+        longer = (book or {}).get("delta_60s")
+        quiet = isinstance(longer, (int, float)) and not isinstance(longer, bool) and abs(float(longer)) < 10
+        extra = " The book is quiet." if quiet else ""
+        if spread and float(spread) > risk / 3.0:
+            extra += " The spread is a large part of the stop."
+        return {
+            "chart": "INTRADAY",
+            "side": side,
+            "reason": "PUSH",
+            "r": multiple,
+            "decision": "HIGH RISK",
+            "note": (
+                f"HIGH RISK. The 1-minute candle closed back out of {round(float(zone['price']), 5)}. "
+                f"The stop is the wick. The next swing is under 2R. Not an order.{extra} {listed}."
+            ).strip(),
+            "state": "HIGH RISK",
+            "trend": "",
+            "tradeable": False,
+            "entry": round(entry, 5),
+            "stop": round(stop, 5),
+            "risk_stop": round(stop, 5),
+            "target": round(nearest, 5),
+            "targets": [round(nearest, 5)],
+            "time": _time(last),
+            "zone": round(float(zone["price"]), 5),
+            "harvest": listed,
+            "push": True,
+            "score_on": "M1",
+        }
+    spread_note = ""
     if spread and float(spread) > risk / 3.0:
-        extra += " The spread is a large part of the stop."
-    if quiet:
-        extra += " The book is quiet."
-    note = (
-        f"HIGH RISK. The 1-minute candle closed back out of {round(float(zone['price']), 5)}. "
-        f"The stop is the wick, not 10 times the spread. Not an order.{extra} {listed}."
-    )
+        spread_note = " The spread is a large part of the stop."
     return {
         "chart": "INTRADAY",
         "side": side,
         "reason": "PUSH",
-        "r": multiples[0],
-        "decision": "HIGH RISK",
-        "note": note.strip(),
-        "state": "HIGH RISK",
+        "r": multiple,
+        "decision": "PUSH",
+        "note": (
+            f"The 1-minute candle closed back out of {round(float(zone['price']), 5)}. "
+            f"The stop is the wick. The target is the next swing.{spread_note}"
+        ).strip(),
+        "state": "READY",
         "trend": "",
-        "tradeable": False,
+        "tradeable": True,
         "entry": round(entry, 5),
         "stop": round(stop, 5),
         "risk_stop": round(stop, 5),
-        "target": round(float(targets[0]), 5),
-        "targets": [round(float(price), 5) for price in targets],
+        "target": round(nearest, 5),
+        "targets": [round(nearest, 5)],
         "time": _time(last),
         "zone": round(float(zone["price"]), 5),
-        "harvest": listed,
-        "push": True,
+        "harvest": f"TP1 {round(nearest, 5)} {multiple}R",
         "score_on": "M1",
     }
 
@@ -1964,8 +1992,10 @@ def build_rows(
     _retain(symbol, rows, bars_by_chart)
     by_name = {row["chart"]: row for row in rows}
     intra = by_name.get("INTRADAY") or {}
-    if intra.get("side"):
+    if intra.get("side") and str(intra.get("reason") or "") != "PUSH":
         _use_value_target(intra, area)
+        _guide(intra, book, closed, symbol, bid, ask)
+    elif intra.get("side"):
         _guide(intra, book, closed, symbol, bid, ask)
     swing_row = by_name.get("SWING") or {}
     if swing_row.get("side"):
@@ -2059,6 +2089,8 @@ def build_rows(
                     push["market"] = state
                     row.clear()
                     row.update(push)
+                    if row.get("tradeable"):
+                        _guide(row, book, closed, symbol, bid, ask)
             row["coming"] = _coming(live, intraday_zones, area, symbol, spread, beyond)
         elif row["chart"] == "SWING":
             row["coming"] = _coming(live, swing_zones, area, symbol, spread, wider)
