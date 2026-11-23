@@ -2420,37 +2420,12 @@ async def signals_ticket(host: Any, request: web.Request) -> web.Response:
     partial = body.get("partial_pct")
     stop = body.get("stop_loss")
     targets = tuple(body.get("take_profits") or ())
-    entry = body.get("entry_price")
-    fast = bool(body.get("fast_ack"))
 
     def run() -> dict[str, Any]:
-        return host.runtime.manage_physical_trade(
-            ticket=ticket,
-            pending=bool(body.get("pending")),
-            action=action,
-            partial_pct=None if partial in {None, ""} else float(partial),
-            stop_loss=None if stop in {None, ""} else float(stop),
-            take_profits=tuple(float(price) for price in targets),
-            entry_price=None if entry in {None, ""} else float(entry),
-            reason=str(body.get("reason") or "SIGNALS PAGE"),
-            include_physical_snapshot=not fast,
-        )
+        return _ticket_by_volume(host, ticket, action, partial, stop, targets)
 
     try:
         payload = await asyncio.to_thread(run)
-    except NameError as exc:
-        if "risk_pct" not in str(exc):
-            return web.json_response(
-                {"ok": False, "message": f"NameError: {exc}", "management": {"ok": False, "reason": str(exc)}},
-                status=400,
-            )
-        try:
-            payload = await asyncio.to_thread(_ticket_by_volume, host, ticket, action, partial, stop, targets)
-        except Exception as fallback:
-            return web.json_response(
-                {"ok": False, "message": f"{type(fallback).__name__}: {fallback}", "management": {"ok": False, "reason": str(fallback)}},
-                status=400,
-            )
     except Exception as exc:
         return web.json_response(
             {"ok": False, "message": f"{type(exc).__name__}: {exc}", "management": {"ok": False, "reason": str(exc)}},
