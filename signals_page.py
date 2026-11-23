@@ -264,7 +264,7 @@ function draw(){
   const cv=$("cv"), width=Math.max(700,(cv.parentElement.clientWidth||1100)-8);
   cv.width=width; cv.height=520;
   const ctx=cv.getContext("2d"), rows=windowRows();
-  const plotL=56, plotR=width-78, plotT=48, plotB=490;
+  const plotL=56, plotR=width-78, plotT=78, plotB=490;
   ctx.clearRect(0,0,cv.width,cv.height);
   ctx.fillStyle="#050b11"; ctx.fillRect(0,0,cv.width,cv.height);
   ctx.font="12px Consolas,monospace";
@@ -394,6 +394,16 @@ function draw(){
   }
   ctx.fillStyle="#e9c66b";
   ctx.fillText((market||"")+"   "+(picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+(feed.candles_stale?"   CANDLES OLD":""), 12, 36);
+  ctx.fillStyle="#8ea3b8";
+  ctx.fillText(marketClocks(new Date()), 12, 52);
+  const news=data.news||{};
+  const left=Number(news.seconds);
+  if((news.impact==="HIGH"||news.impact==="HOLIDAY"||news.holiday)&&isFinite(left)&&left>=0&&left<=7200){
+    const mins=Math.max(0, Math.round(left/60));
+    const holiday=news.holiday?("HOLIDAY "+news.holiday+"   "):"";
+    ctx.fillStyle="#ef7f88";
+    ctx.fillText(holiday+(news.name||"NEWS")+" "+(news.impact||"")+" in "+mins+"m", 12, 64);
+  }
   if(cursor && cursor.x>=plotL && cursor.x<=plotR && cursor.y>=plotT && cursor.y<=plotB){
     const price=hi-((cursor.y-plotT)/(plotB-plotT))*(hi-lo);
     const index=Math.max(0, Math.min(rows.length-1, Math.floor((cursor.x-plotL)/step)));
@@ -473,6 +483,46 @@ function remember(key){
   if(keys.length>200) delete bag[keys[0]];
   sessionStorage.setItem("sig_seen_alerts", JSON.stringify(bag));
 }
+function zoneParts(date, timeZone){
+  const parts=new Intl.DateTimeFormat("en-US",{timeZone:timeZone,hourCycle:"h23",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",weekday:"short"}).formatToParts(date);
+  const out={};
+  parts.forEach(part=>{if(part.type!=="literal") out[part.type]=part.value});
+  return out;
+}
+function atLocal(timeZone, hour, minute, base){
+  let guess=new Date(base.getTime());
+  for(let i=0;i<3;i++){
+    const parts=zoneParts(guess, timeZone);
+    const desired=Date.UTC(+parts.year, +parts.month-1, +parts.day, hour, minute);
+    const actual=Date.UTC(+parts.year, +parts.month-1, +parts.day, +parts.hour, +parts.minute);
+    const next=new Date(guess.getTime()+(desired-actual));
+    if(next.getTime()===guess.getTime()) return next;
+    guess=next;
+  }
+  return guess;
+}
+function nzClock(date){
+  const parts=zoneParts(date, "Pacific/Auckland");
+  return parts.weekday+" "+parts.hour+":"+parts.minute;
+}
+function marketClocks(now){
+  const sessions=[
+    ["ASIA","Asia/Tokyo",9,0,18,0],
+    ["NEW YORK","America/New_York",8,0,17,0],
+    ["USA","America/New_York",9,30,16,0]
+  ];
+  return sessions.map(row=>{
+    let open=atLocal(row[1], row[2], row[3], now);
+    let close=atLocal(row[1], row[4], row[5], now);
+    if(now>=close){
+      const next=new Date(now.getTime()+24*60*60*1000);
+      open=atLocal(row[1], row[2], row[3], next);
+      close=atLocal(row[1], row[4], row[5], next);
+    }
+    const state=now>=open&&now<close?"OPEN":"CLOSED";
+    return row[0]+" "+nzClock(open)+"-"+nzClock(close)+" NZ "+state;
+  }).join("   ");
+}
 function localStamp(){
   const d=new Date();
   const p=n=>String(n).padStart(2,"0");
@@ -534,6 +584,16 @@ function consider(payload){
   if(!payload||!payload.ok) return;
   const name=payload.label||payload.symbol;
   const bag=seenBag();
+  const news=payload.news||{};
+  if(news.warn){
+    const key="N|"+(news.holiday||news.name)+"|"+news.impact;
+    if(!bag[key]){
+      remember(key);
+      const mins=Math.max(0, Math.round(Number(news.seconds||0)/60));
+      const what=news.holiday?("Bank holiday "+news.holiday+". "):"";
+      speak(what+(news.name||"News")+" "+(news.impact||"")+" in "+mins+" minutes.");
+    }
+  }
   (payload.rows||[]).forEach(row=>{
     const coming=row.coming;
     if(coming&&coming.side){
@@ -1439,19 +1499,34 @@ def _news(symbol: str) -> dict[str, Any]:
     minutes = int(abs(seconds) // 60)
     clock = f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
     when = "ago" if seconds < 0 else "in"
+    impact = str(nxt.get("impact") or "UNKNOWN").upper()
+    name = str(nxt.get("name") or "event")
     today = []
     for row in upcoming:
         if float(row.get("seconds_from_now") or 0) > 24 * 3600:
             break
         today.append(str(row.get("name") or "event") + " " + str(row.get("impact") or "UNKNOWN"))
-    line = f"NEXT {nxt.get('name') or 'event'} {nxt.get('impact') or 'UNKNOWN'} {when} {clock}"
+    line = f"NEXT {name} {impact} {when} {clock}"
+    holiday_name = str(holiday.get("name") or "HOLIDAY") if holiday else ""
     if holiday:
-        line = "CLOSED · " + str(holiday.get("name") or "HOLIDAY") + " · " + line
+        line = "CLOSED · " + holiday_name + " · " + line
     if today:
         line += " · TODAY " + " · ".join(today[:4])
     if snap.get("state") not in {"LIVE_SCHEDULE", "CACHED_SCHEDULE"}:
         line = "NO CALENDAR · " + line
-    return {"line": line, "state": snap.get("state")}
+    holiday_seconds = float(holiday.get("seconds_from_now") or 0) if holiday else None
+    warn = (impact in {"HIGH", "HOLIDAY"} and 0 <= seconds <= 30 * 60) or (
+        holiday_seconds is not None and 0 <= holiday_seconds <= 30 * 60
+    )
+    return {
+        "line": line,
+        "state": snap.get("state"),
+        "name": name,
+        "impact": impact,
+        "seconds": seconds,
+        "holiday": holiday_name,
+        "warn": warn,
+    }
 
 
 def _account(host: Any) -> dict[str, Any]:

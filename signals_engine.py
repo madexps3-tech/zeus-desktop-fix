@@ -1445,6 +1445,7 @@ def _push(
         return None
     nearest = min(ahead) if side == "BUY" else max(ahead)
     multiple = round(abs(nearest - entry) / risk, 2)
+    ordered = sorted(set(round(price, 5) for price in ahead), reverse=(side == "SELL"))
     if multiple < 2:
         if _both_against(side, book):
             return None
@@ -1498,7 +1499,7 @@ def _push(
         "stop": round(stop, 5),
         "risk_stop": round(stop, 5),
         "target": round(nearest, 5),
-        "targets": [round(nearest, 5)],
+        "targets": [round(price, 5) for price in ordered[:4]],
         "time": _time(last),
         "zone": round(float(zone["price"]), 5),
         "harvest": f"TP1 {round(nearest, 5)} {multiple}R",
