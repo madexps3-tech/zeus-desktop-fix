@@ -1129,15 +1129,15 @@ def _apply(token: str, chat: str, ticket: int, action: str, **kwargs: Any) -> No
         _send(token, chat, "Not sent. Zeus is not ready.")
         return
     try:
+        from zeus3.v19.signals_page import _ticket_by_volume
         with _charts_aside():
-            result = host.runtime.manage_physical_trade(
-                ticket=ticket,
-                action=action,
-                partial_pct=kwargs.get("partial_pct"),
-                stop_loss=kwargs.get("stop_loss"),
-                take_profits=tuple(kwargs.get("take_profits") or ()),
-                reason="TELEGRAM",
-                include_physical_snapshot=False,
+            result = _ticket_by_volume(
+                host,
+                ticket,
+                action,
+                kwargs.get("partial_pct"),
+                kwargs.get("stop_loss"),
+                kwargs.get("take_profits"),
             )
     except Exception as exc:
         _send(token, chat, f"Not changed. {exc}")

@@ -693,8 +693,8 @@ function isProtected(position){
   return position.side==="SELL"?sl<=entry:sl>=entry;
 }
 async function postManage(body){
-  let r=await fetch("/api/v19/signals/ticket",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
-  if(r.status===404) r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  const r=await fetch("/api/v19/signals/ticket",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  if(r.status===404) throw Error("Zeus is still on the old close. Close Zeus, then run the desktop file.");
   return r;
 }
 async function closeTicket(ticket){
@@ -771,9 +771,8 @@ async function manage(ticket, action, entry, pct){
     const ok=r.ok&&j.ok!==false&&(j.management||{}).ok;
     const text=(ok?"BROKER OK":"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
     setStatus(text, 20000);
-    alert(text);
     load();
-  }catch(e){const text="MANAGE ERROR · "+e.message; setStatus(text, 20000); alert(text)}
+  }catch(e){const text="MANAGE ERROR · "+e.message; setStatus(text, 20000)}
   finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
 async function editStop(ticket){
@@ -788,9 +787,9 @@ async function editStop(ticket){
     const ms=Math.round(j.management_server_ms||(performance.now()-started));
     const text=((r.ok&&j.ok!==false&&(j.management||{}).ok)?"STOP SENT":"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
     setStatus(text, 20000);
-    alert(text);
     load();
-  }finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
+  }catch(e){setStatus("MANAGE ERROR · "+e.message, 20000)}
+  finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
 async function editR(ticket, entry, stop, side){
   const multiple=Number(prompt("Target in R, for example 2"));
@@ -806,9 +805,9 @@ async function editR(ticket, entry, stop, side){
     const ms=Math.round(j.management_server_ms||(performance.now()-started));
     const text=((r.ok&&j.ok!==false&&(j.management||{}).ok)?"TARGET SENT "+price:"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
     setStatus(text, 20000);
-    alert(text);
     load();
-  }finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
+  }catch(e){setStatus("MANAGE ERROR · "+e.message, 20000)}
+  finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
 const cv=$("cv");
 cv.addEventListener("wheel",e=>{e.preventDefault();zoom(e.deltaY>0?15:-15)},{passive:false});
@@ -1424,12 +1423,7 @@ def _run_manage(
         acting = (managing or armed) and close
         if acting and decision.get("bank"):
             try:
-                host.runtime.manage_physical_trade(
-                    ticket=int(pos["ticket"]),
-                    action="CLOSE",
-                    reason="ZEUS BANK",
-                    include_physical_snapshot=False,
-                )
+                _ticket_by_volume(host, int(pos["ticket"]), "CLOSE", None, None, ())
             except Exception:
                 pass
             else:
@@ -1439,13 +1433,7 @@ def _run_manage(
             new_stop = decision.get("stop")
             if acting and isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool) and saved.get("sent") != float(new_stop):
                 try:
-                    host.runtime.manage_physical_trade(
-                        ticket=int(pos["ticket"]),
-                        action="MODIFY_POSITION",
-                        stop_loss=float(new_stop),
-                        reason="ZEUS MANAGE",
-                        include_physical_snapshot=False,
-                    )
+                    _ticket_by_volume(host, int(pos["ticket"]), "MODIFY_POSITION", None, float(new_stop), ())
                 except Exception:
                     new_stop = None
                 else:
@@ -1455,13 +1443,7 @@ def _run_manage(
             nxt = decision.get("take_profit")
             if acting and isinstance(nxt, (int, float)) and not isinstance(nxt, bool) and saved.get("tp") != float(nxt):
                 try:
-                    host.runtime.manage_physical_trade(
-                        ticket=int(pos["ticket"]),
-                        action="MODIFY_POSITION",
-                        take_profits=(float(nxt),),
-                        reason="ZEUS NEXT TARGET",
-                        include_physical_snapshot=False,
-                    )
+                    _ticket_by_volume(host, int(pos["ticket"]), "MODIFY_POSITION", None, None, (float(nxt),))
                 except Exception:
                     nxt = None
                 else:
