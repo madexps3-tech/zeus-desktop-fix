@@ -876,12 +876,20 @@ def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None, symbol
     target = row.get("target")
     if target is None and targets:
         target = targets[0]
+    push = str(row.get("reason") or "") == "PUSH" and len(targets) > 1
+    last = targets[-1] if push else target
     if row["side"] == "SELL":
         dead = ask is not None and stop <= float(ask)
-        passed = bid is not None and target is not None and float(bid) <= float(target) + _band(symbol)
+        passed = bid is not None and last is not None and float(bid) <= float(last) + _band(symbol)
+        begun = push and bid is not None and float(bid) <= float(targets[0]) + _band(symbol)
     else:
         dead = bid is not None and stop >= float(bid)
-        passed = ask is not None and target is not None and float(ask) >= float(target) - _band(symbol)
+        passed = ask is not None and last is not None and float(ask) >= float(last) - _band(symbol)
+        begun = push and ask is not None and float(ask) >= float(targets[0]) - _band(symbol)
+    if begun and not dead and not passed:
+        row["tradeable"] = False
+        row["state"] = "SHOWN"
+        return
     if not (dead or passed):
         return
     chart = str(row.get("chart") or "")
@@ -889,6 +897,8 @@ def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None, symbol
     note = (
         "Price is already through this stop. Not a trade."
         if dead
+        else "The last target is already reached. Not a new order."
+        if push
         else "The first target is already reached. Not a new order."
     )
     row.clear()
@@ -2749,7 +2759,10 @@ def _score_path(row: dict[str, Any], bars: list[dict[str, Any]], be_move: float,
     entry = float(row["entry"])
     stop = float(row["stop"])
     targets = [float(price) for price in (row.get("targets") or []) if price is not None]
-    target = targets[0] if targets else float(row["target"])
+    if str(row.get("reason") or "") == "PUSH" and len(targets) > 1:
+        target = targets[-1]
+    else:
+        target = targets[0] if targets else float(row["target"])
     buy = row["side"] == "BUY"
     pad = _band(symbol)
     near = (target - pad) if buy else (target + pad)
