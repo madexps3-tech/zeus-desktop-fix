@@ -1297,9 +1297,22 @@ def _guide(
         line = f"Hold the rest for {round(remaining[0], 5)}."
     else:
         line = f"Hold for {round(aim, 5)}."
+    previous = str(row.get("guide") or "")
     row["guide"] = line
     sentence = str(row.get("note") or "").strip()
-    row["note"] = (sentence + " " + line).strip()
+    if previous and sentence.endswith(previous):
+        sentence = sentence[: -len(previous)].rstrip()
+    if line and not sentence.endswith(line):
+        sentence = (sentence + " " + line).strip()
+    row["note"] = sentence
+    if remaining and not both_against and not absorption:
+        row["target"] = round(float(remaining[0]), 5)
+    elif passed:
+        row["target"] = round(float(passed[-1]), 5)
+    if row.get("target") is not None and row.get("stop") is not None:
+        multiple = _r_multiple(entry, float(row["stop"]), float(row["target"]))
+        if multiple is not None:
+            row["r"] = multiple
     return line
 
 
@@ -1482,7 +1495,7 @@ def _push(
             "stop": round(stop, 5),
             "risk_stop": round(stop, 5),
             "target": round(nearest, 5),
-            "targets": [round(nearest, 5)],
+            "targets": [round(price, 5) for price in ordered[:4]],
             "time": _time(last),
             "zone": round(float(zone["price"]), 5),
             "harvest": listed,
@@ -1818,8 +1831,6 @@ def _failed_test(
         "stopped": stopped, "reached_value": reached_value, "reached_poc": reached_poc,
         "reached_far": reached_far, "flow": _flow_snap(book), "flow_at_signal": at_signal,
     })
-    if not show:
-        return _wait("RESPONSIVE", "TESTING. The close back is no longer the latest candle. Not a trade.", "")
     levels = " ".join(f"T{index} {round(price, 5)} {ratio:.2f}R" for index, (price, ratio) in enumerate(zip(targets, ratios), 1))
     row = {
         "chart": "RESPONSIVE", "side": side, "reason": "RESPONSIVE", "r": ratios[0],
@@ -1834,8 +1845,22 @@ def _failed_test(
         f"The {source} candle closed back at {round(entry, 5)}. Stop {round(stop, 5)}. {levels}. {guide}"
     ).strip()
     live_px = bid if side == "BUY" else ask
-    if isinstance(live_px, (int, float)) and not isinstance(live_px, bool) and abs(float(live_px) - entry) > _band(symbol):
-        return _wait("RESPONSIVE", "Price has left that entry. Not a trade.", "")
+    first = float(targets[0])
+    printed = (
+        side == "BUY" and isinstance(ask, (int, float)) and not isinstance(ask, bool) and float(ask) >= first
+    ) or (
+        side == "SELL" and isinstance(bid, (int, float)) and not isinstance(bid, bool) and float(bid) <= first
+    )
+    if printed:
+        return _wait("RESPONSIVE", "The first target is already reached. Not a new order.", "")
+    room = late_room(entry, stop, spread)
+    left = isinstance(live_px, (int, float)) and not isinstance(live_px, bool) and abs(float(live_px) - entry) > room
+    if (not show) or left:
+        row["tradeable"] = False
+        row["state"] = "LATE"
+        row["late"] = True
+        row["note"] = "Entry is late. Not an order."
+        return row
     return row
 
 
@@ -2120,6 +2145,9 @@ def build_rows(
         _live_stop(responsive, bid, ask, symbol)
         _limits(responsive, symbol, spread)
     rows.append(responsive)
+    for row in rows:
+        if row.get("side") and row.get("entry") is not None and row.get("stop") is not None:
+            _guide(row, book, closed, symbol, bid, ask)
     return rows
 
 
@@ -2197,19 +2225,6 @@ def _hold_full(side: str, book: dict[str, Any] | None) -> bool:
     if side == "BUY":
         return short > 0 and longer > 0
     return short < 0 and longer < 0
-
-
-def _both_against(side: str, book: dict[str, Any] | None) -> bool:
-    book = book or {}
-    short = book.get("delta_5s")
-    longer = book.get("delta_60s")
-    if isinstance(short, bool) or isinstance(longer, bool):
-        return False
-    if not isinstance(short, (int, float)) or not isinstance(longer, (int, float)):
-        return False
-    if side == "BUY":
-        return short < 0 and longer < 0
-    return short > 0 and longer > 0
 
 
 def range_dip(bars: list[dict[str, Any]] | None) -> float | None:
@@ -2467,6 +2482,16 @@ def manage_decision(
 def _band(symbol: str, pips: float = 5.0) -> float:
     """Five pips is close enough to bank. The step is the pair's own pip."""
     return float(PIP.get(symbol, 0.0)) * pips
+
+
+def late_room(entry: float, stop: float, spread: float) -> float:
+    """A quarter of this trade's stop. Never smaller than the spread."""
+    risk = abs(float(entry) - float(stop))
+    room = risk * 0.25
+    floor = abs(float(spread or 0.0))
+    if room < floor:
+        room = floor
+    return room
 
 
 def _price_field(book: dict[str, Any] | None, name: str) -> float | None:
@@ -2938,3 +2963,241 @@ def mark_taken(row: dict[str, Any]) -> dict[str, Any]:
     _append({"event": "TAKEN", "symbol": symbol, "at": now, "chart": row.get("chart"), "side": row.get("side"), "reason": row.get("reason")})
     _save_state(state)
     return {"taken": state.get("taken") or {}, "if_taken": state.get("if_taken") or {}}
+
+
+_HELD_SIGNALS: dict[str, dict[str, dict[str, Any]]] = {}
+_HELD_KEYS = (
+    "chart", "side", "reason", "r", "entry", "stop", "risk_stop", "target", "targets",
+    "time", "zone", "harvest", "market", "score_on",
+)
+
+
+def _signal_snap(row: dict[str, Any]) -> dict[str, Any]:
+    snap = {key: row.get(key) for key in _HELD_KEYS if key in row}
+    targets = snap.get("targets")
+    if isinstance(targets, list):
+        snap["targets"] = [float(price) for price in targets if price is not None]
+    return snap
+
+
+def _first_printed(side: str, price: float, bid: float | None, ask: float | None) -> bool:
+    if side == "BUY":
+        return isinstance(ask, (int, float)) and not isinstance(ask, bool) and float(ask) >= float(price)
+    return isinstance(bid, (int, float)) and not isinstance(bid, bool) and float(bid) <= float(price)
+
+
+def _alive_signal(row: dict[str, Any]) -> bool:
+    if str(row.get("reason") or "") == "OPEN":
+        return False
+    if str(row.get("reason") or "") == "PUSH" and not row.get("tradeable"):
+        return False
+    if not row.get("side") or row.get("entry") is None or row.get("stop") is None:
+        return False
+    return bool(row.get("tradeable") or row.get("late") or str(row.get("state") or "") == "LATE")
+
+
+def settle_rows(
+    symbol: str,
+    rows: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+    bid: float | None,
+    ask: float | None,
+    spread: float,
+    book: dict[str, Any] | None,
+    latest_time: str = "",
+    memory: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Keep a late entry on the row, and keep an open ticket on its fill."""
+    charts = ("ICEBERG", "INTRADAY", "INTERDAY", "SCALP", "SWING", "RESPONSIVE")
+    by_name = {str(row.get("chart")): row for row in rows}
+    remembered = memory if memory is not None else _HELD_SIGNALS.setdefault(symbol, {})
+    for chart in charts:
+        row = by_name.get(chart)
+        if row is not None and _alive_signal(row):
+            remembered[chart] = _signal_snap(row)
+    tickets = [row for row in positions if str(row.get("side") or "") in {"BUY", "SELL"}]
+    claimed: set[int] = set()
+
+    def closest(side: str, entry: float) -> dict[str, Any] | None:
+        found = None
+        gap = None
+        for ticket in tickets:
+            if str(ticket.get("side")) != side or id(ticket) in claimed:
+                continue
+            try:
+                fill = float(ticket.get("price_open"))
+            except (TypeError, ValueError):
+                continue
+            distance = abs(fill - entry)
+            if gap is None or distance < gap:
+                gap = distance
+                found = ticket
+        return found
+
+    for chart in charts:
+        snap = remembered.get(chart)
+        row = by_name.get(chart)
+        if not snap or row is None or snap.get("entry") is None or not snap.get("side"):
+            continue
+        side = str(snap["side"])
+        entry = float(snap["entry"])
+        stop = float(snap.get("risk_stop") or snap.get("stop") or entry)
+        targets = [float(price) for price in (snap.get("targets") or []) if price is not None]
+        if not targets and snap.get("target") is not None:
+            targets = [float(snap["target"])]
+        printed = bool(targets) and _first_printed(side, targets[0], bid, ask)
+        ticket = closest(side, entry)
+        try:
+            fill = float(ticket.get("price_open")) if ticket is not None else entry
+        except (TypeError, ValueError):
+            fill = entry
+        near = ticket is not None and abs(fill - entry) <= max(
+            late_room(entry, stop, spread) * 4.0,
+            abs(entry) * 0.002,
+            abs(float(spread or 0.0)),
+        )
+        current = row if _alive_signal(row) or (row.get("tradeable") and row.get("side") == side) else None
+        same = (
+            current is not None
+            and str(current.get("side")) == side
+            and current.get("entry") is not None
+            and abs(float(current["entry"]) - entry) <= max(abs(spread), 1e-9)
+        )
+        if near and (same or current is None or not row.get("tradeable")):
+            claimed.add(id(ticket))
+            _write_open(row, snap, ticket, tickets, book, bid, ask, symbol)
+            continue
+        if printed:
+            remembered.pop(chart, None)
+            if same:
+                row.clear()
+                row.update(_wait(chart, "The first target is already reached. Not a new order.", str(row.get("market") or "")))
+            continue
+        if row.get("tradeable") and row.get("side") == side and row.get("entry") is not None:
+            live_entry = float(row["entry"])
+            live_stop = float(row.get("risk_stop") or row.get("stop") or live_entry)
+            live = bid if side == "BUY" else ask
+            room = late_room(live_entry, live_stop, spread)
+            stale = bool(latest_time) and str(row.get("time") or "") not in {"", latest_time}
+            away = isinstance(live, (int, float)) and not isinstance(live, bool) and abs(float(live) - live_entry) > room
+            if not stale and not away:
+                continue
+            _mark_late(row)
+            remembered[chart] = _signal_snap(row)
+            continue
+        if row.get("tradeable"):
+            continue
+        _mark_late_from(row, snap)
+
+    for ticket in tickets:
+        if id(ticket) in claimed:
+            continue
+        home = None
+        for chart in ("INTRADAY", "INTERDAY", "RESPONSIVE", "SWING", "SCALP", "ICEBERG"):
+            row = by_name.get(chart)
+            if row is None or row.get("tradeable") or str(row.get("state") or "") in {"LATE", "OPEN"}:
+                continue
+            home = row
+            break
+        if home is None:
+            continue
+        claimed.add(id(ticket))
+        _write_open(home, {"side": ticket.get("side"), "targets": [], "stop": ticket.get("stop_loss"), "risk_stop": ticket.get("stop_loss")}, ticket, tickets, book, bid, ask, symbol)
+
+    intra = by_name.get("INTRADAY")
+    inter = by_name.get("INTERDAY")
+    if intra and inter and str(intra.get("state") or "") in {"LATE", "OPEN"} and intra.get("side"):
+        if str(inter.get("state") or "") not in {"OPEN", "LATE"}:
+            inter["side"] = intra.get("side")
+            inter["entry"] = intra.get("entry")
+            inter["stop"] = intra.get("stop")
+            inter["target"] = intra.get("target")
+            inter["targets"] = list(intra.get("targets") or [])
+            inter["tradeable"] = False
+            inter["state"] = "SHOWN"
+            inter["note"] = "Not a new order. " + str(intra.get("note") or "")
+
+
+def _mark_late(row: dict[str, Any]) -> None:
+    row["tradeable"] = False
+    row["state"] = "LATE"
+    row["late"] = True
+    row["note"] = "Entry is late. Not an order."
+    row.pop("guide", None)
+
+
+def _mark_late_from(row: dict[str, Any], snap: dict[str, Any]) -> None:
+    chart = str(row.get("chart") or snap.get("chart") or "")
+    market = str(row.get("market") or snap.get("market") or "")
+    row.clear()
+    row.update(snap)
+    row["chart"] = chart
+    row["market"] = market
+    _mark_late(row)
+
+
+def _write_open(
+    row: dict[str, Any],
+    snap: dict[str, Any],
+    ticket: dict[str, Any],
+    tickets: list[dict[str, Any]],
+    book: dict[str, Any] | None,
+    bid: float | None,
+    ask: float | None,
+    symbol: str,
+) -> None:
+    chart = str(row.get("chart") or snap.get("chart") or "")
+    market = str(row.get("market") or "")
+    side = str(ticket.get("side") or snap.get("side") or "")
+    try:
+        fill = float(ticket.get("price_open"))
+    except (TypeError, ValueError):
+        return
+    try:
+        ticket_stop = float(ticket.get("stop_loss") or 0)
+    except (TypeError, ValueError):
+        ticket_stop = 0.0
+    try:
+        ticket_target = float(ticket.get("take_profit") or 0)
+    except (TypeError, ValueError):
+        ticket_target = 0.0
+    targets = [float(price) for price in (snap.get("targets") or []) if price is not None]
+    if not targets and snap.get("target") is not None:
+        targets = [float(snap["target"])]
+    risk_stop = snap.get("risk_stop") if snap.get("risk_stop") is not None else snap.get("stop")
+    try:
+        risk_stop_f = float(risk_stop) if risk_stop is not None else fill
+    except (TypeError, ValueError):
+        risk_stop_f = fill
+    work = {
+        "chart": chart,
+        "side": side,
+        "reason": "OPEN",
+        "entry": fill,
+        "stop": risk_stop_f,
+        "risk_stop": risk_stop_f,
+        "target": targets[0] if targets else (ticket_target or None),
+        "targets": targets or ([ticket_target] if ticket_target else []),
+        "time": snap.get("time") or "",
+        "tradeable": False,
+        "state": "OPEN",
+        "late": False,
+        "market": market,
+        "score_on": "M1",
+        "harvest": snap.get("harvest") or "—",
+        "open_ticket": int(ticket.get("ticket") or 0),
+    }
+    if work["targets"]:
+        _guide(work, book, [], symbol, bid, ask)
+    else:
+        work["note"] = "The ticket is open. No target is on it."
+        work["guide"] = work["note"]
+    work["stop"] = ticket_stop if ticket_stop > 0 else None
+    same = [item for item in tickets if str(item.get("side")) == side]
+    prefix = f"{len(same)} tickets are open. " if len(same) > 1 else ""
+    stop_line = f"Ticket stop {round(ticket_stop, 5)}." if ticket_stop > 0 else "No stop is on the ticket."
+    target_line = f"Ticket target {round(ticket_target, 5)}." if ticket_target > 0 else "No target is on the ticket."
+    guide = str(work.get("guide") or "")
+    work["note"] = f"{prefix}{stop_line} {target_line} {guide}".strip()
+    row.clear()
+    row.update(work)

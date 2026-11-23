@@ -204,6 +204,32 @@ if "/api/v19/signals/ice" not in text:
     )
     print("Iceberg auto route added.", flush=True)
 
+if "def signals_ticket" not in text:
+    ticket_method = (
+        "    async def signals_ticket(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import signals_ticket" + newline
+        + "        return await signals_ticket(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the ticket handler.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, ticket_method + marker, 1)
+    print("Ticket handler added.", flush=True)
+
+if "/api/v19/signals/ticket" not in text:
+    old_ice_only = 'app.router.add_post("/api/v19/signals/ice", self.signals_ice)'
+    if old_ice_only not in text:
+        print("Could not find the iceberg route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_ice_only,
+        old_ice_only + newline + '        app.router.add_post("/api/v19/signals/ticket", self.signals_ticket)',
+        1,
+    )
+    print("Ticket route added.", flush=True)
+
 if "def auto_page" not in text:
     auto_method = (
         "    async def auto_page(self, request: web.Request) -> web.Response:" + newline

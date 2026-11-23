@@ -24,15 +24,18 @@ from zeus3.v19.signals_engine import (
     liquidity,
     mark_taken,
     manage_decision,
-    place_marks,
     place_yen,
     place_value,
-    range_dip,
+    place_marks,
     stack_line,
+    range_dip,
     reaction,
     record,
     session_levels,
+    settle_rows,
     _band,
+    _closed,
+    _time,
     _wait,
 )
 
@@ -72,7 +75,7 @@ table{width:100%;border-collapse:collapse;font:12px Consolas,monospace}
 th{color:var(--muted);text-align:left;font-size:11px;padding:6px}
 td{padding:6px;border-top:1px solid #1a2c3c}
 tr.pick{outline:1px solid var(--warn)}
-.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.muted{color:var(--muted)}
+.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.late{color:#ff5a5a;font-weight:700}.muted{color:var(--muted)}
 .flow b{display:block;font-size:16px;margin:2px 0 10px}
 .quotes{display:flex;gap:10px;align-items:stretch;margin:0 0 8px}
 .qbox{border:1px solid #1e3344;border-radius:8px;padding:8px 16px;min-width:140px;background:#071018}
@@ -345,12 +348,16 @@ function draw(){
     ctx.setLineDash([]); ctx.fillStyle=line[0]; ctx.fillText(line[2]+" "+price, plotL+4, y(price)-4);
   });
   const magnetHigh=Number(flowNow.unfinished_high), magnetLow=Number(flowNow.unfinished_low);
+  ctx.save();
+  ctx.lineWidth=3;
+  ctx.font="700 14px Arial,sans-serif";
   [[magnetHigh,"UNFINISHED HIGH"],[magnetLow,"UNFINISHED LOW"]].forEach(line=>{
     const price=line[0];
     if(!isFinite(price)||price<lo||price>hi) return;
-    ctx.setLineDash([6,3]); ctx.strokeStyle="#d7c4ff"; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
-    ctx.setLineDash([]); ctx.fillStyle="#d7c4ff"; ctx.fillText(line[1]+" "+price, plotL+4, y(price)+12);
+    ctx.setLineDash([8,4]); ctx.strokeStyle="#f4e8ff"; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle="#ffe38a"; ctx.fillText(line[1]+" "+price, plotL+4, y(price)+14);
   });
+  ctx.restore();
   if(row){
     ctx.setLineDash([4,4]);
     [["#67d6a3",row.entry,"ENTRY"],["#ef7f88",row.stop,"STOP"],["#e9c66b",row.target,"TARGET "+row.r+"R"]].forEach(line=>{
@@ -643,13 +650,16 @@ function paint(){
   const rows=data.rows||[];
   $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
-      const tone=r.push&&!r.tradeable?"warn":(r.side==="BUY"?"good":"bad");
+      const late=!!(r.late||r.state==="LATE");
+      const tone=late?"late":(r.push&&!r.tradeable?"warn":(r.side==="BUY"?"good":"bad"));
       const side=r.side?`<span class="${tone}">${r.side}</span>`:"—";
+      const stateCell=late?`<span class="late">${r.state||"LATE"}</span>`:(r.state||"—");
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
       const harvest=moneyLine(r);
       const limitOk=["ICEBERG","SCALP","INTRADAY","SWING","RESPONSIVE"].includes(r.chart);
       const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','MARKET')">MARKET</button>${limitOk?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','LIMIT')">LIMIT</button>`:""}`:"";
-      return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${r.state||"—"}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${harvest}</td><td>${r.note||r.reason||"—"}</td><td>${button}</td></tr>`;
+      const noteCell=late?`<span class="late">${r.note||"Entry is late. Not an order."}</span>`:(r.note||r.reason||"—");
+      return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${stateCell}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${harvest}</td><td>${noteCell}</td><td>${button}</td></tr>`;
     }).join("");
   const f=data.flow||{}, ladder=data.ladder||{};
   $("flow").innerHTML=`<div class="muted">ORDER FLOW · THIS PAIR</div>
@@ -682,8 +692,13 @@ function isProtected(position){
   if(!(sl>0)||!(entry>0)) return false;
   return position.side==="SELL"?sl<=entry:sl>=entry;
 }
+async function postManage(body){
+  let r=await fetch("/api/v19/signals/ticket",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  if(r.status===404) r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  return r;
+}
 async function closeTicket(ticket){
-  const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({owner_approved:true,fast_ack:true,ticket:ticket,action:"CLOSE",reason:"SIGNALS PAGE"})});
+  const r=await postManage({owner_approved:true,fast_ack:true,ticket:ticket,action:"CLOSE",reason:"SIGNALS PAGE"});
   const j=await r.json();
   if(!r.ok||!((j.management||{}).ok)) throw Error(((j.management||{}).reason)||j.message||"the close was rejected");
 }
@@ -699,13 +714,12 @@ async function trade(chartName, mode){
   const plan=orderRisk();
   if(plan.error){setStatus(plan.error, 8000);return}
   const opens=data.positions||[];
-  const same=opens.filter(p=>p.side===row.side);
-  const opposite=opens.filter(p=>p.side!==row.side);
+  const opposite=opens.filter(p=>p.side&&p.side!==row.side);
   const kind=limit?((rests?"LIMIT ":"STOP ")+row.side+" at "+row.entry):("MARKET "+row.side);
-  let msg="Send a "+kind+" on "+symbol+"?\nStop "+row.stop+"\nTarget "+row.target+"\nRisk "+plan.label+"\nThis goes to the MT5 account that is logged in.";
-  if(same.length) msg="A "+row.side+" is already open. Send another "+kind+"?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
-  else if(opposite.length) msg="A "+opposite[0].side+" is still open. Send this "+kind+" as well?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
-  if(!confirm(msg))return;
+  if(opposite.length){
+    const msg="A "+opposite[0].side+" is still open. Send this "+kind+" as well?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
+    if(!confirm(msg))return;
+  }
   setStatus("SENDING...", 20000);
   const started=performance.now();
   try{
@@ -751,7 +765,7 @@ async function manage(ticket, action, entry, pct){
   const started=performance.now();
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
-    const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+    const r=await postManage(body);
     const j=await r.json();
     const ms=Math.round((j.timings_ms&&j.timings_ms.total)||j.management_server_ms||(performance.now()-started));
     const ok=r.ok&&j.ok!==false&&(j.management||{}).ok;
@@ -769,7 +783,7 @@ async function editStop(ticket){
   const body={owner_approved:true,fast_ack:true,ticket:ticket,action:"MODIFY_POSITION",stop_loss:price,reason:"SIGNALS PAGE EDIT SL"};
   await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
   try{
-    const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+    const r=await postManage(body);
     const j=await r.json();
     const ms=Math.round(j.management_server_ms||(performance.now()-started));
     const text=((r.ok&&j.ok!==false&&(j.management||{}).ok)?"STOP SENT":"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
@@ -787,7 +801,7 @@ async function editR(ticket, entry, stop, side){
   const started=performance.now();
   await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
   try{
-    const r=await fetch("/api/v3-physical-execution/manage",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+    const r=await postManage(body);
     const j=await r.json();
     const ms=Math.round(j.management_server_ms||(performance.now()-started));
     const text=((r.ok&&j.ok!==false&&(j.management||{}).ok)?"TARGET SENT "+price:"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
@@ -1181,7 +1195,10 @@ def _book(symbol: str) -> dict[str, Any]:
             book["other"] = None
         stack = raw.get("stack")
         if isinstance(stack, dict) and stack.get("price") is not None:
-            book["stack"] = {"price": float(stack["price"]), "side": str(stack.get("side") or "")}
+            book["stack"] = {
+                "price": float(stack["price"]),
+                "side": str(stack.get("side") or ""),
+            }
         for name in ("unfinished_high", "unfinished_low"):
             value = raw.get(name)
             if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0:
@@ -1357,7 +1374,7 @@ def _run_manage(
             magnet = float(ahead)
             magnet_open = True
             saved["magnet"] = magnet
-        elif isinstance(previous.get("magnet"), (int, float)):
+        elif isinstance(previous.get("magnet"), (int, float)) and not isinstance(previous.get("magnet"), bool):
             magnet = float(previous["magnet"])
             magnet_open = False
         decision = manage_decision(
@@ -1396,26 +1413,25 @@ def _run_manage(
             except Exception:
                 pass
             else:
-                _announce_manage(symbol, saved["line"] or "Bank.", int(pos["ticket"]), entry)
+                _announce_manage(symbol, str(saved["line"] or "Bank."), int(pos["ticket"]), entry)
                 saved["told"] = saved["line"]
         else:
             new_stop = decision.get("stop")
-            if acting and isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool):
-                if saved.get("sent") != float(new_stop):
-                    try:
-                        host.runtime.manage_physical_trade(
-                            ticket=int(pos["ticket"]),
-                            action="MODIFY_POSITION",
-                            stop_loss=float(new_stop),
-                            reason="ZEUS MANAGE",
-                            include_physical_snapshot=False,
-                        )
-                    except Exception:
-                        new_stop = None
-                    else:
-                        saved["sent"] = float(new_stop)
-                        pos["stop_loss"] = float(new_stop)
-                        _announce_manage(symbol, f"Stop moved to {round(float(new_stop), 5)}.", int(pos["ticket"]), entry)
+            if acting and isinstance(new_stop, (int, float)) and not isinstance(new_stop, bool) and saved.get("sent") != float(new_stop):
+                try:
+                    host.runtime.manage_physical_trade(
+                        ticket=int(pos["ticket"]),
+                        action="MODIFY_POSITION",
+                        stop_loss=float(new_stop),
+                        reason="ZEUS MANAGE",
+                        include_physical_snapshot=False,
+                    )
+                except Exception:
+                    new_stop = None
+                else:
+                    saved["sent"] = float(new_stop)
+                    pos["stop_loss"] = float(new_stop)
+                    _announce_manage(symbol, f"Stop moved to {round(float(new_stop), 5)}.", int(pos["ticket"]), entry)
             nxt = decision.get("take_profit")
             if acting and isinstance(nxt, (int, float)) and not isinstance(nxt, bool) and saved.get("tp") != float(nxt):
                 try:
@@ -1430,10 +1446,10 @@ def _run_manage(
                     nxt = None
                 else:
                     saved["tp"] = float(nxt)
-                    _announce_manage(symbol, saved["line"], int(pos["ticket"]), entry)
+                    _announce_manage(symbol, str(saved["line"]), int(pos["ticket"]), entry)
                     saved["told"] = saved["line"]
         warn = str(saved["line"] or "")
-        if warn and warn != saved["told"] and (acting or "is being traded" in warn or warn.startswith("90%")):
+        if warn and warn != saved["told"] and (acting or ("is being traded" in warn) or warn.startswith("90%")):
             _announce_manage(symbol, warn, int(pos["ticket"]), entry)
             saved["told"] = warn
         trades[key] = saved
@@ -1506,7 +1522,10 @@ def _news(symbol: str) -> dict[str, Any]:
     holiday = next((row for row in upcoming if str(row.get("impact") or "").upper() == "HOLIDAY"), None)
     nxt = upcoming[0] if upcoming else snap.get("nearest_event")
     if not nxt:
-        return {"line": "NO NEWS ON THE CALENDAR" + (" · " + str(holiday.get("name") or "HOLIDAY") if holiday else "")}
+        extra = ""
+        if holiday:
+            extra = " · " + str(holiday.get("name") or "HOLIDAY")
+        return {"line": "NO NEWS ON THE CALENDAR" + extra}
     seconds = float(nxt.get("seconds_from_now") or 0)
     minutes = int(abs(seconds) // 60)
     clock = f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
@@ -1527,8 +1546,8 @@ def _news(symbol: str) -> dict[str, Any]:
     if snap.get("state") not in {"LIVE_SCHEDULE", "CACHED_SCHEDULE"}:
         line = "NO CALENDAR · " + line
     holiday_seconds = float(holiday.get("seconds_from_now") or 0) if holiday else None
-    warn = (impact in {"HIGH", "HOLIDAY"} and 0 <= seconds <= 30 * 60) or (
-        holiday_seconds is not None and 0 <= holiday_seconds <= 30 * 60
+    warn = (impact in {"HIGH", "HOLIDAY"} and 0 <= seconds <= 1800) or (
+        holiday_seconds is not None and 0 <= holiday_seconds <= 1800
     )
     return {
         "line": line,
@@ -1672,7 +1691,9 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         if note:
             row["note"] = (str(row.get("note") or "") + " " + note).strip()
     positions = _positions(host, symbol)
-    _drop_left(symbol, rows, bid, ask, positions)
+    minute = _closed(bars_by_chart.get("M1") or [])
+    latest = _time(minute[-1]) if minute else ""
+    settle_rows(symbol, rows, positions, bid, ask, spread, book, latest)
     _broker_protection(rows, positions)
     _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
     if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:
@@ -1825,9 +1846,10 @@ async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
         locked = _LOCK.acquire(timeout=2)
         if locked:
             try:
-                await asyncio.to_thread(_bars, host, symbol, chart, 25.0, 200)
-            except Exception:
-                pass
+                try:
+                    await asyncio.to_thread(_bars, host, symbol, chart, 25.0, 200)
+                except Exception:
+                    pass
             finally:
                 _LOCK.release()
             quick = _quick_view(symbol, chart)
@@ -1990,9 +2012,11 @@ def _auto_hit(side: str, target: float, bid: float, ask: float) -> bool:
 
 def _auto_choose(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     for row in rows:
-        if not row.get("tradeable") or str(row.get("reason") or "") == "POTENTIAL":
+        if not row.get("tradeable"):
             continue
-        if str(row.get("reason") or "") == "POTENTIAL":
+        if str(row.get("state") or "") in {"LATE", "OPEN"} or row.get("late"):
+            continue
+        if str(row.get("reason") or "") in {"POTENTIAL", "OPEN"}:
             continue
         if str(row.get("side") or "") not in {"BUY", "SELL"}:
             continue
@@ -2294,4 +2318,128 @@ async def auto_save(host: Any, request: web.Request) -> web.Response:
         _auto_say(cfg, "Saved. Auto is " + ("on." if cfg["armed"] else "off."))
         _auto_store(cfg)
     return web.json_response(_auto_view(host))
+
+
+def _floor_volume(value: float, step: float) -> float:
+    from decimal import Decimal, ROUND_DOWN
+
+    if step <= 0:
+        raise ValueError("broker volume step must be positive")
+    steps = (Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_DOWN)
+    return float(steps * Decimal(str(step)))
+
+
+def _ticket_by_volume(host: Any, ticket: int, action: str, partial: Any, stop: Any, targets: Any) -> dict[str, Any]:
+    """A manage click is volume. It never looks up a risk percent."""
+    bridge = host.runtime._ensure_physical_execution_bridge(require_acceptance_armed=False)
+    native = bridge.worker._ensure_native()
+    mt5 = native.mt5
+    rows = mt5.positions_get(ticket=int(ticket)) or ()
+    if not rows:
+        raise ValueError("ticket is not open")
+    row = rows[0]
+    symbol = str(row.symbol)
+    volume = float(row.volume or 0)
+    entry = float(row.price_open or 0)
+    current_sl = float(getattr(row, "sl", 0) or 0)
+    current_tp = float(getattr(row, "tp", 0) or 0)
+    buy_code = int(getattr(mt5, "POSITION_TYPE_BUY", 0))
+    side = "BUY" if int(getattr(row, "type", buy_code)) == buy_code else "SELL"
+    magic = int(getattr(row, "magic", 0) or 0)
+    name = str(action or "").upper()
+    if name == "CLOSE":
+        result = native.close_position(int(ticket), symbol=symbol, side=side, volume=volume, magic=magic, comment="ZEUS-CLOSE")
+    elif name == "PARTIAL":
+        pct = float(partial)
+        if pct <= 0 or pct >= 100:
+            raise ValueError("a partial is a percent of the open volume, not a risk percent")
+        limits = native.volume_limits(symbol)
+        close_volume = _floor_volume(volume * pct / 100.0, float(limits.step))
+        if close_volume < float(limits.minimum):
+            raise ValueError("partial is below the broker minimum volume")
+        remainder = volume - close_volume
+        if remainder > 1e-12 and remainder < float(limits.minimum) - 1e-12:
+            raise ValueError("partial would leave a remainder below the broker minimum")
+        result = native.close_position(int(ticket), symbol=symbol, side=side, volume=close_volume, magic=magic, comment="ZEUS-PART")
+    elif name in {"BREAK_EVEN", "BE"}:
+        result = native.modify_position(int(ticket), stop_loss=entry, take_profit=current_tp or None)
+    elif name == "MODIFY_POSITION":
+        new_sl = current_sl or None if stop in {None, ""} else float(stop)
+        new_tp = current_tp or None
+        if targets:
+            new_tp = float(list(targets)[0])
+        result = native.modify_position(int(ticket), stop_loss=new_sl, take_profit=new_tp)
+    else:
+        raise ValueError("unknown manage action")
+    ok = bool(getattr(result, "success", False))
+    comment = str(getattr(result, "comment", "") or "")
+    return {
+        "management": {
+            "ok": ok,
+            "reason": comment,
+            "broker_result": {"comment": comment, "retcode": getattr(result, "retcode", None)},
+        },
+        "broker_writes": 1 if ok else 0,
+    }
+
+
+async def signals_ticket(host: Any, request: web.Request) -> web.Response:
+    """Close, partial, break-even, and edits. A partial is volume. Manage can be off."""
+    started = monotonic()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or body.get("owner_approved") is not True:
+        return web.json_response({"ok": False, "message": "explicit owner approval is required", "management": {"ok": False, "reason": "explicit owner approval is required"}}, status=400)
+    try:
+        ticket = int(body.get("ticket"))
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "message": "ticket is required", "management": {"ok": False, "reason": "ticket is required"}}, status=400)
+    action = str(body.get("action") or "")
+    partial = body.get("partial_pct")
+    stop = body.get("stop_loss")
+    targets = tuple(body.get("take_profits") or ())
+    entry = body.get("entry_price")
+    fast = bool(body.get("fast_ack"))
+
+    def run() -> dict[str, Any]:
+        return host.runtime.manage_physical_trade(
+            ticket=ticket,
+            pending=bool(body.get("pending")),
+            action=action,
+            partial_pct=None if partial in {None, ""} else float(partial),
+            stop_loss=None if stop in {None, ""} else float(stop),
+            take_profits=tuple(float(price) for price in targets),
+            entry_price=None if entry in {None, ""} else float(entry),
+            reason=str(body.get("reason") or "SIGNALS PAGE"),
+            include_physical_snapshot=not fast,
+        )
+
+    try:
+        payload = await asyncio.to_thread(run)
+    except NameError as exc:
+        if "risk_pct" not in str(exc):
+            return web.json_response(
+                {"ok": False, "message": f"NameError: {exc}", "management": {"ok": False, "reason": str(exc)}},
+                status=400,
+            )
+        try:
+            payload = await asyncio.to_thread(_ticket_by_volume, host, ticket, action, partial, stop, targets)
+        except Exception as fallback:
+            return web.json_response(
+                {"ok": False, "message": f"{type(fallback).__name__}: {fallback}", "management": {"ok": False, "reason": str(fallback)}},
+                status=400,
+            )
+    except Exception as exc:
+        return web.json_response(
+            {"ok": False, "message": f"{type(exc).__name__}: {exc}", "management": {"ok": False, "reason": str(exc)}},
+            status=400,
+        )
+    return web.json_response({
+        "ok": bool((payload.get("management") or {}).get("ok", True)),
+        **payload,
+        "management_server_ms": round((monotonic() - started) * 1000.0, 2),
+    })
+
 
