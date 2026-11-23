@@ -2638,6 +2638,23 @@ def _retain(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, li
                 elif stored:
                     held.pop("opposite", None)
                     changed = True
+                if str(held.get("reason") or "") == "PUSH":
+                    prices = [float(price) for price in (held.get("targets") or []) if price is not None]
+                    if len(prices) > 1:
+                        first = prices[0]
+                        band = _band(symbol)
+                        for bar in _bars_for(held, bars_by_chart):
+                            if _time(bar) < str(held.get("time") or ""):
+                                continue
+                            hit = (
+                                _num(bar, "high") >= first - band
+                                if held.get("side") == "BUY"
+                                else _num(bar, "low") <= first + band
+                            )
+                            if hit:
+                                held["tradeable"] = False
+                                changed = True
+                                break
                 row.clear()
                 row.update(held)
                 row["mfe"] = mfe
