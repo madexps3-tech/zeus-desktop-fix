@@ -708,18 +708,10 @@ async function trade(chartName, mode){
   const limit=mode==="LIMIT";
   const quote=(data&&data.quote)||{};
   const bid=Number(quote.bid), ask=Number(quote.ask);
-  if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){const text="NOT SENT · a sell stop must be above the live ask, and the target below the bid."; setStatus(text, 12000); alert(text); return}
-  if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){const text="NOT SENT · a buy stop must be below the live bid, and the target above the ask."; setStatus(text, 12000); alert(text); return}
-  const rests=row.side==="BUY"?row.entry<ask:row.entry>bid;
+  if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){setStatus("NOT SENT · a sell stop must be above the live ask, and the target below the bid.", 12000); return}
+  if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){setStatus("NOT SENT · a buy stop must be below the live bid, and the target above the ask.", 12000); return}
   const plan=orderRisk();
   if(plan.error){setStatus(plan.error, 8000);return}
-  const opens=data.positions||[];
-  const opposite=opens.filter(p=>p.side&&p.side!==row.side);
-  const kind=limit?((rests?"LIMIT ":"STOP ")+row.side+" at "+row.entry):("MARKET "+row.side);
-  if(opposite.length){
-    const msg="A "+opposite[0].side+" is still open. Send this "+kind+" as well?\nStop "+row.stop+"\nTarget "+row.target+"\nThe open trade stays.";
-    if(!confirm(msg))return;
-  }
   setStatus("SENDING...", 20000);
   const started=performance.now();
   try{
@@ -738,15 +730,13 @@ async function trade(chartName, mode){
     if(!r.ok||j.ok===false||ex.submitted===false||j.submitted===false){
       const text="NOT SENT · "+reason+" · "+ms+" ms";
       setStatus(text, 20000);
-      alert(text);
       return;
     }
     fetch("/api/v19/signals/taken",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({symbol:symbol,chart:chartName,side:row.side,reason:row.reason,entry:row.entry,stop:row.stop,target:row.target,r:row.r,time:row.time})}).catch(()=>{});
     const text="SENT · volume "+(ex.volume??"—")+" · "+(broker.comment||"check the MT5 Trade tab")+" · "+ms+" ms";
     setStatus(text, 20000);
-    alert(text);
     load();
-  }catch(e){const text="NOT SENT · "+e.message; setStatus(text, 20000); alert(text)}
+  }catch(e){setStatus("NOT SENT · "+e.message, 20000)}
   finally{
     fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{});
   }
@@ -760,8 +750,6 @@ async function manage(ticket, action, entry, pct){
   const body={owner_approved:true,fast_ack:true,ticket:ticket,action:action,reason:"SIGNALS PAGE"};
   if(action==="BREAK_EVEN")body.stop_loss=entry;
   if(action==="PARTIAL")body.partial_pct=pct;
-  if(action==="CLOSE"&&!confirm("Close ticket "+ticket+" at the market?"))return;
-  if(action==="PARTIAL"&&!confirm("Close "+pct+"% of ticket "+ticket+"?"))return;
   const started=performance.now();
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
