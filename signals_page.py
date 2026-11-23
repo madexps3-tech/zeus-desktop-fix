@@ -508,6 +508,7 @@ function nzClock(date){
 function marketClocks(now){
   const sessions=[
     ["ASIA","Asia/Tokyo",9,0,18,0],
+    ["LONDON","Europe/London",8,0,17,0],
     ["NEW YORK","America/New_York",8,0,17,0],
     ["USA","America/New_York",9,30,16,0]
   ];
