@@ -40,6 +40,7 @@ _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _LOCK = threading.Lock()
 _ORDER_BUSY = threading.Event()
 _LAST: dict[str, dict[str, Any]] = {}
+_VIEW: dict[str, dict[str, Any]] = {}
 
 LABELS = {
     "XAUUSD": "GOLD",
@@ -151,15 +152,20 @@ function remember(j){ if(j&&j.symbol)saved[j.symbol+"|"+(j.chart||chart)]=j; }
 function setPair(s){
   symbol=s; localStorage.setItem("sig_symbol",s); pan=0; fastBid=null; fastAsk=null;
   const kept=saved[s+"|"+chart];
-  if(kept && kept.symbol===s){ data=kept; draw(); paint(); }
-  else { data={symbol:s,candles:[],rows:[],quote:{},flow:{},positions:[],pools:[],broker:s}; draw(); paint(); }
-  load(true);
+  if(kept && kept.symbol===s && (kept.candles||[]).length){ data=kept; }
+  else { data={symbol:s,chart:chart,candles:[],rows:[],quote:{},flow:{},positions:[],pools:[],broker:s,news:{}}; }
+  buttons(); draw(); paint();
+  load(true, true);
 }
 function setChart(c){
   chart=c; selected=c; localStorage.setItem("sig_chart",c); pan=0;
   const kept=saved[symbol+"|"+c];
-  if(kept){ data=kept; draw(); paint(); }
-  load(true);
+  if(kept && (kept.candles||[]).length){ data=kept; }
+  else {
+    data={symbol:symbol,chart:c,candles:[],rows:(data&&data.rows)||[],quote:(data&&data.quote)||{},flow:(data&&data.flow)||{},positions:(data&&data.positions)||[],pools:(data&&data.pools)||[],broker:(data&&data.broker)||symbol,news:(data&&data.news)||{}};
+  }
+  buttons(); draw(); paint();
+  load(true, true);
 }
 function zoom(d){visible=Math.max(30,Math.min(240,visible+d));draw()}
 function fit(){visible=Math.max(30,(data&&data.candles||[]).length||80);pan=0;draw()}
@@ -170,7 +176,7 @@ function toggleZones(){
   if(button){button.textContent=showZones?"ZONES ON":"ZONES OFF";button.className=showZones?"on":""}
   draw();
 }
-async function load(force){
+async function load(force, view){
   if(document.visibilityState==="hidden")return;
   if(busy && !force)return;
   const id=++loadId;
@@ -180,9 +186,10 @@ async function load(force){
   busy=true;
   buttons();
   try{
-    const r=await fetch("/api/v19/signals?symbol="+want+"&chart="+wantChart,{signal:control.signal});
+    const r=await fetch("/api/v19/signals?symbol="+want+"&chart="+wantChart+(view?"&view=1":""),{signal:control.signal});
     const j=await r.json();
     if(id!==loadId || want!==symbol || wantChart!==chart)return;
+    if(j.chart && j.chart!==wantChart)return;
     if(!r.ok||!j.ok)throw Error(j.message||("HTTP "+r.status));
     data=j; remember(j); $("clock").textContent=j.server_time||"";
     const manage=$("manage");
@@ -268,6 +275,7 @@ function draw(){
   ctx.clearRect(0,0,cv.width,cv.height);
   ctx.fillStyle="#050b11"; ctx.fillRect(0,0,cv.width,cv.height);
   ctx.font="12px Consolas,monospace";
+  paintQuote();
   if(!rows.length){ctx.fillStyle="#8ea3b8";ctx.fillText("No candles for "+symbol+" "+chart, 20, 40);return}
   let lo=Infinity, hi=-Infinity;
   rows.forEach(b=>{lo=Math.min(lo,b.low);hi=Math.max(hi,b.high)});
@@ -1780,24 +1788,47 @@ async def signals_positions(host: Any, request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "positions": _positions(host, symbol)})
 
 
+def _quick_view(symbol: str, chart: str) -> dict[str, Any] | None:
+    """Candles already read for this chart. The click does not wait for another full rebuild."""
+    base = _VIEW.get(symbol)
+    if not isinstance(base, dict):
+        return None
+    cached = _CACHE.get(symbol + "|" + chart)
+    candles = cached[1] if cached and cached[1] else None
+    if not candles:
+        last = _LAST.get(symbol + "|" + chart)
+        candles = last.get("candles") if isinstance(last, dict) else None
+    if not candles:
+        return None
+    quick = dict(base)
+    quick["candles"] = candles
+    quick["chart"] = chart
+    quick["ok"] = True
+    return quick
+
+
 async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
     _auto_ensure(host)
     symbol = str(request.query.get("symbol") or "XAUUSD").upper()
     chart = str(request.query.get("chart") or "M5").upper()
     scan = str(request.query.get("scan") or "") == "1"
+    view = str(request.query.get("view") or "") == "1"
     if symbol not in PAIRS or chart not in CHARTS:
         return web.json_response({"ok": False, "message": "unknown pair or chart"}, status=400)
+    quick = _quick_view(symbol, chart) if view and not scan else None
+    if quick is not None:
+        return web.json_response(quick)
     if _ORDER_BUSY.is_set():
-        cached = _LAST.get(symbol)
-        if cached:
+        cached = _LAST.get(symbol + "|" + chart)
+        if cached and cached.get("candles"):
             return web.json_response(cached)
     if scan:
         locked = _LOCK.acquire(blocking=False)
     else:
         locked = _LOCK.acquire(timeout=4)
     if not locked:
-        cached = _LAST.get(symbol)
-        if cached:
+        cached = _LAST.get(symbol + "|" + chart)
+        if cached and cached.get("candles"):
             return web.json_response(cached)
         return web.json_response({"ok": False, "message": "Still reading MetaTrader."}, status=503)
     try:
@@ -1809,7 +1840,9 @@ async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
         )
     finally:
         _LOCK.release()
-    _LAST[symbol] = payload
+    if not scan and payload.get("candles"):
+        _LAST[symbol + "|" + chart] = payload
+        _VIEW[symbol] = payload
     try:
         from zeus3.v19.telegram_alert import announce, start
 
