@@ -2113,7 +2113,7 @@ def _auto_choose(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
             continue
         if str(row.get("state") or "") in {"LATE", "OPEN"} or row.get("late"):
             continue
-        if str(row.get("reason") or "") in {"POTENTIAL", "OPEN"}:
+        if str(row.get("reason") or "") in {"POTENTIAL", "OPEN", "ICEBERG_BREAK"}:
             continue
         if str(row.get("side") or "") not in {"BUY", "SELL"}:
             continue

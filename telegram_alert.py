@@ -642,7 +642,7 @@ def announce(payload: dict[str, Any]) -> None:
                         pass
                 _share(token, text, photo)
                 continue
-            if chart == "ICEBERG" and ice:
+            if chart == "ICEBERG" and ice and str(row.get("reason") or "") != "ICEBERG_BREAK":
                 with _LOCK:
                     row_offer = _OFFERS.pop(offer)
                 row_offer["limit"] = True

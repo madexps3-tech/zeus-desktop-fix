@@ -42,6 +42,9 @@ MAX_WICK = {
 # Gold and oil stop just past the iceberg. Nasdaq is wider because one tick is run through.
 ICE_ONLY = {"XAUUSD", "WTI", "NAS100", "NG-C"}
 ICE_STOP = {"XAUUSD": 3.0, "WTI": 0.30, "NAS100": 20.0, "NG-C": 0.05}
+# A broken iceberg is only a trade while the price is still at the break.
+ICE_BREAK_SECONDS = 180.0
+_LAST_ICE: dict[str, dict[str, Any]] = {}
 ICE_TICK = {
     "XAUUSD": 0.1,
     "XAGUSD": 0.005,
@@ -817,48 +820,87 @@ def _iceberg(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], book: 
     if symbol not in ICE_ONLY:
         return None
     ice = (book or {}).get("iceberg")
-    if not isinstance(ice, dict) or ice.get("price") is None:
+    fresh = bool((book or {}).get("fresh"))
+    if isinstance(ice, dict) and ice.get("price") is not None and str(ice.get("side") or "").lower() in ("bid", "ask"):
+        side_name = str(ice.get("side") or "").lower()
+        side = "BUY" if side_name == "bid" else "SELL"
+        try:
+            raw_price = float(ice["price"])
+        except (TypeError, ValueError):
+            raw_price = 0.0
+        price = _on_cfd(symbol, raw_price, book or {}, bid, ask) if raw_price > 0 else None
+        if price is not None:
+            stop_dist = max(float(ICE_STOP.get(symbol, 0.0)), spread * 10.0 if spread > 0 else 0.0)
+            if stop_dist <= 0:
+                return None
+            stop = price - stop_dist if side == "BUY" else price + stop_dist
+            other = (book or {}).get("other") if isinstance((book or {}).get("other"), dict) else None
+            target = None
+            bank = "No iceberg the other way yet. The first target is 1R, and it banks early when that iceberg prints."
+            if other is not None and other.get("price") is not None:
+                try:
+                    other_price = _on_cfd(symbol, float(other["price"]), book or {}, bid, ask)
+                except (TypeError, ValueError):
+                    other_price = None
+                if other_price is not None and ((side == "SELL" and other_price < price) or (side == "BUY" and other_price > price)):
+                    target = other_price
+                    bank = "The iceberg the other way is the target. Bank there."
+            if target is None:
+                target = price + stop_dist if side == "BUY" else price - stop_dist
+            stamp = ice.get("time")
+            when = ""
+            try:
+                when = datetime.fromtimestamp(float(stamp), timezone.utc).isoformat()
+            except (TypeError, ValueError, OSError):
+                when = datetime.now(timezone.utc).isoformat()
+            if fresh:
+                _LAST_ICE[symbol] = {"price": float(price), "side": side, "at": datetime.now(timezone.utc).timestamp()}
+            row = _offer("M1", side, "ICEBERG", price, stop, target, when, spread, symbol, wick_limit=False)
+            row["note"] = bank + " " + str(row.get("note") or "")
+            if not fresh:
+                row["tradeable"] = False
+                row["state"] = "SHOWN"
+                row["note"] = "The iceberg file is stale. " + str(row.get("note") or "")
+            return row
+    if not fresh:
         return None
-    side_name = str(ice.get("side") or "").lower()
-    if side_name not in ("bid", "ask"):
+    seen = _LAST_ICE.get(symbol)
+    now = datetime.now(timezone.utc).timestamp()
+    if not isinstance(seen, dict) or now - float(seen.get("at") or 0) > ICE_BREAK_SECONDS:
+        _LAST_ICE.pop(symbol, None)
         return None
-    side = "BUY" if side_name == "bid" else "SELL"
     try:
-        raw_price = float(ice["price"])
-    except (TypeError, ValueError):
-        return None
-    price = _on_cfd(symbol, raw_price, book or {}, bid, ask)
-    if price is None:
+        level = float(seen["price"])
+        join = str(seen["side"])
+    except (TypeError, ValueError, KeyError):
+        _LAST_ICE.pop(symbol, None)
         return None
     stop_dist = max(float(ICE_STOP.get(symbol, 0.0)), spread * 10.0 if spread > 0 else 0.0)
-    if stop_dist <= 0:
+    if stop_dist <= 0 or level <= 0:
         return None
-    stop = price - stop_dist if side == "BUY" else price + stop_dist
-    other = (book or {}).get("other") if isinstance((book or {}).get("other"), dict) else None
-    target = None
-    bank = "No iceberg the other way yet. The first target is 1R, and it banks early when that iceberg prints."
-    if other is not None and other.get("price") is not None:
-        try:
-            other_price = _on_cfd(symbol, float(other["price"]), book or {}, bid, ask)
-        except (TypeError, ValueError):
-            other_price = None
-        if other_price is not None and ((side == "SELL" and other_price < price) or (side == "BUY" and other_price > price)):
-            target = other_price
-            bank = "The iceberg the other way is the target. Bank there."
-    if target is None:
-        target = price + stop_dist if side == "BUY" else price - stop_dist
-    stamp = ice.get("time")
-    when = ""
-    try:
-        when = datetime.fromtimestamp(float(stamp), timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError):
-        when = datetime.now(timezone.utc).isoformat()
-    row = _offer("M1", side, "ICEBERG", price, stop, target, when, spread, symbol, wick_limit=False)
-    row["note"] = bank + " " + str(row.get("note") or "")
-    if not (book or {}).get("fresh"):
-        row["tradeable"] = False
-        row["state"] = "SHOWN"
-        row["note"] = "The iceberg file is stale. " + str(row.get("note") or "")
+    room = max(spread, 0.0)
+    if join == "BUY":
+        if not isinstance(bid, (int, float)) or isinstance(bid, bool) or float(bid) > level - room:
+            return None
+        if level - float(bid) > stop_dist:
+            _LAST_ICE.pop(symbol, None)
+            return None
+        side, entry, stop, target = "SELL", float(bid), level + stop_dist, float(bid) - stop_dist
+        which = "bid"
+    else:
+        if not isinstance(ask, (int, float)) or isinstance(ask, bool) or float(ask) < level + room:
+            return None
+        if float(ask) - level > stop_dist:
+            _LAST_ICE.pop(symbol, None)
+            return None
+        side, entry, stop, target = "BUY", float(ask), level - stop_dist, float(ask) + stop_dist
+        which = "offer"
+    when = datetime.now(timezone.utc).isoformat()
+    row = _offer("M1", side, "ICEBERG_BREAK", entry, stop, target, when, spread, symbol, wick_limit=False)
+    row["note"] = (
+        f"The {which} iceberg at {round(level, 5)} was eaten. This is the break, the other way. "
+        + str(row.get("note") or "")
+    )
     return row
 
 
