@@ -40,6 +40,7 @@ from zeus3.v19.signals_engine import (
 )
 
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_POINT_VALUE: dict[str, tuple[float, float]] = {}
 _LOCK = threading.Lock()
 _ORDER_BUSY = threading.Event()
 _LAST: dict[str, dict[str, Any]] = {}
@@ -918,6 +919,11 @@ function positionBox(list){
   return rows?rows+note:"<div class='muted'>No open broker position on this pair.</div>"+note;
 }
 const lotValue={};
+function pointDollars(p){
+  const tick=Number(p.tick_value), size=Number(p.tick_size), vol=Number(p.volume);
+  if(tick>0&&size>0&&vol>0) return vol*tick/size;
+  return 0;
+}
 function bookCash(n){
   if(!isFinite(n)) return "—";
   const sign=n<0?"-":"";
@@ -942,11 +948,19 @@ function paintBook(list){
     const entry=Number(p.price_open), stop=Number(p.stop_loss)||0, tp=Number(p.take_profit)||0, profit=Number(p.profit);
     const mark=p.side==="SELL"?ask:bid;
     const move=p.side==="SELL"?entry-mark:mark-entry;
-    if(isFinite(profit)&&isFinite(move)&&Math.abs(move)>Math.max(Math.abs(entry)*1e-6, 1e-6)){
-      const seen=profit/move;
-      if(seen>0) lotValue[p.ticket]=seen;
+    const perFixed=pointDollars(p);
+    let per=perFixed;
+    if(!(per>0)&&isFinite(profit)&&isFinite(move)){
+      const floor=Math.max(Math.abs(entry)*0.0002, Math.abs(Number((data&&data.spread)||0))*10, 1e-4);
+      if(Math.abs(move)>floor){
+        const seen=profit/move;
+        const prior=lotValue[p.ticket];
+        if(seen>0&&(!(prior>0)||(seen<=prior*1.5&&seen>=prior/1.5))) lotValue[p.ticket]=seen;
+      }
+      per=lotValue[p.ticket];
+    }else if(per>0){
+      lotValue[p.ticket]=per;
     }
-    const per=lotValue[p.ticket];
     if(!(per>0)){unpriced++; return;}
     const buy=p.side!=="SELL";
     if(!(stop>0)){naked++; return;}
@@ -1328,6 +1342,23 @@ def _same_pair(symbol: str, broker: str) -> bool:
     return _root_match(symbol, _flat_name(broker))
 
 
+def _point_value(host: Any, broker: str) -> tuple[float, float]:
+    """Dollars per price unit for one lot, from the broker. Cached so a blink cannot change it."""
+    cached = _POINT_VALUE.get(broker)
+    if cached:
+        return cached
+    try:
+        spec = host.runtime.worker.symbol_spec(broker)
+        tick = float(getattr(spec, "tick_value", 0) or 0)
+        size = float(getattr(spec, "tick_size", 0) or 0)
+    except Exception:
+        return (0.0, 0.0)
+    if tick > 0 and size > 0:
+        _POINT_VALUE[broker] = (tick, size)
+        return (tick, size)
+    return (0.0, 0.0)
+
+
 def _positions(host: Any, symbol: str) -> list[dict[str, Any]]:
     try:
         truth = host.runtime.core.broker_truth.get(host.runtime.worker.profile_id)
@@ -1339,6 +1370,7 @@ def _positions(host: Any, symbol: str) -> list[dict[str, Any]]:
         if not _same_pair(symbol, broker):
             continue
         side = "BUY" if int(getattr(row, "type_code", 1)) == 0 else "SELL"
+        tick_value, tick_size = _point_value(host, broker)
         found.append(
             {
                 "ticket": int(getattr(row, "ticket", 0) or 0),
@@ -1348,6 +1380,8 @@ def _positions(host: Any, symbol: str) -> list[dict[str, Any]]:
                 "stop_loss": getattr(row, "stop_loss", None),
                 "take_profit": getattr(row, "take_profit", None),
                 "profit": getattr(row, "profit", None),
+                "tick_value": tick_value,
+                "tick_size": tick_size,
             }
         )
     _attach_manage(found)
@@ -2472,88 +2506,51 @@ def _mt5_send(mt5: Any, request: dict[str, Any], symbol: str, deal: bool) -> Any
 
 
 def _ticket_by_volume(host: Any, ticket: int, action: str, partial: Any, stop: Any, targets: Any) -> dict[str, Any]:
-    """A manage click changes the open ticket. It never looks up a risk percent."""
-    mt5 = host.runtime.worker._ready().mt5
-    rows = mt5.positions_get(ticket=int(ticket)) or ()
-    if not rows:
-        raise ValueError("ticket is not open")
-    row = rows[0]
-    symbol = str(row.symbol)
-    volume = float(row.volume or 0)
-    entry = float(row.price_open or 0)
-    current_sl = float(getattr(row, "sl", 0) or 0)
-    current_tp = float(getattr(row, "tp", 0) or 0)
-    buy_code = int(getattr(mt5, "POSITION_TYPE_BUY", 0))
-    side = "BUY" if int(getattr(row, "type", buy_code)) == buy_code else "SELL"
-    magic = int(getattr(row, "magic", 0) or 0)
+    """Close, partial, and stop edits go out on the connection that already places the trade."""
     name = str(action or "").upper()
-    info = mt5.symbol_info(symbol)
-    step = float(getattr(info, "volume_step", 0.01) or 0.01) if info is not None else 0.01
-    minimum = float(getattr(info, "volume_min", step) or step) if info is not None else step
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        raise ValueError("no bid or ask")
-    point = float(getattr(info, "point", 0.0) or 0.0) if info is not None else 0.0
-    spread_points = int(round((float(tick.ask) - float(tick.bid)) / point)) if point > 0 else 0
-    deviation = max(spread_points * 3, 100)
-
-    if name == "CLOSE":
-        close_volume = volume
-    elif name == "PARTIAL":
-        pct = float(partial)
-        if pct <= 0 or pct >= 100:
-            raise ValueError("a partial is a percent of the open volume")
-        close_volume = _floor_volume(volume * pct / 100.0, step)
-        if close_volume < minimum:
-            raise ValueError("partial is below the broker minimum volume")
-        remainder = volume - close_volume
-        if remainder > 1e-12 and remainder < minimum - 1e-12:
-            raise ValueError("partial would leave a remainder below the broker minimum")
-    else:
-        close_volume = 0.0
-
-    if name in {"CLOSE", "PARTIAL"}:
-        closing_buy = side == "SELL"
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "position": int(ticket),
-            "symbol": symbol,
-            "volume": float(close_volume),
-            "type": mt5.ORDER_TYPE_BUY if closing_buy else mt5.ORDER_TYPE_SELL,
-            "price": float(tick.ask) if closing_buy else float(tick.bid),
-            "deviation": int(deviation),
-            "magic": magic,
-            "comment": ("ZEUS-PART" if name == "PARTIAL" else "ZEUS-CLOSE")[:31],
-            "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
-        }
-        result = _mt5_send(mt5, request, symbol, True)
-    elif name in {"BREAK_EVEN", "BE", "MODIFY_POSITION"}:
-        new_sl = entry if name in {"BREAK_EVEN", "BE"} else (current_sl if stop in {None, ""} else float(stop))
-        new_tp = current_tp
-        if targets:
-            new_tp = float(list(targets)[0])
-        request = {
-            "action": mt5.TRADE_ACTION_SLTP,
-            "position": int(ticket),
-            "symbol": symbol,
-        }
-        if new_sl:
-            request["sl"] = float(new_sl)
-        if new_tp:
-            request["tp"] = float(new_tp)
-        result = _mt5_send(mt5, request, symbol, False)
-    else:
+    mapped = {
+        "CLOSE": "CLOSE",
+        "PARTIAL": "PARTIAL",
+        "BREAK_EVEN": "BE",
+        "BE": "BE",
+        "MODIFY_POSITION": "MODIFY",
+    }.get(name)
+    if mapped is None:
         raise ValueError("unknown manage action")
-    ok = result is not None and int(getattr(result, "retcode", -1)) in {10008, 10009, 10010}
-    comment = str(getattr(result, "comment", "") or "")
+    bridge = host.runtime._ensure_owner_manual_clean_bridge()
+    worker = bridge.worker
+    payload: dict[str, Any] = {
+        "origin": "OWNER_MANUAL",
+        "ticket": int(ticket),
+        "action": mapped,
+        "fast_ack": True,
+    }
+    if partial not in {None, ""}:
+        payload["partial_pct"] = float(partial)
+    if stop not in {None, ""}:
+        payload["stop_loss"] = float(stop)
+    if targets:
+        payload["take_profits"] = [float(item) for item in targets]
+
+    def send() -> dict[str, Any]:
+        result = worker.manage_position(payload)
+        return result if isinstance(result, dict) else {"ok": False, "reason": str(result)}
+
+    try:
+        result = send()
+    except Exception as exc:
+        text = str(exc)
+        if "not explicitly authorized" not in text and "ENABLE LIVE MANUAL" not in text:
+            raise
+        worker.set_authority("OWNER_MANUAL", True, live_phrase="ENABLE LIVE MANUAL")
+        result = send()
+    ok = bool(result.get("ok"))
+    inner = result.get("result") if isinstance(result.get("result"), dict) else {}
+    comment = str(inner.get("comment") or result.get("reason") or "")
     if not comment and not ok:
-        comment = f"retcode {getattr(result, 'retcode', None)}" if result is not None else f"order_send returned nothing: {mt5.last_error()}"
+        comment = "the broker did not accept"
     return {
-        "management": {
-            "ok": ok,
-            "reason": comment,
-            "broker_result": {"comment": comment, "retcode": getattr(result, "retcode", None)},
-        },
+        "management": {"ok": ok, "reason": comment, "broker_result": inner or result},
         "broker_writes": 1 if ok else 0,
     }
 
