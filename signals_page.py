@@ -131,6 +131,7 @@ tr.pick{outline:1px solid var(--warn)}
     <section class="card flow" id="flow" style="margin-top:10px"></section>
     <section class="card" style="margin-top:10px">
       <div class="muted">THIS PAIR ON THE BROKER</div>
+      <div id="bookrisk" style="margin:6px 0 8px"></div>
       <div id="positions"></div>
     </section>
   </aside>
@@ -890,6 +891,54 @@ function positionBox(list){
   const note=manageNote?`<div class="warn">${manageNote}</div>`:"";
   return rows?rows+note:"<div class='muted'>No open broker position on this pair.</div>"+note;
 }
+const lotValue={};
+function bookCash(n){
+  if(!isFinite(n)) return "—";
+  const sign=n<0?"-":"";
+  const abs=Math.abs(n);
+  return sign+"$"+(abs>=10?Math.round(abs).toLocaleString():abs.toFixed(2));
+}
+function bookPct(n, equity){
+  if(!(equity>0)||!isFinite(n)) return "";
+  return " · "+(n/equity*100).toFixed(1)+"%";
+}
+function paintBook(list){
+  const box=$("bookrisk");
+  if(!box) return;
+  const rows=list||[];
+  if(!rows.length){box.textContent="No open lots on this pair."; return;}
+  const q=(data&&data.quote)||{};
+  const bid=Number(q.bid), ask=Number(q.ask);
+  const acct=(data&&data.account)||{};
+  const equity=Number(acct.equity||acct.balance);
+  let risk=0, potential=0, locked=0, naked=0, unpriced=0, covered=0;
+  rows.forEach(p=>{
+    const entry=Number(p.price_open), stop=Number(p.stop_loss)||0, tp=Number(p.take_profit)||0, profit=Number(p.profit);
+    const mark=p.side==="SELL"?ask:bid;
+    const move=p.side==="SELL"?entry-mark:mark-entry;
+    if(isFinite(profit)&&isFinite(move)&&Math.abs(move)>Math.max(Math.abs(entry)*1e-6, 1e-6)){
+      const seen=profit/move;
+      if(seen>0) lotValue[p.ticket]=seen;
+    }
+    const per=lotValue[p.ticket];
+    if(!(per>0)){unpriced++; return;}
+    const buy=p.side!=="SELL";
+    if(!(stop>0)){naked++; return;}
+    if(buy?stop>=entry:stop<=entry){
+      covered++;
+      const held=(buy?stop-entry:entry-stop)*per;
+      if(held>0) locked+=held;
+    }else risk+=(buy?entry-stop:stop-entry)*per;
+    if(tp>0&&isFinite(mark)){
+      const room=buy?tp-mark:mark-tp;
+      if(room>0) potential+=room*per;
+    }
+  });
+  box.innerHTML="Open risk "+bookCash(risk)+bookPct(risk, equity)+" of the account<br>Potential "+bookCash(potential)+bookPct(potential, equity)+" if the targets are hit"
+    +(covered?"<br>"+covered+" lot"+(covered>1?"s are":" is")+" at the entry or better. That risk is off."+(locked>0?" Locked "+bookCash(locked)+".":""):"")
+    +(naked?"<br>"+naked+" lot"+(naked>1?"s have":" has")+" no stop. Those dollars are not counted.":"")
+    +(unpriced?"<br>The price is still on the fill, so the dollars are not in yet.":"");
+}
 async function livePositions(){
   if(document.visibilityState==="hidden"||!symbol)return;
   try{
@@ -897,6 +946,7 @@ async function livePositions(){
     const j=await r.json();
     if(!r.ok||!j.ok)return;
     if(data) data.positions=j.positions||[];
+    paintBook(j.positions||[]);
     const box=$("positions");
     if(!box||box.matches(":hover"))return;
     const next=positionBox(j.positions||[]);
