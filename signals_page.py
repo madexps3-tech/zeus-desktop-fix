@@ -84,10 +84,17 @@ tr.pick{outline:1px solid var(--warn)}
 .qbox.bid .v{color:#e9c66b}
 .qbox.ask .v{color:#56a8ff}
 .qbox.mid .v{color:#e7eef5;font-size:22px}
-#status,#research,#alerts{font:12px Consolas,monospace;white-space:pre-wrap}
-#newsline{font:700 18px Arial,sans-serif;line-height:1.35;margin:8px 0 4px;padding:8px 10px;border-radius:8px;background:#1a1408;color:#e9c66b}
-#newsline.high{background:#3a1218;color:#ffd0d0}
-#newsline .sub{display:block;font:600 15px Arial,sans-serif;color:#d7e3ee;margin-top:3px}
+#status,#research,#alerts{font:13px Consolas,monospace;white-space:pre-wrap;line-height:1.5}
+#status{margin-top:10px}
+#newsline{display:flex;flex-direction:column;gap:8px;margin:12px 0 14px}
+#newsline .item{display:flex;justify-content:space-between;align-items:center;gap:18px;font:700 17px Arial,sans-serif;line-height:1.3;padding:12px 14px;border-radius:8px;background:#132033;color:#e7eef5}
+#newsline .item .tag{display:inline-block;min-width:52px;margin-right:10px;padding:3px 8px;border-radius:99px;background:#24384c;font:800 12px Arial,sans-serif;letter-spacing:.06em;text-align:center}
+#newsline .item .when{font:700 16px Consolas,monospace;color:#e9c66b;white-space:nowrap}
+#newsline .item.high{background:#3a1218;color:#ffe4e4}
+#newsline .item.high .tag{background:#7a2430}
+#newsline .item.high .when{color:#ffb4b4}
+#newsline .empty{font:700 16px Arial,sans-serif;color:#8ea3b8;padding:4px 2px}
+.watchlabel{margin:4px 0 6px;letter-spacing:.08em}
 #alerts{max-height:88px;overflow:auto;margin:6px 0}
 .pairq{padding:7px 0;border-top:1px solid #1a2c3c;cursor:pointer}
 .pairq b{display:block;font-size:12px;letter-spacing:.04em}
@@ -122,7 +129,7 @@ tr.pick{outline:1px solid var(--warn)}
     <canvas id="cv" width="1100" height="520"></canvas>
     <div id="status" class="muted"></div>
     <div id="newsline"></div>
-    <div class="muted">WATCHER</div>
+    <div class="muted watchlabel">WATCHER</div>
     <div id="alerts" class="muted">Quiet until a new signal on one of the nine pairs.</div>
     <table id="grid"></table>
     <div id="research" class="muted" style="margin-top:8px"></div>
@@ -419,21 +426,6 @@ function draw(){
   ctx.fillText((market||"")+"   "+(picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+(feed.candles_stale?"   CANDLES OLD":""), 12, 36);
   ctx.fillStyle="#8ea3b8";
   ctx.fillText(marketClocks(new Date()), 12, 52);
-  const news=data.news||{};
-  const left=Number(news.seconds);
-  if((news.impact==="HIGH"||news.impact==="HOLIDAY"||news.holiday)&&isFinite(left)&&left>=0&&left<=7200){
-    const mins=Math.max(0, Math.round(left/60));
-    const holiday=news.holiday?("HOLIDAY "+news.holiday+"   "):"";
-    ctx.save();
-    ctx.font="700 18px Arial,sans-serif";
-    const label=holiday+(news.name||"NEWS")+" "+(news.impact||"")+" in "+mins+"m";
-    const wide=ctx.measureText(label).width+20;
-    ctx.fillStyle="#3a1218";
-    ctx.fillRect(8, 66, wide, 28);
-    ctx.fillStyle="#ffd6d6";
-    ctx.fillText(label, 16, 86);
-    ctx.restore();
-  }
   if(cursor && cursor.x>=plotL && cursor.x<=plotR && cursor.y>=plotT && cursor.y<=plotB){
     const price=hi-((cursor.y-plotT)/(plotB-plotT))*(hi-lo);
     const index=Math.max(0, Math.min(rows.length-1, Math.floor((cursor.x-plotL)/step)));
@@ -706,19 +698,14 @@ function paint(){
   const market=data.market||(row&&row.market)||"";
   const newsBox=$("newsline");
   if(newsBox){
-    const impact=String(news.impact||"");
-    const high=impact==="HIGH"||impact==="HOLIDAY"||!!news.holiday;
-    newsBox.className=high?"high":"";
-    const seconds=Number(news.seconds);
-    let when="";
-    if(isFinite(seconds)){
-      const mins=Math.max(0, Math.round(Math.abs(seconds)/60));
-      const clock=mins>=60?Math.floor(mins/60)+"h "+(mins%60)+"m":mins+"m";
-      when=seconds<0?" · "+clock+" ago":" · in "+clock;
-    }
-    const head=news.name?( (news.holiday?("HOLIDAY "+news.holiday+" · "):"")+news.name+" · "+impact+when ):(news.line||"NO CALENDAR");
-    const today=(news.today||[]).join(" · ");
-    newsBox.innerHTML=head+(today?`<span class="sub">Today · ${today}</span>`:"");
+    const rows=news.events||[];
+    if(!rows.length) newsBox.innerHTML=`<div class="empty">${news.line||"No news on the calendar."}</div>`;
+    else newsBox.innerHTML=rows.map(ev=>{
+      const impact=String(ev.impact||"");
+      const cls=impact==="HIGH"||impact==="HOLIDAY"?"high":"";
+      const name=String(ev.name||"event").replace(/[&<>]/g,c=>({"&":"&","<":"<",">":">"}[c]));
+      return `<div class="item ${cls}"><span><span class="tag">${impact||"—"}</span>${name}</span><span class="when">${ev.when||""}</span></div>`;
+    }).join("");
   }
   if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+" · ":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"");
 }
@@ -1631,20 +1618,27 @@ def _news(symbol: str) -> dict[str, Any]:
     seconds = float(nxt.get("seconds_from_now") or 0)
     minutes = int(abs(seconds) // 60)
     clock = f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
-    when = "ago" if seconds < 0 else "in"
+    when = ("ago " if seconds < 0 else "in ") + clock
     impact = str(nxt.get("impact") or "UNKNOWN").upper()
     name = str(nxt.get("name") or "event")
-    today = []
+    events = []
     for row in upcoming:
         if float(row.get("seconds_from_now") or 0) > 24 * 3600:
             break
-        today.append(str(row.get("name") or "event") + " " + str(row.get("impact") or "UNKNOWN"))
-    line = f"NEXT {name} {impact} {when} {clock}"
+        if len(events) >= 4:
+            break
+        row_seconds = float(row.get("seconds_from_now") or 0)
+        row_minutes = int(abs(row_seconds) // 60)
+        row_clock = f"{row_minutes // 60}h {row_minutes % 60}m" if row_minutes >= 60 else f"{row_minutes}m"
+        events.append({
+            "name": str(row.get("name") or "event"),
+            "impact": str(row.get("impact") or "UNKNOWN").upper(),
+            "when": ("ago " if row_seconds < 0 else "in ") + row_clock,
+        })
+    line = f"NEXT {name} {impact} {when}"
     holiday_name = str(holiday.get("name") or "HOLIDAY") if holiday else ""
     if holiday:
         line = "CLOSED · " + holiday_name + " · " + line
-    if today:
-        line += " · TODAY " + " · ".join(today[:4])
     if snap.get("state") not in {"LIVE_SCHEDULE", "CACHED_SCHEDULE"}:
         line = "NO CALENDAR · " + line
     holiday_seconds = float(holiday.get("seconds_from_now") or 0) if holiday else None
@@ -1658,7 +1652,7 @@ def _news(symbol: str) -> dict[str, Any]:
         "impact": impact,
         "seconds": seconds,
         "holiday": holiday_name,
-        "today": today[:4],
+        "events": events,
         "warn": warn,
     }
 
