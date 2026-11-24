@@ -753,6 +753,9 @@ async function manage(ticket, action, entry, pct){
   const body={owner_approved:true,fast_ack:true,ticket:ticket,action:action,reason:"SIGNALS PAGE"};
   if(action==="BREAK_EVEN")body.stop_loss=entry;
   if(action==="PARTIAL")body.partial_pct=pct;
+  manageNote="Sending "+action+"...";
+  showManageNote();
+  setStatus(manageNote, 20000);
   const started=performance.now();
   try{
     await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
@@ -761,9 +764,12 @@ async function manage(ticket, action, entry, pct){
     const ms=Math.round((j.timings_ms&&j.timings_ms.total)||j.management_server_ms||(performance.now()-started));
     const ok=r.ok&&j.ok!==false&&(j.management||{}).ok;
     const text=(ok?"BROKER OK":"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
+    manageNote=text;
+    showManageNote();
+    positionHtml="";
     setStatus(text, 20000);
     load();
-  }catch(e){const text="MANAGE ERROR · "+e.message; setStatus(text, 20000)}
+  }catch(e){const text="MANAGE ERROR · "+e.message; manageNote=text; showManageNote(); positionHtml=""; setStatus(text, 20000)}
   finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
 }
 async function editStop(ticket){
@@ -864,15 +870,25 @@ async function watchOthers(){
   finally{ scanning=false; }
 }
 setInterval(watchOthers, 12000);
+let positionHtml="", manageNote="";
+function showManageNote(){
+  const box=$("positions");
+  if(!box)return;
+  let note=document.getElementById("manageNote");
+  if(!note){note=document.createElement("div"); note.id="manageNote"; note.className="warn"; box.appendChild(note);}
+  note.textContent=manageNote;
+}
 function positionBox(list){
-  return (list||[]).length?(list||[]).map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
-    <button onclick="manage(${p.ticket},'CLOSE')">CLOSE</button>
-    <button onclick="manage(${p.ticket},'BREAK_EVEN',${p.price_open})">BE</button>
-    <button onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
-    <button onclick="manage(${p.ticket},'PARTIAL',null,50)">50%</button>
-    <button onclick="editStop(${p.ticket})">EDIT SL</button>
-    <button onclick="editR(${p.ticket},${p.price_open},${p.stop_loss},'${p.side}')">EDIT R</button>
-    ${p.manage_line?`<div class="muted">${p.manage_line}</div>`:""}</div>`).join(""):"<div class='muted'>No open broker position on this pair.</div>";
+  const rows=(list||[]).map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
+    <button type="button" onclick="manage(${p.ticket},'CLOSE')">CLOSE</button>
+    <button type="button" onclick="manage(${p.ticket},'BREAK_EVEN',${p.price_open})">BE</button>
+    <button type="button" onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
+    <button type="button" onclick="manage(${p.ticket},'PARTIAL',null,50)">50%</button>
+    <button type="button" onclick="editStop(${p.ticket})">EDIT SL</button>
+    <button type="button" onclick="editR(${p.ticket},${p.price_open},${p.stop_loss},'${p.side}')">EDIT R</button>
+    ${p.manage_line?`<div class="muted">${p.manage_line}</div>`:""}</div>`).join("");
+  const note=manageNote?`<div class="warn">${manageNote}</div>`:"";
+  return rows?rows+note:"<div class='muted'>No open broker position on this pair.</div>"+note;
 }
 async function livePositions(){
   if(document.visibilityState==="hidden"||!symbol)return;
@@ -882,7 +898,11 @@ async function livePositions(){
     if(!r.ok||!j.ok)return;
     if(data) data.positions=j.positions||[];
     const box=$("positions");
-    if(box) box.innerHTML=positionBox(j.positions||[]);
+    if(!box||box.matches(":hover"))return;
+    const next=positionBox(j.positions||[]);
+    if(next===positionHtml)return;
+    positionHtml=next;
+    box.innerHTML=next;
   }catch(e){}
 }
 setInterval(livePositions, 500);
@@ -2365,7 +2385,12 @@ def _ticket_by_volume(host: Any, ticket: int, action: str, partial: Any, stop: A
     else:
         raise ValueError("unknown manage action")
     ok = bool(getattr(result, "success", False))
+    retcode = getattr(result, "retcode", None)
+    if retcode in {10008, 10009, 10010}:
+        ok = True
     comment = str(getattr(result, "comment", "") or "")
+    if not comment and not ok:
+        comment = f"retcode {retcode}" if retcode is not None else "the broker did not accept"
     return {
         "management": {
             "ok": ok,
