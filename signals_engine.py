@@ -1292,8 +1292,9 @@ def _guide(
     symbol: str,
     bid: float | None = None,
     ask: float | None = None,
+    open_trade: bool = False,
 ) -> str:
-    """Hold for the next target unless both clocks are against the trade."""
+    """An open trade does not say hold until 90% of its own first R is made."""
     if not row.get("side") or row.get("entry") is None:
         return ""
     targets = [float(price) for price in (row.get("targets") or []) if price is not None]
@@ -1334,8 +1335,35 @@ def _guide(
         for index, price in enumerate(targets, 1)
     )
     aim = remaining[0] if remaining else targets[-1]
+    risk = abs(entry - stop)
+    mark = None
+    if side == "BUY" and isinstance(bid, (int, float)) and not isinstance(bid, bool):
+        mark = float(bid)
+    elif side == "SELL" and isinstance(ask, (int, float)) and not isinstance(ask, bool):
+        mark = float(ask)
+    traveled = 0.0
+    if mark is not None:
+        traveled = (mark - entry) if side == "BUY" else (entry - mark)
+        if traveled < 0:
+            traveled = 0.0
     if passed and not remaining:
         line = f"The last target {round(passed[-1], 5)} is reached."
+    elif open_trade and both_against:
+        line = "Both clocks are against the trade. Bank."
+    elif open_trade and (mark is None or risk <= 0 or traveled < risk * 0.90):
+        line = "The stop is still in play."
+    elif open_trade and quiet:
+        made = int((traveled + risk * 1e-9) // risk) if risk > 0 else 0
+        if made < 1:
+            line = "The stop is still in play."
+        else:
+            locks = made - 1
+            locked = entry + locks * risk if side == "BUY" else entry - locks * risk
+            line = f"Quiet. The stop is at {round(locked, 5)}. The target stays {round(aim, 5)}."
+    elif open_trade and not known:
+        line = "No 60-second delta in this book. The targets stay. Nothing says hold or bank."
+    elif open_trade:
+        line = f"Hold the rest for {round(remaining[0], 5)}." if passed and remaining else f"Hold for {round(aim, 5)}."
     elif not known and passed and remaining:
         line = (
             f"{round(passed[-1], 5)} is reached. No 60-second delta in this book. "
@@ -2430,19 +2458,18 @@ def manage_decision(
         return mark >= price if side == "BUY" else mark <= price
 
     result = {"stop": None, "take_profit": None, "bank": False, "line": "", "risk": risk, "dip": dip}
+    if _both_against(side, book):
+        result["bank"] = True
+        result["line"] = "Both clocks are against the trade. Bank."
+        return result
     if traveled < float(risk) * 0.90:
+        result["line"] = "The stop is still in play."
         return result
     if traveled < float(risk):
-        if _both_against(side, book):
-            result["bank"] = True
-            result["line"] = "90% of the first R. Both clocks are against the trade. Bank."
-            return result
-        if _hold_full(side, book):
-            result["line"] = "90% of the first R. The book is with the trade. Let the first R print."
-            return result
-        locked = entry + (traveled * 0.5) if side == "BUY" else entry - (traveled * 0.5)
-        result["stop"] = better(locked)
-        result["line"] = "90% of the first R. The book is quiet. Half of the open profit is locked."
+        if _hold_full(side, book) and prices:
+            result["line"] = "Hold for " + str(round(prices[0], 5)) + "."
+        else:
+            result["line"] = "The stop is still in play."
         return result
     magnet_price = None
     if isinstance(magnet, (int, float)) and not isinstance(magnet, bool) and float(magnet) > 0:
@@ -2508,6 +2535,27 @@ def manage_decision(
         if side == "SELL" and price < pending:
             following = price
             break
+    def quiet_book() -> bool:
+        longer = (book or {}).get("delta_60s")
+        return isinstance(longer, (int, float)) and not isinstance(longer, bool) and abs(float(longer)) < 10
+
+    if quiet_book():
+        made = int((traveled + float(risk) * 1e-9) // float(risk))
+        locks = max(made - 1, 0)
+        ladder = entry + locks * float(risk) if side == "BUY" else entry - locks * float(risk)
+        desired = secured
+        if side == "BUY" and ladder > secured:
+            desired = ladder
+        if side == "SELL" and ladder < secured:
+            desired = ladder
+        result["stop"] = better(desired)
+        if on_magnet and magnet_open and trading_magnet:
+            result["line"] = str(round(magnet_price, 5)) + " is being traded."
+        elif on_magnet:
+            result["line"] = str(round(magnet_price, 5)) + " stays the target."
+        else:
+            result["line"] = "Quiet. The stop is at " + str(round(desired, 5)) + ". The target stays " + str(round(pending, 5)) + "."
+        return result
     if on_magnet and magnet_open:
         if trading_magnet:
             result["line"] = str(round(magnet_price, 5)) + " is being traded."
@@ -2522,17 +2570,13 @@ def manage_decision(
         result["line"] = str(round(magnet_price, 5)) + " stays the target."
         return result
     if not close_to and not trading_magnet:
-        result["line"] = "The first R is made. The stop is at " + str(round(secured, 5)) + "."
-        return result
-    if _both_against(side, book):
-        result["bank"] = True
-        result["line"] = "Both clocks are against the trade. Bank the rest."
+        result["line"] = "Hold for " + str(round(pending, 5)) + "."
         return result
     if _hold_full(side, book) and following is not None:
         result["take_profit"] = following
         result["line"] = "Let " + str(round(pending, 5)) + " print. The book is with the trade. Next is " + str(round(following, 5)) + "."
         return result
-    result["line"] = "The stop stays at " + str(round(secured, 5)) + "."
+    result["line"] = "Hold for " + str(round(pending, 5)) + "."
     return result
 
 
@@ -3354,7 +3398,7 @@ def _write_open(
         "open_ticket": int(ticket.get("ticket") or 0),
     }
     if work["targets"]:
-        _guide(work, book, [], symbol, bid, ask)
+        _guide(work, book, [], symbol, bid, ask, open_trade=True)
     else:
         work["note"] = "The ticket is open. No target is on it."
         work["guide"] = work["note"]
