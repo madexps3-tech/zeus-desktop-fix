@@ -913,7 +913,7 @@ def _wait(chart: str, note: str, trend: str) -> dict[str, Any]:
 
 def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None, symbol: str = "") -> None:
     """A market order uses the live price. Once the first target is traded, it is late."""
-    if not row.get("side") or row.get("stop") is None:
+    if not row.get("side") or row.get("stop") is None or row.get("entry") is None:
         return
     stop = float(row["stop"])
     targets = [float(price) for price in (row.get("targets") or []) if price is not None]
@@ -922,14 +922,28 @@ def _live_stop(row: dict[str, Any], bid: float | None, ask: float | None, symbol
         target = targets[0]
     push = str(row.get("reason") or "") == "PUSH" and len(targets) > 1
     last = targets[-1] if push else target
+    entry = float(row["entry"])
+    band = _band(symbol)
     if row["side"] == "SELL":
         dead = ask is not None and stop <= float(ask)
-        passed = bid is not None and last is not None and float(bid) <= float(last) + _band(symbol)
-        begun = push and bid is not None and float(bid) <= float(targets[0]) + _band(symbol)
+        reward = None if last is None else entry - float(last)
+        at_target = bid is not None and last is not None and float(bid) <= float(last)
+        near_target = (
+            bid is not None and last is not None and reward is not None
+            and reward > band and float(bid) <= float(last) + band
+        )
+        passed = at_target or near_target
+        begun = push and bid is not None and float(bid) <= float(targets[0]) + band
     else:
         dead = bid is not None and stop >= float(bid)
-        passed = ask is not None and last is not None and float(ask) >= float(last) - _band(symbol)
-        begun = push and ask is not None and float(ask) >= float(targets[0]) - _band(symbol)
+        reward = None if last is None else float(last) - entry
+        at_target = ask is not None and last is not None and float(ask) >= float(last)
+        near_target = (
+            ask is not None and last is not None and reward is not None
+            and reward > band and float(ask) >= float(last) - band
+        )
+        passed = at_target or near_target
+        begun = push and ask is not None and float(ask) >= float(targets[0]) - band
     if begun and not dead and not passed:
         row["tradeable"] = False
         row["state"] = "SHOWN"
