@@ -2426,11 +2426,36 @@ def _floor_volume(value: float, step: float) -> float:
     return float(steps * Decimal(str(step)))
 
 
+def _mt5_send(mt5: Any, request: dict[str, Any], symbol: str, deal: bool) -> Any:
+    if not deal:
+        return mt5.order_send(request)
+    info = mt5.symbol_info(symbol)
+    filling = int(getattr(info, "filling_mode", 0) or 0) if info is not None else 0
+    modes = []
+    if filling & 1:
+        modes.append(getattr(mt5, "ORDER_FILLING_FOK", 0))
+    if filling & 2:
+        modes.append(getattr(mt5, "ORDER_FILLING_IOC", 1))
+    if filling & 4:
+        modes.append(getattr(mt5, "ORDER_FILLING_RETURN", 2))
+    if not modes:
+        modes = [
+            getattr(mt5, "ORDER_FILLING_IOC", 1),
+            getattr(mt5, "ORDER_FILLING_FOK", 0),
+            getattr(mt5, "ORDER_FILLING_RETURN", 2),
+        ]
+    last = None
+    for mode in modes:
+        request["type_filling"] = int(mode)
+        last = mt5.order_send(request)
+        if last is not None and int(getattr(last, "retcode", -1)) in {10008, 10009, 10010}:
+            return last
+    return last
+
+
 def _ticket_by_volume(host: Any, ticket: int, action: str, partial: Any, stop: Any, targets: Any) -> dict[str, Any]:
-    """A manage click is volume. It never looks up a risk percent."""
-    bridge = host.runtime._ensure_physical_execution_bridge(require_acceptance_armed=False)
-    native = bridge.worker._ensure_native()
-    mt5 = native.mt5
+    """A manage click changes the open ticket. It never looks up a risk percent."""
+    mt5 = host.runtime.worker._ready().mt5
     rows = mt5.positions_get(ticket=int(ticket)) or ()
     if not rows:
         raise ValueError("ticket is not open")
@@ -2444,37 +2469,68 @@ def _ticket_by_volume(host: Any, ticket: int, action: str, partial: Any, stop: A
     side = "BUY" if int(getattr(row, "type", buy_code)) == buy_code else "SELL"
     magic = int(getattr(row, "magic", 0) or 0)
     name = str(action or "").upper()
+    info = mt5.symbol_info(symbol)
+    step = float(getattr(info, "volume_step", 0.01) or 0.01) if info is not None else 0.01
+    minimum = float(getattr(info, "volume_min", step) or step) if info is not None else step
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise ValueError("no bid or ask")
+    point = float(getattr(info, "point", 0.0) or 0.0) if info is not None else 0.0
+    spread_points = int(round((float(tick.ask) - float(tick.bid)) / point)) if point > 0 else 0
+    deviation = max(spread_points * 3, 100)
+
     if name == "CLOSE":
-        result = native.close_position(int(ticket), symbol=symbol, side=side, volume=volume, magic=magic, comment="ZEUS-CLOSE")
+        close_volume = volume
     elif name == "PARTIAL":
         pct = float(partial)
         if pct <= 0 or pct >= 100:
-            raise ValueError("a partial is a percent of the open volume, not a risk percent")
-        limits = native.volume_limits(symbol)
-        close_volume = _floor_volume(volume * pct / 100.0, float(limits.step))
-        if close_volume < float(limits.minimum):
+            raise ValueError("a partial is a percent of the open volume")
+        close_volume = _floor_volume(volume * pct / 100.0, step)
+        if close_volume < minimum:
             raise ValueError("partial is below the broker minimum volume")
         remainder = volume - close_volume
-        if remainder > 1e-12 and remainder < float(limits.minimum) - 1e-12:
+        if remainder > 1e-12 and remainder < minimum - 1e-12:
             raise ValueError("partial would leave a remainder below the broker minimum")
-        result = native.close_position(int(ticket), symbol=symbol, side=side, volume=close_volume, magic=magic, comment="ZEUS-PART")
-    elif name in {"BREAK_EVEN", "BE"}:
-        result = native.modify_position(int(ticket), stop_loss=entry, take_profit=current_tp or None)
-    elif name == "MODIFY_POSITION":
-        new_sl = current_sl or None if stop in {None, ""} else float(stop)
-        new_tp = current_tp or None
+    else:
+        close_volume = 0.0
+
+    if name in {"CLOSE", "PARTIAL"}:
+        closing_buy = side == "SELL"
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": int(ticket),
+            "symbol": symbol,
+            "volume": float(close_volume),
+            "type": mt5.ORDER_TYPE_BUY if closing_buy else mt5.ORDER_TYPE_SELL,
+            "price": float(tick.ask) if closing_buy else float(tick.bid),
+            "deviation": int(deviation),
+            "magic": magic,
+            "comment": ("ZEUS-PART" if name == "PARTIAL" else "ZEUS-CLOSE")[:31],
+            "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
+        }
+        result = _mt5_send(mt5, request, symbol, True)
+    elif name in {"BREAK_EVEN", "BE", "MODIFY_POSITION"}:
+        new_sl = entry if name in {"BREAK_EVEN", "BE"} else (current_sl if stop in {None, ""} else float(stop))
+        new_tp = current_tp
         if targets:
             new_tp = float(list(targets)[0])
-        result = native.modify_position(int(ticket), stop_loss=new_sl, take_profit=new_tp)
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": int(ticket),
+            "symbol": symbol,
+            "magic": magic,
+        }
+        if new_sl:
+            request["sl"] = float(new_sl)
+        if new_tp:
+            request["tp"] = float(new_tp)
+        result = _mt5_send(mt5, request, symbol, False)
     else:
         raise ValueError("unknown manage action")
-    ok = bool(getattr(result, "success", False))
-    retcode = getattr(result, "retcode", None)
-    if retcode in {10008, 10009, 10010}:
-        ok = True
+    ok = result is not None and int(getattr(result, "retcode", -1)) in {10008, 10009, 10010}
     comment = str(getattr(result, "comment", "") or "")
     if not comment and not ok:
-        comment = f"retcode {retcode}" if retcode is not None else "the broker did not accept"
+        comment = f"retcode {getattr(result, 'retcode', None)}" if result is not None else f"order_send returned nothing: {mt5.last_error()}"
     return {
         "management": {
             "ok": ok,
