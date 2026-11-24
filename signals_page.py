@@ -2426,29 +2426,47 @@ def _floor_volume(value: float, step: float) -> float:
     return float(steps * Decimal(str(step)))
 
 
+def _fill_modes(mt5: Any, symbol: str) -> list[int]:
+    """The same fill order the working order path already uses."""
+    order_fok = int(getattr(mt5, "ORDER_FILLING_FOK", 0))
+    order_ioc = int(getattr(mt5, "ORDER_FILLING_IOC", 1))
+    order_return = int(getattr(mt5, "ORDER_FILLING_RETURN", 2))
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        return [order_ioc, order_fok, order_return]
+    flags = int(getattr(info, "filling_mode", 0) or 0)
+    execution = int(getattr(info, "trade_exemode", -1) or -1)
+    market = int(getattr(mt5, "SYMBOL_TRADE_EXECUTION_MARKET", -99991))
+    instant = int(getattr(mt5, "SYMBOL_TRADE_EXECUTION_INSTANT", -99992))
+    request = int(getattr(mt5, "SYMBOL_TRADE_EXECUTION_REQUEST", -99993))
+    if execution in {instant, request}:
+        modes = [order_return, order_ioc, order_fok]
+    else:
+        modes = []
+        if flags & int(getattr(mt5, "SYMBOL_FILLING_IOC", 2)):
+            modes.append(order_ioc)
+        if flags & int(getattr(mt5, "SYMBOL_FILLING_FOK", 1)):
+            modes.append(order_fok)
+        if execution != market:
+            modes.append(order_return)
+        if not modes:
+            modes = [order_ioc, order_fok] if execution == market else [order_return, order_ioc, order_fok]
+    unique: list[int] = []
+    for mode in modes:
+        if mode not in unique:
+            unique.append(mode)
+    return unique
+
+
 def _mt5_send(mt5: Any, request: dict[str, Any], symbol: str, deal: bool) -> Any:
     if not deal:
         return mt5.order_send(request)
-    info = mt5.symbol_info(symbol)
-    filling = int(getattr(info, "filling_mode", 0) or 0) if info is not None else 0
-    modes = []
-    if filling & 1:
-        modes.append(getattr(mt5, "ORDER_FILLING_FOK", 0))
-    if filling & 2:
-        modes.append(getattr(mt5, "ORDER_FILLING_IOC", 1))
-    if filling & 4:
-        modes.append(getattr(mt5, "ORDER_FILLING_RETURN", 2))
-    if not modes:
-        modes = [
-            getattr(mt5, "ORDER_FILLING_IOC", 1),
-            getattr(mt5, "ORDER_FILLING_FOK", 0),
-            getattr(mt5, "ORDER_FILLING_RETURN", 2),
-        ]
+    invalid_fill = int(getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030))
     last = None
-    for mode in modes:
+    for mode in _fill_modes(mt5, symbol):
         request["type_filling"] = int(mode)
-        last = mt5.order_send(request)
-        if last is not None and int(getattr(last, "retcode", -1)) in {10008, 10009, 10010}:
+        last = mt5.order_send(dict(request))
+        if last is None or int(getattr(last, "retcode", -1)) != invalid_fill:
             return last
     return last
 
@@ -2518,7 +2536,6 @@ def _ticket_by_volume(host: Any, ticket: int, action: str, partial: Any, stop: A
             "action": mt5.TRADE_ACTION_SLTP,
             "position": int(ticket),
             "symbol": symbol,
-            "magic": magic,
         }
         if new_sl:
             request["sl"] = float(new_sl)
