@@ -522,16 +522,16 @@ function atLocal(timeZone, hour, minute, base){
 }
 function nzClock(date){
   const parts=zoneParts(date, "Pacific/Auckland");
-  return parts.weekday+" "+parts.hour+":"+parts.minute;
+  return parts.hour+":"+parts.minute;
 }
 function marketClocks(now){
   const sessions=[
-    ["ASIA","Asia/Tokyo",9,0,18,0],
-    ["LONDON","Europe/London",8,0,17,0],
-    ["NEW YORK","America/New_York",8,0,17,0],
-    ["USA","America/New_York",9,30,16,0]
+    ["Asia","Asia/Tokyo",9,0,18,0],
+    ["London","Europe/London",8,0,17,0],
+    ["New York","America/New_York",8,0,17,0],
+    ["US stocks","America/New_York",9,30,16,0]
   ];
-  return sessions.map(row=>{
+  const parts=sessions.map(row=>{
     let open=atLocal(row[1], row[2], row[3], now);
     let close=atLocal(row[1], row[4], row[5], now);
     if(now>=close){
@@ -539,9 +539,14 @@ function marketClocks(now){
       open=atLocal(row[1], row[2], row[3], next);
       close=atLocal(row[1], row[4], row[5], next);
     }
-    const state=now>=open&&now<close?"OPEN":"CLOSED";
-    return row[0]+" "+nzClock(open)+"-"+nzClock(close)+" NZ "+state;
-  }).join("   ");
+    const on=now>=open&&now<close;
+    return row[0]+(on?" open till "+nzClock(close):" opens "+nzClock(open));
+  });
+  const hour=now.getHours()+now.getMinutes()/60;
+  let pace="Slow";
+  if(hour>=21||hour<6) pace="Moving";
+  if(hour>=3.5&&hour<6) pace="Fast";
+  return pace+" · "+parts.join(" · ");
 }
 function localStamp(){
   const d=new Date();
