@@ -85,6 +85,9 @@ tr.pick{outline:1px solid var(--warn)}
 .qbox.ask .v{color:#56a8ff}
 .qbox.mid .v{color:#e7eef5;font-size:22px}
 #status,#research,#alerts{font:12px Consolas,monospace;white-space:pre-wrap}
+#newsline{font:700 18px Arial,sans-serif;line-height:1.35;margin:8px 0 4px;padding:8px 10px;border-radius:8px;background:#1a1408;color:#e9c66b}
+#newsline.high{background:#3a1218;color:#ffd0d0}
+#newsline .sub{display:block;font:600 15px Arial,sans-serif;color:#d7e3ee;margin-top:3px}
 #alerts{max-height:88px;overflow:auto;margin:6px 0}
 .pairq{padding:7px 0;border-top:1px solid #1a2c3c;cursor:pointer}
 .pairq b{display:block;font-size:12px;letter-spacing:.04em}
@@ -118,6 +121,7 @@ tr.pick{outline:1px solid var(--warn)}
     </div>
     <canvas id="cv" width="1100" height="520"></canvas>
     <div id="status" class="muted"></div>
+    <div id="newsline"></div>
     <div class="muted">WATCHER</div>
     <div id="alerts" class="muted">Quiet until a new signal on one of the nine pairs.</div>
     <table id="grid"></table>
@@ -420,8 +424,15 @@ function draw(){
   if((news.impact==="HIGH"||news.impact==="HOLIDAY"||news.holiday)&&isFinite(left)&&left>=0&&left<=7200){
     const mins=Math.max(0, Math.round(left/60));
     const holiday=news.holiday?("HOLIDAY "+news.holiday+"   "):"";
-    ctx.fillStyle="#ef7f88";
-    ctx.fillText(holiday+(news.name||"NEWS")+" "+(news.impact||"")+" in "+mins+"m", 12, 64);
+    ctx.save();
+    ctx.font="700 18px Arial,sans-serif";
+    const label=holiday+(news.name||"NEWS")+" "+(news.impact||"")+" in "+mins+"m";
+    const wide=ctx.measureText(label).width+20;
+    ctx.fillStyle="#3a1218";
+    ctx.fillRect(8, 66, wide, 28);
+    ctx.fillStyle="#ffd6d6";
+    ctx.fillText(label, 16, 86);
+    ctx.restore();
   }
   if(cursor && cursor.x>=plotL && cursor.x<=plotR && cursor.y>=plotT && cursor.y<=plotB){
     const price=hi-((cursor.y-plotT)/(plotB-plotT))*(hi-lo);
@@ -637,7 +648,7 @@ function consider(payload){
       }
     }
     let announced=false;
-    if(row.tradeable&&row.entry!=null){
+    if(row.tradeable&&row.entry!=null&&!row.missed){
       const key="R|"+payload.symbol+"|"+row.chart+"|"+row.side+"|"+row.entry+"|"+row.time;
       if(!bag[key]){
         remember(key);
@@ -665,7 +676,7 @@ function paint(){
       const stateCell=late?`<span class="late">${r.state||"LATE"}</span>`:(r.state||"—");
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
       const harvest=moneyLine(r);
-      const limitOk=["ICEBERG","SCALP","INTRADAY","SWING","RESPONSIVE"].includes(r.chart);
+      const limitOk=!r.missed&&["ICEBERG","SCALP","INTRADAY","SWING","RESPONSIVE"].includes(r.chart);
       const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','MARKET')">MARKET</button>${limitOk?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','LIMIT')">LIMIT</button>`:""}`:"";
       const noteCell=late?`<span class="late">${r.note||"Entry is late. Not an order."}</span>`:(r.note||r.reason||"—");
       return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${stateCell}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${harvest}</td><td>${noteCell}</td><td>${button}</td></tr>`;
@@ -692,9 +703,24 @@ function paint(){
   const row=(data.rows||[]).find(r=>r.chart===pickedRow);
   const news=data.news||{};
   const feed=data.feed||{};
-  const newsLine=news.line||"NO CALENDAR";
   const market=data.market||(row&&row.market)||"";
-  if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+" · ":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"")+(newsLine?"\n"+newsLine:"");
+  const newsBox=$("newsline");
+  if(newsBox){
+    const impact=String(news.impact||"");
+    const high=impact==="HIGH"||impact==="HOLIDAY"||!!news.holiday;
+    newsBox.className=high?"high":"";
+    const seconds=Number(news.seconds);
+    let when="";
+    if(isFinite(seconds)){
+      const mins=Math.max(0, Math.round(Math.abs(seconds)/60));
+      const clock=mins>=60?Math.floor(mins/60)+"h "+(mins%60)+"m":mins+"m";
+      when=seconds<0?" · "+clock+" ago":" · in "+clock;
+    }
+    const head=news.name?( (news.holiday?("HOLIDAY "+news.holiday+" · "):"")+news.name+" · "+impact+when ):(news.line||"NO CALENDAR");
+    const today=(news.today||[]).join(" · ");
+    newsBox.innerHTML=head+(today?`<span class="sub">Today · ${today}</span>`:"");
+  }
+  if(Date.now()>=holdStatusUntil) $("status").textContent=(market?market+" · ":"")+(feed.line?feed.line+"\n":"")+(row&&row.note?row.note:"");
 }
 function isProtected(position){
   const sl=Number(position.stop_loss), entry=Number(position.price_open);
@@ -884,8 +910,16 @@ function showManageNote(){
   if(!note){note=document.createElement("div"); note.id="manageNote"; note.className="warn"; box.appendChild(note);}
   note.textContent=manageNote;
 }
+function ticketR(p){
+  const entry=Number(p.price_open), stop=Number(p.stop_loss)||0, tp=Number(p.take_profit)||0;
+  const spread=Math.abs(Number((data&&data.spread)||0));
+  if(!(entry>0)||!(stop>0)||!(tp>0)) return "R —";
+  const risk=Math.abs(entry-stop);
+  if(!(risk>spread)) return "R —";
+  return (Math.abs(tp-entry)/risk).toFixed(2)+"R";
+}
 function positionBox(list){
-  const rows=(list||[]).map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
+  const rows=(list||[]).map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open} · ${ticketR(p)}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
     <button type="button" onclick="manage(${p.ticket},'CLOSE')">CLOSE</button>
     <button type="button" onclick="manage(${p.ticket},'BREAK_EVEN',${p.price_open})">BE</button>
     <button type="button" onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
@@ -1624,6 +1658,7 @@ def _news(symbol: str) -> dict[str, Any]:
         "impact": impact,
         "seconds": seconds,
         "holiday": holiday_name,
+        "today": today[:4],
         "warn": warn,
     }
 

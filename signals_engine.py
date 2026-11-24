@@ -3113,11 +3113,119 @@ def settle_rows(
             inter["side"] = intra.get("side")
             inter["entry"] = intra.get("entry")
             inter["stop"] = intra.get("stop")
+            inter["risk_stop"] = intra.get("risk_stop") if intra.get("risk_stop") is not None else intra.get("stop")
             inter["target"] = intra.get("target")
             inter["targets"] = list(intra.get("targets") or [])
             inter["tradeable"] = False
             inter["state"] = "SHOWN"
             inter["note"] = "Not a new order. " + str(intra.get("note") or "")
+
+    for chart in ("INTERDAY", "SWING", "RESPONSIVE"):
+        row = by_name.get(chart)
+        if row is None or str(row.get("state") or "") == "OPEN":
+            continue
+        if chart == "INTERDAY":
+            missed_parent = intra is not None and str(intra.get("state") or "") == "LATE" and intra.get("side")
+            if not (row.get("late") or row.get("missed") or missed_parent):
+                continue
+            if missed_parent and not row.get("side"):
+                row["side"] = intra.get("side")
+                row["stop"] = intra.get("risk_stop") if intra.get("risk_stop") is not None else intra.get("stop")
+                row["risk_stop"] = row["stop"]
+                row["targets"] = list(intra.get("targets") or [])
+                row["target"] = intra.get("target")
+        elif not (row.get("late") or row.get("missed")):
+            continue
+        _offer_missed(row, bid, ask, spread)
+
+
+def _offer_missed(
+    row: dict[str, Any],
+    bid: float | None,
+    ask: float | None,
+    spread: float,
+) -> None:
+    """A missed interday, swing, or responsive entry can still be placed. Auto does not send it."""
+    if str(row.get("chart") or "") not in {"INTERDAY", "SWING", "RESPONSIVE"}:
+        return
+    if str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN":
+        return
+    side = str(row.get("side") or "")
+    if side not in {"BUY", "SELL"}:
+        return
+    try:
+        stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
+    except (TypeError, ValueError):
+        return
+    live = ask if side == "BUY" else bid
+    if not isinstance(live, (int, float)) or isinstance(live, bool) or float(live) <= 0:
+        return
+    live = float(live)
+    targets = [float(price) for price in (row.get("targets") or []) if price is not None]
+    if not targets and row.get("target") is not None:
+        try:
+            targets = [float(row["target"])]
+        except (TypeError, ValueError):
+            targets = []
+    row["late"] = True
+    row["state"] = "LATE"
+    row["missed"] = False
+    row["tradeable"] = False
+    row["stop"] = stop
+    row["risk_stop"] = stop
+    row["entry"] = round(live, 5)
+    through = (side == "BUY" and live <= stop) or (side == "SELL" and live >= stop)
+    if through:
+        row["note"] = "Price is through the stop. Not an order."
+        return
+    ahead = [price for price in targets if price > live] if side == "BUY" else [price for price in targets if price < live]
+    if targets and not ahead:
+        row["note"] = "The first target is already reached. Not an order."
+        return
+    if not ahead:
+        row["note"] = "No target is left. Not an order."
+        return
+    risk = abs(live - stop)
+    if risk <= abs(float(spread or 0.0)):
+        row["note"] = "The price is inside the spread of the stop. Not an order."
+        return
+    if str(row.get("chart")) == "RESPONSIVE":
+        ordered = sorted(ahead, key=lambda price: abs(price - live))
+        chosen = next((price for price in ordered if abs(price - live) / risk >= 2.0), None)
+        if chosen is None:
+            nearest = _r_multiple(live, stop, ahead[0])
+            row["target"] = round(ahead[0], 5)
+            row["targets"] = [round(price, 5) for price in ahead]
+            row["r"] = nearest
+            row["note"] = f"From {round(live, 5)} the stop stays {round(stop, 5)}. No target is still 2R. Not an order."
+            return
+        kept = [price for price in ahead if (price >= chosen if side == "BUY" else price <= chosen)]
+    else:
+        first = targets[0]
+        first_printed = (side == "BUY" and live >= first) or (side == "SELL" and live <= first)
+        if first_printed:
+            row["note"] = "The first target is already reached. Not an order."
+            return
+        chosen = ahead[0]
+        kept = ahead
+        if abs(chosen - live) / risk < 2.0:
+            row["target"] = round(chosen, 5)
+            row["targets"] = [round(price, 5) for price in kept]
+            row["r"] = _r_multiple(live, stop, chosen)
+            row["note"] = (
+                f"From {round(live, 5)} the stop stays {round(stop, 5)}. "
+                f"{round(chosen, 5)} is {row['r']}R. Under 2R. Not an order."
+            )
+            return
+    row["target"] = round(chosen, 5)
+    row["targets"] = [round(price, 5) for price in kept]
+    row["r"] = _r_multiple(live, stop, chosen)
+    row["tradeable"] = True
+    row["missed"] = True
+    row["note"] = (
+        f"Missed the first price. From {round(live, 5)} the stop stays {round(stop, 5)}. "
+        f"{round(chosen, 5)} is {row['r']}R. Auto will not send it."
+    )
 
 
 def _mark_late(row: dict[str, Any]) -> None:
