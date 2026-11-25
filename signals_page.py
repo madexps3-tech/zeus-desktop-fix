@@ -834,7 +834,7 @@ function paint(){
     <div>DELTA 60s</div><b>${f.delta_60s??"not in this book"}</b>
     <div>WHO IS HITTING</div><b class="${f.stepping==="BUYERS"?"good":(f.stepping==="SELLERS"?"bad":"")}">${f.stepping||"—"}</b>
     ${f.walk?`<div>WALK</div><b>${f.walk}</b>`:""}
-    ${f.dom_day&&f.dom_day.logged?`<div>GOLD LADDER</div><b>${f.dom_day.logged} logged · ${f.dom_day.target} target · ${f.dom_day.stop} stop · ${f.dom_day.open} open</b>`:""}
+    ${f.dom_day?`<div>LADDER</div><b>${f.dom_day.logged||0} logged · ${f.dom_day.target||0} target · ${f.dom_day.stop||0} stop · ${f.dom_day.both||0} both · ${f.dom_day.open||0} open</b>`:""}
     <div>VALUE HIGH</div><b>${f.vah??"not in the file"}</b>
     <div>POC</div><b>${f.poc??"not in the file"}</b>
     <div>VALUE LOW</div><b>${f.val??"not in the file"}</b>
