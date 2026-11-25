@@ -2260,7 +2260,147 @@ def build_rows(
     for row in rows:
         if row.get("side") and row.get("entry") is not None and row.get("stop") is not None:
             _guide(row, book, closed, symbol, bid, ask)
+    sweep = _sweep_row(symbol, m1, area, book, spread, highs15, lows15)
+    if sweep is not None:
+        rows.append(sweep)
     return rows
+
+
+def _sweep_row(
+    symbol: str,
+    bars: list[dict[str, Any]],
+    area: tuple[float, float, float] | None,
+    book: dict[str, Any] | None,
+    spread: float,
+    highs: list[dict[str, Any]],
+    lows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """A sweep through a level already used. Shown and logged. Not an order."""
+    if not (book or {}).get("sweep_consumed") or not bars:
+        return None
+    levels: list[tuple[str, float]] = []
+    if area is not None:
+        val, poc, vah = area
+        levels.extend([("VALUE LOW", float(val)), ("POC", float(poc)), ("VALUE HIGH", float(vah))])
+    for point in list(highs)[-4:]:
+        levels.append(("SWING HIGH", float(point["price"])))
+    for point in list(lows)[-4:]:
+        levels.append(("SWING LOW", float(point["price"])))
+    if not levels:
+        return None
+    found: tuple[str, str, float, dict[str, Any]] | None = None
+    for bar in bars[-2:]:
+        close = _num(bar, "close")
+        low = _num(bar, "low")
+        high = _num(bar, "high")
+        for name, price in levels:
+            side = ""
+            if low < price < close:
+                side = "BUY"
+            elif high > price > close:
+                side = "SELL"
+            if not side:
+                continue
+            if found is None or abs(price - close) < abs(found[2] - _num(found[3], "close")):
+                found = (side, name, price, bar)
+    if found is None:
+        return None
+    side, name, price, bar = found
+    close = _num(bar, "close")
+    wick = _num(bar, "low") if side == "BUY" else _num(bar, "high")
+    pad = float(spread or 0.0)
+    stop = wick - pad if side == "BUY" else wick + pad
+    if (side == "BUY" and stop >= close) or (side == "SELL" and stop <= close):
+        return None
+    ahead = [level for _label, level in levels if (level > close if side == "BUY" else level < close)]
+    target = min(ahead) if side == "BUY" and ahead else (max(ahead) if ahead else None)
+    risk = abs(close - stop)
+    ratio = None if target is None or risk <= 0 else round(abs(target - close) / risk, 2)
+    under = ratio is None or ratio < BUTTON_R
+    if ratio is None:
+        note = f"Sweep of {name}. No next level. Not an order."
+    elif under:
+        note = f"Sweep of {name}. {ratio:.2f}R. Under 1.5R. Not an order."
+    else:
+        note = f"Sweep of {name}. {ratio:.2f}R. Not an order."
+    return {
+        "chart": "SWEEP",
+        "side": side,
+        "reason": "SWEEP",
+        "state": "WATCH",
+        "entry": round(close, 5),
+        "stop": round(stop, 5),
+        "risk_stop": round(stop, 5),
+        "target": None if target is None else round(target, 5),
+        "targets": [] if target is None else [round(target, 5)],
+        "r": ratio,
+        "zone": round(price, 5),
+        "level": name,
+        "time": _time(bar),
+        "tradeable": False,
+        "button": False,
+        "note": note,
+    }
+
+
+def note_sweep(symbol: str, row: dict[str, Any] | None, bars: list[dict[str, Any]]) -> None:
+    """Remember the sweep, then how far the price went and whether the target or the stop printed."""
+    if symbol not in PAIRS:
+        return
+    state = _load_state()
+    open_rows: dict[str, dict[str, Any]] = state.setdefault("sweep_open", {})
+    if isinstance(row, dict) and row.get("side") and row.get("entry") is not None and row.get("stop") is not None:
+        key = "|".join((symbol, str(row.get("side")), str(row.get("time")), str(row.get("zone"))))
+        if key not in open_rows:
+            open_rows[key] = {
+                "symbol": symbol,
+                "side": row.get("side"),
+                "level": row.get("level"),
+                "entry": row.get("entry"),
+                "stop": row.get("stop"),
+                "target": row.get("target"),
+                "r": row.get("r"),
+                "time": row.get("time"),
+                "mfe": 0.0,
+                "target_hit": False,
+                "stop_hit": False,
+            }
+            _append({"event": "SWEEP", "symbol": symbol, **open_rows[key]})
+            if len(open_rows) > 80:
+                oldest = sorted(open_rows, key=lambda item: str(open_rows[item].get("time") or ""))[:20]
+                for item in oldest:
+                    open_rows.pop(item, None)
+    done = []
+    for key, saved in open_rows.items():
+        if saved.get("symbol") != symbol:
+            continue
+        try:
+            entry = float(saved["entry"])
+            stop = float(saved["stop"])
+            target = float(saved["target"]) if saved.get("target") is not None else None
+        except (TypeError, ValueError):
+            continue
+        side = str(saved.get("side") or "")
+        furthest = float(saved.get("mfe") or 0.0)
+        for bar in bars or []:
+            if str(_time(bar) or "") < str(saved.get("time") or ""):
+                continue
+            high = _num(bar, "high")
+            low = _num(bar, "low")
+            reached = high - entry if side == "BUY" else entry - low
+            if reached > furthest:
+                furthest = reached
+            if target is not None and ((side == "BUY" and high >= target) or (side == "SELL" and low <= target)):
+                saved["target_hit"] = True
+            if (side == "BUY" and low <= stop) or (side == "SELL" and high >= stop):
+                saved["stop_hit"] = True
+        saved["mfe"] = round(furthest, 5)
+        if saved.get("target_hit") or saved.get("stop_hit"):
+            _append({"event": "SWEEP_DONE", **saved})
+            done.append(key)
+    for key in done:
+        open_rows.pop(key, None)
+    _save_state(state)
 
 
 def _yen_spot(price: float) -> float:
@@ -3188,6 +3328,9 @@ def _stop_was_traded(row: dict[str, Any], bid: float | None, ask: float | None) 
 def _arm_button(row: dict[str, Any]) -> None:
     """1.5R is the floor. Once the button is on, a later refresh does not take it off."""
     if str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN":
+        row["button"] = False
+        return
+    if str(row.get("chart") or "") == "SWEEP":
         row["button"] = False
         return
     chart = str(row.get("chart") or "")

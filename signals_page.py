@@ -31,6 +31,7 @@ from zeus3.v19.signals_engine import (
     range_dip,
     reaction,
     record,
+    note_sweep,
     session_levels,
     settle_rows,
     quiet_walk,
@@ -725,17 +726,23 @@ function boardLine(payload){
   const rank={INTRADAY:0,INTERDAY:1,RESPONSIVE:2,SCALP:3,SWING:4,ICEBERG:5};
   const live=rows.filter(r=>rank[r.chart]!=null);
   const ranked=live.filter(r=>r.side&&r.entry!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
+  const sweep=rows.find(r=>r.chart==="SWEEP"&&r.side&&r.entry!=null);
   const hit=ranked.find(r=>r.button||r.tradeable);
   if(hit){
     const money=String(moneyLine(hit, payload.account)).split(" · ")[0];
     const late=!!(hit.late||hit.missed||hit.state==="LATE");
-    return {kind:late?"LATE":"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
+    const extra=sweep?" · sweep":"";
+    return {kind:late?"LATE":"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money+extra};
   }
   const push=live.find(r=>r.push&&r.side&&r.entry!=null);
   if(push){
     const tp=(push.targets&&push.targets.length)?push.targets[0]:push.target;
     const mult=push.r!=null?push.r+"R · ":"";
     return {kind:"PUSH", side:push.side, text:"PUSH "+push.side+" "+px(push.entry), sub:"high risk · stop "+px(push.stop)+" · TP "+px(tp)+" "+mult+"not a trade"};
+  }
+  if(sweep){
+    const mult=sweep.r!=null?sweep.r+"R · ":"";
+    return {kind:"SWEEP", side:sweep.side, text:"SWEEP "+sweep.side+" "+px(sweep.entry), sub:"stop "+px(sweep.stop)+" · "+mult+(sweep.level||"")+" not a trade"};
   }
   const coming=live.find(r=>r.coming&&r.coming.side);
   if(coming){
@@ -749,7 +756,7 @@ function paintBoard(){
   if(!box) return;
   box.innerHTML=PAIRS.map(p=>{
     const item=board[p[0]]||{kind:"QUIET", text:"reading", sub:""};
-    const tone=item.kind==="LATE"?"late":(item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"?"warn":"muted"));
+    const tone=item.kind==="LATE"?"late":(item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"||item.kind==="SWEEP"?"warn":"muted"));
     return `<div class="pairq" onclick="setPair('${p[0]}')"><b class="${tone}">${p[1]} · ${item.text}</b>${item.sub?`<span class="sub">${item.sub}</span>`:""}</div>`;
   }).join("");
 }
@@ -807,8 +814,9 @@ function paint(){
   const rows=data.rows||[];
   $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
+      const watch=r.chart==="SWEEP";
       const late=!!(r.late||r.state==="LATE");
-      const tone=late?"late":(r.push&&!r.tradeable?"warn":(r.side==="BUY"?"good":"bad"));
+      const tone=watch?"warn":(late?"late":(r.push&&!r.tradeable?"warn":(r.side==="BUY"?"good":"bad")));
       const side=r.side?`<span class="${tone}">${r.side}</span>`:"—";
       const stateCell=late?`<span class="late">${r.state||"LATE"}</span>`:(r.state||"—");
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
@@ -2015,6 +2023,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     minute = _closed(bars_by_chart.get("M1") or [])
     latest = _time(minute[-1]) if minute else ""
     settle_rows(symbol, rows, positions, bid, ask, spread, book, latest)
+    note_sweep(symbol, next((row for row in rows if row.get("chart") == "SWEEP"), None), bars_by_chart.get("M1") or [])
     _broker_protection(rows, positions)
     _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
     if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:
