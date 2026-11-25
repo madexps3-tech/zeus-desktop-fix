@@ -28,16 +28,34 @@ if not exist "%PY%" (
 )
 echo Starting ZEUS from %CD%
 echo This does not open Chrome or Edge.
-powershell -NoProfile -Command "Add-Type -Namespace Z -Name W -MemberDefinition '[DllImport(\"user32.dll\")] public static extern IntPtr FindWindow(string c, string n);'; if ([Z.W]::FindWindow($null, 'ZEUS') -ne [IntPtr]::Zero) { exit 0 } else { exit 1 }"
-if not errorlevel 1 (
-  echo ZEUS is already open. Leaving it.
-  exit /b 0
-)
+echo Writing the study file first.
 if not exist "%CD%\src\zeus3\v19" mkdir "%CD%\src\zeus3\v19"
 if not exist "%CD%\src\gold_shadow" mkdir "%CD%\src\gold_shadow"
 powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/e48bb27f6b4eddf2eff03a5cf6d320e0b6d1422c/ZeusMboFlags.cpp' -OutFile '%CD%\ZeusMboFlags.cpp'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/ba45da8493833ae5c43c44877db161f6f6a3fa2c/zeus_wait.py' -OutFile '%CD%\zeus_wait.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/55f29dbb1463bd139dc3e905317fc7c905a1c699/zeus_open.py' -OutFile '%CD%\zeus_open.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/bbf62aad4736d7b24ca8a1e2033ffb0a38335ea5/zeus_desktop.py' -OutFile '%CD%\zeus_desktop.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/install_zone.py' -OutFile '%CD%\install_zone.py'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part0.txt' -OutFile '%CD%\part0.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part1.txt' -OutFile '%CD%\part1.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part2.txt' -OutFile '%CD%\part2.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/part3.txt' -OutFile '%CD%\part3.txt'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE%/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/e48bb27f6b4eddf2eff03a5cf6d320e0b6d1422c/signals_engine.py' -OutFile '%CD%\src\zeus3\v19\signals_engine.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/e48bb27f6b4eddf2eff03a5cf6d320e0b6d1422c/signals_page.py' -OutFile '%CD%\src\zeus3\v19\signals_page.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/0a429f81097821fd209b24fb32269e54c5257d01/telegram_alert.py' -OutFile '%CD%\src\zeus3\v19\telegram_alert.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/6c4d5cdc508d62e0e8060382a38774201cb59ad9/live_mapping.py' -OutFile '%CD%\src\zeus3\instruments\live_mapping.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/bbf62aad4736d7b24ca8a1e2033ffb0a38335ea5/zeus_patch.py' -OutFile '%CD%\zeus_patch.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/a77a9641d180396a23497ef521c42a628dee54c6/mbo_book.py' -OutFile '%CD%\src\gold_shadow\mbo_book.py'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/madexps3-tech/zeus-desktop-fix/a76056645cf70e70c3da20e4dae715250ce77282/shadow_book_page.py' -OutFile '%CD%\src\zeus3\v19\shadow_book_page.py'"
 "%PY%" "%CD%\install_zone.py" "%CD%"
 if errorlevel 1 goto fail
+findstr /C:"closedTick" "%CD%\ZeusMboFlags.cpp" >nul
+if errorlevel 1 (
+  echo The study file in the ZEUS folder is still the old one.
+  echo Folder: %CD%
+  goto fail
+)
+echo The study file in the ZEUS folder is the new one.
+echo Folder: %CD%
+set "COPIED="
+for %%D in ("%CD%\ACS_Source" "%CD%\..\ACS_Source" "C:\SierraChart\ACS_Source" "C:\Sierra Chart\ACS_Source") do (
+  if exist "%%~D\" (
+    copy /Y "%CD%\ZeusMboFlags.cpp" "%%~D\ZeusMboFlags.cpp" >nul
+    echo Copied the new study to %%~D
+    set "COPIED=1"
+  )
+)
+if not defined COPIED echo Sierra's ACS_Source folder was not found. The new file is in the ZEUS folder.
+powershell -NoProfile -Command "Add-Type -Namespace Z -Name W -MemberDefinition '[DllImport(\"user32.dll\")] public static extern IntPtr FindWindow(string c, string n);'; if ([Z.W]::FindWindow($null, 'ZEUS') -ne [IntPtr]::Zero) { exit 0 } else { exit 1 }"
+if not errorlevel 1 (
+  echo ZEUS is already open. The study file is updated. Close ZEUS and run this again.
+  exit /b 0
+)
 echo Leave MetaTrader logged in.
 echo Closing any stuck ZEUS loader.
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -like '*zeus3.v19.web*' -or $_.ExecutablePath -like '*ZEUS_RC11_WINDOWS_RETRY\runtime\python*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
