@@ -2343,6 +2343,184 @@ def _sweep_row(
     }
 
 
+def gold_dom_setup(symbol: str, book: dict[str, Any] | None, bid: Any, ask: Any, spread: Any) -> dict[str, Any] | None:
+    """A gold ladder scalp. The next size is $1 to $3, and only if that is at least 1R. Not an order."""
+    if symbol != "XAUUSD" or not isinstance(book, dict):
+        return None
+    try:
+        bid_f = float(bid)
+        ask_f = float(ask)
+        pad = max(float(spread or 0.0), 0.1)
+    except (TypeError, ValueError):
+        return None
+    if bid_f <= 0 or ask_f <= 0:
+        return None
+    try:
+        futures = (float(book.get("futures_bid")) + float(book.get("futures_ask"))) / 2.0
+    except (TypeError, ValueError):
+        last = book.get("last")
+        if isinstance(last, bool) or not isinstance(last, (int, float)) or float(last) <= 0:
+            return None
+        futures = float(last)
+    shift = ((bid_f + ask_f) / 2.0) - futures
+    if abs(shift) > MAX_BASIS.get(symbol, 0.0):
+        return None
+    levels = []
+    for level in book.get("levels") or []:
+        if not isinstance(level, dict):
+            continue
+        try:
+            price = float(level.get("price")) + shift
+            bid_size = float(level.get("bid_contracts") or 0)
+            ask_size = float(level.get("ask_contracts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            levels.append((price, bid_size, ask_size))
+    if not levels:
+        return None
+    buy = _dom_side("BUY", ask_f, pad, levels)
+    sell = _dom_side("SELL", bid_f, pad, levels)
+    if buy and sell:
+        return None
+    return buy or sell
+
+
+def _dom_side(side: str, entry: float, pad: float, levels: list[tuple[float, float, float]]) -> dict[str, Any] | None:
+    """The holding size, a thin book in front, and a target $1 to $3 away."""
+    if side == "BUY":
+        holding = [row for row in levels if entry - 2.0 <= row[0] < entry and row[1] > 0]
+        if not holding:
+            return None
+        price, size, _ask = max(holding, key=lambda row: (row[1], row[0]))
+        stop = price - pad
+        if stop >= entry:
+            return None
+        ahead = [row for row in levels if entry + 1.0 <= row[0] <= entry + 3.0 and row[2] > 0]
+        if not ahead:
+            return None
+        target, _bid, target_size = min(ahead, key=lambda row: row[0])
+        between = [row for row in levels if entry < row[0] < target and row[2] >= size / 3.0]
+        reward = target - entry
+        risk = entry - stop
+    else:
+        holding = [row for row in levels if entry < row[0] <= entry + 2.0 and row[2] > 0]
+        if not holding:
+            return None
+        price, _bid, size = max(holding, key=lambda row: (row[2], -row[0]))
+        stop = price + pad
+        if stop <= entry:
+            return None
+        ahead = [row for row in levels if entry - 3.0 <= row[0] <= entry - 1.0 and row[1] > 0]
+        if not ahead:
+            return None
+        target, target_size, _ask = max(ahead, key=lambda row: row[0])
+        between = [row for row in levels if target < row[0] < entry and row[1] >= size / 3.0]
+        reward = entry - target
+        risk = stop - entry
+    if between or risk <= 0 or reward + 1e-9 < risk:
+        return None
+    ratio = round(reward / risk, 2)
+    return {
+        "chart": "DOM",
+        "side": side,
+        "reason": "DOM",
+        "state": "WATCH",
+        "entry": round(entry, 5),
+        "stop": round(stop, 5),
+        "risk_stop": round(stop, 5),
+        "target": round(target, 5),
+        "targets": [round(target, 5)],
+        "r": ratio,
+        "zone": round(price, 5),
+        "size": size,
+        "target_size": target_size,
+        "tradeable": False,
+        "button": False,
+        "note": f"Gold ladder. Stop {stop:.2f}. Target {target:.2f} is {ratio:.2f}R. Logged. Not an order.",
+    }
+
+
+def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any) -> dict[str, int]:
+    """Keep each gold ladder scalp until the target or the stop prints."""
+    empty = {"logged": 0, "target": 0, "stop": 0, "open": 0}
+    if symbol != "XAUUSD":
+        return empty
+    state = _load_state()
+    open_rows: dict[str, dict[str, Any]] = state.setdefault("dom_open", {})
+    summary: dict[str, int] = state.setdefault("dom_day", {})
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if summary.get("day") != day:
+        summary.clear()
+        summary["day"] = day
+    if isinstance(row, dict) and row.get("side"):
+        key = "|".join((str(row.get("side")), str(round(float(row["stop"]), 1)), str(round(float(row["target"]), 1))))
+        if key not in open_rows:
+            open_rows[key] = {
+                "symbol": symbol,
+                "side": row.get("side"),
+                "entry": row.get("entry"),
+                "stop": row.get("stop"),
+                "target": row.get("target"),
+                "r": row.get("r"),
+                "opened": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "mfe": 0.0,
+                "target_hit": False,
+                "stop_hit": False,
+            }
+            summary["logged"] = int(summary.get("logged") or 0) + 1
+            _append({"event": "DOM_SCALP", **open_rows[key]})
+    try:
+        bid_f = float(bid)
+        ask_f = float(ask)
+    except (TypeError, ValueError):
+        bid_f = ask_f = 0.0
+    done = []
+    now = datetime.now(timezone.utc)
+    for key, saved in open_rows.items():
+        try:
+            entry = float(saved["entry"])
+            stop = float(saved["stop"])
+            target = float(saved["target"])
+            opened = datetime.strptime(str(saved.get("opened")), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        side = str(saved.get("side") or "")
+        if side == "BUY" and bid_f > 0:
+            saved["mfe"] = round(max(float(saved.get("mfe") or 0.0), bid_f - entry), 5)
+            if bid_f >= target:
+                saved["target_hit"] = True
+            if ask_f <= stop:
+                saved["stop_hit"] = True
+        elif side == "SELL" and ask_f > 0:
+            saved["mfe"] = round(max(float(saved.get("mfe") or 0.0), entry - ask_f), 5)
+            if ask_f <= target:
+                saved["target_hit"] = True
+            if bid_f >= stop:
+                saved["stop_hit"] = True
+        aged = (now - opened).total_seconds() >= 1800
+        if saved.get("target_hit") or saved.get("stop_hit") or aged:
+            if saved.get("target_hit"):
+                summary["target"] = int(summary.get("target") or 0) + 1
+            elif saved.get("stop_hit"):
+                summary["stop"] = int(summary.get("stop") or 0) + 1
+            else:
+                summary["expired"] = int(summary.get("expired") or 0) + 1
+            saved["closed"] = now.strftime("%Y-%m-%d %H:%M:%S")
+            _append({"event": "DOM_DONE", **saved})
+            done.append(key)
+    for key in done:
+        open_rows.pop(key, None)
+    summary["open"] = len(open_rows)
+    _save_state(state)
+    return {
+        "logged": int(summary.get("logged") or 0),
+        "target": int(summary.get("target") or 0),
+        "stop": int(summary.get("stop") or 0),
+        "open": int(summary.get("open") or 0),
+    }
+
+
 def note_sweep(symbol: str, row: dict[str, Any] | None, bars: list[dict[str, Any]]) -> None:
     """Remember the sweep, then how far the price went and whether the target or the stop printed."""
     if symbol not in PAIRS:
@@ -3330,7 +3508,7 @@ def _arm_button(row: dict[str, Any]) -> None:
     if str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN":
         row["button"] = False
         return
-    if str(row.get("chart") or "") == "SWEEP":
+    if str(row.get("chart") or "") in ("SWEEP", "DOM"):
         row["button"] = False
         return
     chart = str(row.get("chart") or "")

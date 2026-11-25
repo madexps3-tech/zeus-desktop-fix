@@ -32,6 +32,8 @@ from zeus3.v19.signals_engine import (
     reaction,
     record,
     note_sweep,
+    gold_dom_setup,
+    note_dom,
     session_levels,
     settle_rows,
     quiet_walk,
@@ -814,7 +816,7 @@ function paint(){
   const rows=data.rows||[];
   $("grid").innerHTML="<tr><th>ROW</th><th>STATE</th><th>SIDE</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>HARVEST</th><th>REASON</th><th></th></tr>"+
     rows.map(r=>{
-      const watch=r.chart==="SWEEP";
+      const watch=r.chart==="SWEEP"||r.chart==="DOM";
       const late=!!(r.late||r.state==="LATE");
       const tone=watch?"warn":(late?"late":(r.push&&!r.tradeable?"warn":(r.side==="BUY"?"good":"bad")));
       const side=r.side?`<span class="${tone}">${r.side}</span>`:"—";
@@ -832,6 +834,7 @@ function paint(){
     <div>DELTA 60s</div><b>${f.delta_60s??"not in this book"}</b>
     <div>WHO IS HITTING</div><b class="${f.stepping==="BUYERS"?"good":(f.stepping==="SELLERS"?"bad":"")}">${f.stepping||"—"}</b>
     ${f.walk?`<div>WALK</div><b>${f.walk}</b>`:""}
+    ${f.dom_day&&f.dom_day.logged?`<div>GOLD LADDER</div><b>${f.dom_day.logged} logged · ${f.dom_day.target} target · ${f.dom_day.stop} stop · ${f.dom_day.open} open</b>`:""}
     <div>VALUE HIGH</div><b>${f.vah??"not in the file"}</b>
     <div>POC</div><b>${f.poc??"not in the file"}</b>
     <div>VALUE LOW</div><b>${f.val??"not in the file"}</b>
@@ -2024,6 +2027,10 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     latest = _time(minute[-1]) if minute else ""
     settle_rows(symbol, rows, positions, bid, ask, spread, book, latest)
     note_sweep(symbol, next((row for row in rows if row.get("chart") == "SWEEP"), None), bars_by_chart.get("M1") or [])
+    dom = gold_dom_setup(symbol, book, bid, ask, spread)
+    if dom is not None:
+        rows.append(dom)
+    dom_day = note_dom(symbol, dom, bid, ask)
     _broker_protection(rows, positions)
     _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
     if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:
@@ -2086,6 +2093,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
             "unfinished_low": book.get("unfinished_low"),
             "stepping": stepping,
             "walk": walk,
+            "dom_day": dom_day,
             "note": str(book.get("reason") or ""),
         },
         "positions": positions,
