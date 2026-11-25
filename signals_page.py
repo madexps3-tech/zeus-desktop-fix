@@ -287,7 +287,7 @@ function draw(){
   const cv=$("cv"), width=Math.max(700,(cv.parentElement.clientWidth||1100)-8);
   cv.width=width; cv.height=520;
   const ctx=cv.getContext("2d"), rows=windowRows();
-  const plotL=56, plotR=width-78, plotT=78, plotB=490;
+  const plotL=56, plotR=width-78, plotT=88, plotB=490;
   ctx.clearRect(0,0,cv.width,cv.height);
   ctx.fillStyle="#050b11"; ctx.fillRect(0,0,cv.width,cv.height);
   ctx.font="12px Consolas,monospace";
@@ -415,18 +415,22 @@ function draw(){
   const picked=(data.rows||[]).find(r=>r.chart===pickedRow)||{};
   const market=(data&&data.market)||picked.market||"";
   const feed=data.feed||{};
+  ctx.font="12px Consolas,monospace";
   ctx.fillStyle=feed.quote_stale?"#ef7f88":"#e7eef5";
   ctx.fillText((feed.quote_stale?"STALE":"LIVE "+(feed.quote_age??"—")+"s")+"   "+(feed.session||""), 12, 18);
+  const headline=String(market||"RANGE").toUpperCase();
+  ctx.font="700 22px Arial,sans-serif";
+  ctx.fillStyle=headline.indexOf("BULL")>=0?"#67d6a3":headline.indexOf("BEAR")>=0?"#ef7f88":"#e9c66b";
+  ctx.fillText(headline, 12, 46);
+  ctx.font="13px Consolas,monospace";
+  ctx.fillStyle="#d5deea";
+  ctx.fillText((picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+(feed.candles_stale?"   CANDLES OLD":"")+"   "+marketClocks(new Date()), 12, 68);
   if(isFinite(Number(q.bid))&&Number(q.bid)>=lo&&Number(q.bid)<=hi){
     const yy=y(Number(q.bid));
     ctx.strokeStyle="#e9c66b"; ctx.lineWidth=2;
     ctx.beginPath(); ctx.moveTo(plotL,yy); ctx.lineTo(plotR,yy); ctx.stroke();
     ctx.lineWidth=1; ctx.fillStyle="#e9c66b"; ctx.fillText("BID "+px(q.bid), plotR-120, yy-6);
   }
-  ctx.fillStyle="#e9c66b";
-  ctx.fillText((market||"")+"   "+(picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+(feed.candles_stale?"   CANDLES OLD":""), 12, 36);
-  ctx.fillStyle="#8ea3b8";
-  ctx.fillText(marketClocks(new Date()), 12, 52);
   if(cursor && cursor.x>=plotL && cursor.x<=plotR && cursor.y>=plotT && cursor.y<=plotB){
     const price=hi-((cursor.y-plotT)/(plotB-plotT))*(hi-lo);
     const index=Math.max(0, Math.min(rows.length-1, Math.floor((cursor.x-plotL)/step)));
@@ -1572,7 +1576,7 @@ def _run_manage(
                     _announce_manage(symbol, str(saved["line"]), int(pos["ticket"]), entry)
                     saved["told"] = saved["line"]
         warn = str(saved["line"] or "")
-        if warn and warn != saved["told"] and (acting or ("is being traded" in warn) or warn.startswith("90%")):
+        if warn and warn != saved["told"]:
             _announce_manage(symbol, warn, int(pos["ticket"]), entry)
             saved["told"] = warn
         trades[key] = saved
