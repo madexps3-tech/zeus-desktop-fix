@@ -495,7 +495,11 @@ else:
 page_path = Path("src") / "zeus3" / "v19" / "web.py"
 page_now = page_path.read_text(encoding="utf-8")
 pnl = "\r\n" if "\r\n" in page_now else "\n"
-brain_call = "self.integrated_brain = await asyncio.to_thread(" + pnl + "                    self._new_integrated_brain, self.runtime)"
+brain_call = (
+    "self.integrated_brain = await asyncio.to_thread(" + pnl
+    + "                    self._new_integrated_brain, self.runtime)"
+)
+brain_off = "self.integrated_brain = None"
 if "_open_page_then_finish" in page_now and brain_call in page_now:
     page_now = page_now.replace(
         brain_call,
