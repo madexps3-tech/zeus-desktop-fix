@@ -763,8 +763,8 @@ function paint(){
       const stateCell=late?`<span class="late">${r.state||"LATE"}</span>`:(r.state||"—");
       const targets=(r.targets&&r.targets.length)?r.targets.join(" · "):(r.target??"—");
       const harvest=moneyLine(r);
-      const limitOk=!r.missed&&["ICEBERG","SCALP","INTRADAY","SWING","RESPONSIVE"].includes(r.chart);
-      const button=r.tradeable?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','MARKET')">MARKET</button>${limitOk?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','LIMIT')">LIMIT</button>`:""}`:"";
+      const armed=!!r.button;
+      const button=armed?`<button onclick="event.stopImmediatePropagation();trade('${r.chart}','MARKET')">MARKET</button><button onclick="event.stopImmediatePropagation();trade('${r.chart}','LIMIT')">LIMIT</button>`:"";
       const noteCell=late?`<span class="late">${r.note||"Entry is late. Not an order."}</span>`:(r.note||r.reason||"—");
       return `<tr class="${r.chart===pickedRow?"pick":""}" onclick="pickedRow='${r.chart}';paint()"><td>${r.chart}</td><td>${stateCell}</td><td>${side}</td><td>${r.entry??"—"}</td><td>${r.stop??"—"}</td><td>${targets}</td><td>${harvest}</td><td>${noteCell}</td><td>${button}</td></tr>`;
     }).join("");
@@ -817,13 +817,15 @@ async function closeTicket(ticket){
   if(!r.ok||!((j.management||{}).ok)) throw Error(((j.management||{}).reason)||j.message||"the close was rejected");
 }
 async function trade(chartName, mode){
-  const row=(data.rows||[]).find(r=>r.chart===chartName&&r.tradeable);
-  if(!row){setStatus("NOT SENT · this row has no order. A stop that price has already passed stays on the row with no button.", 8000);return}
+  const row=(data.rows||[]).find(r=>r.chart===chartName&&r.button);
+  if(!row){setStatus("NOT SENT · this row has no order.", 8000);return}
   const limit=mode==="LIMIT";
   const quote=(data&&data.quote)||{};
   const bid=Number(quote.bid), ask=Number(quote.ask);
-  if(row.side==="SELL" && !(row.stop>ask && row.target<bid)){setStatus("NOT SENT · a sell stop must be above the live ask, and the target below the bid.", 12000); return}
-  if(row.side==="BUY" && !(row.stop<bid && row.target>ask)){setStatus("NOT SENT · a buy stop must be below the live bid, and the target above the ask.", 12000); return}
+  const stop=Number(row.risk_stop!=null?row.risk_stop:row.stop);
+  const target=Number(row.target);
+  if(row.side==="SELL" && !(stop>ask && target<bid)){setStatus("NOT SENT · a sell stop must be above the live ask, and the target below the bid.", 12000); return}
+  if(row.side==="BUY" && !(stop<bid && target>ask)){setStatus("NOT SENT · a buy stop must be below the live bid, and the target above the ask.", 12000); return}
   const plan=orderRisk();
   if(plan.error){setStatus(plan.error, 8000);return}
   setStatus("SENDING...", 20000);
@@ -833,7 +835,7 @@ async function trade(chartName, mode){
     const r=await fetch("/api/v19/owner-order/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
       owner_approved:true,symbol:(data&&data.broker)||symbol,timeframe:row.chart==="SWING"?"H4":"M1",
       order_type:limit?(row.side==="BUY"?"BUY_LIMIT":"SELL_LIMIT"):(row.side==="BUY"?"MARKET_BUY":"MARKET_SELL"),
-      entry:limit?row.entry:null,stop:row.stop,targets:[row.target],requested_risk_pct:plan.pct,horizon_lane:"INTRADAY",
+      entry:limit?row.entry:null,stop:stop,targets:[target],requested_risk_pct:plan.pct,horizon_lane:"INTRADAY",
       owner_note:"SIGNALS PAGE "+row.reason+" "+row.decision
     })});
     const j=await r.json();
@@ -998,8 +1000,36 @@ function ticketR(p){
   if(!(risk>spread)) return "R —";
   return (Math.abs(tp-entry)/risk).toFixed(2)+"R";
 }
+function targetButtons(p){
+  const row=(data.rows||[]).find(r=>Number(r.open_ticket)===Number(p.ticket));
+  const listed=(row&&row.targets&&row.targets.length)?row.targets:(Number(p.take_profit)>0?[Number(p.take_profit)]:[]);
+  const entry=Number(p.price_open);
+  const stop=Number(p.stop_loss)||Number(row&&(row.risk_stop||row.stop))||0;
+  const risk=Math.abs(entry-stop);
+  if(!listed.length) return row?"":"<div class='muted'>Manual trade. No target list on it.</div>";
+  return listed.map((price,i)=>{
+    const multiple=risk>0?(Math.abs(Number(price)-entry)/risk).toFixed(2)+"R":"";
+    return `<button type="button" onclick="setTarget(${p.ticket},${Number(price)})">TP${i+1} ${price} ${multiple}</button>`;
+  }).join(" ");
+}
+async function setTarget(ticket, price){
+  if(!isFinite(price)||price<=0)return;
+  const body={owner_approved:true,fast_ack:true,ticket:ticket,action:"MODIFY_POSITION",take_profits:[price],reason:"SIGNALS PAGE TARGET"};
+  const started=performance.now();
+  await fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:true})}).catch(()=>{});
+  try{
+    const r=await postManage(body);
+    const j=await r.json();
+    const ms=Math.round(j.management_server_ms||(performance.now()-started));
+    const text=((r.ok&&j.ok!==false&&(j.management||{}).ok)?"TARGET SENT "+price:"BLOCKED")+" · "+brokerLine(j)+" · "+ms+" ms";
+    setStatus(text, 20000);
+    load();
+  }catch(e){setStatus("MANAGE ERROR · "+e.message, 20000)}
+  finally{fetch("/api/v19/signals/priority",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({active:false})}).catch(()=>{})}
+}
 function positionBox(list){
   const rows=(list||[]).map(p=>`<div style="margin-top:8px"><b class="${p.side==="BUY"?"good":"bad"}">${p.side}</b> ${p.volume} @ ${p.price_open} · ${ticketR(p)}<br>P/L ${p.profit} · SL ${p.stop_loss??"—"} · TP ${p.take_profit??"—"}<br>
+    ${targetButtons(p)}<br>
     <button type="button" onclick="manage(${p.ticket},'CLOSE')">CLOSE</button>
     <button type="button" onclick="manage(${p.ticket},'BREAK_EVEN',${p.price_open})">BE</button>
     <button type="button" onclick="manage(${p.ticket},'PARTIAL',null,10)">10%</button>
@@ -2252,7 +2282,7 @@ def _auto_hit(side: str, target: float, bid: float, ask: float) -> bool:
 
 def _auto_choose(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     for row in rows:
-        if not row.get("tradeable"):
+        if not row.get("tradeable") or not row.get("button"):
             continue
         if str(row.get("state") or "") in {"LATE", "OPEN"} or row.get("late"):
             continue

@@ -12,6 +12,7 @@ CHARTS = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 ROWS = ("ICEBERG", "INTRADAY", "INTERDAY", "SCALP", "SWING")
 MIN_R = 0.5
 TRADE_R = 0.5
+BUTTON_R = 1.5
 MANUAL = {"PULLBACK", "BREAK", "RANGE", "SWING", "ICEBERG", "CHOCH", "SCALP", "PUSH"}
 # One price step. Five of these is close enough to bank the first target.
 PIP = {
@@ -1550,6 +1551,33 @@ def _push(
     nearest = min(ahead) if side == "BUY" else max(ahead)
     multiple = round(abs(nearest - entry) / risk, 2)
     ordered = sorted(set(round(price, 5) for price in ahead), reverse=(side == "SELL"))
+    if multiple < BUTTON_R:
+        listed = f"TP1 {round(nearest, 5)} {multiple}R"
+        return {
+            "chart": "INTRADAY",
+            "side": side,
+            "reason": "PUSH",
+            "r": multiple,
+            "decision": "HIGH RISK",
+            "note": (
+                f"HIGH RISK. The 1-minute candle closed back out of {round(float(zone['price']), 5)}. "
+                f"The stop is the wick. The next swing is under 1.5R. No button. {listed}."
+            ).strip(),
+            "state": "HIGH RISK",
+            "trend": "",
+            "tradeable": False,
+            "button": False,
+            "entry": round(entry, 5),
+            "stop": round(stop, 5),
+            "risk_stop": round(stop, 5),
+            "target": round(nearest, 5),
+            "targets": [round(price, 5) for price in ordered[:4]],
+            "time": _time(last),
+            "zone": round(float(zone["price"]), 5),
+            "harvest": listed,
+            "push": True,
+            "score_on": "M1",
+        }
     if multiple < 2:
         if _both_against(side, book):
             return None
@@ -1567,11 +1595,12 @@ def _push(
             "decision": "HIGH RISK",
             "note": (
                 f"HIGH RISK. The 1-minute candle closed back out of {round(float(zone['price']), 5)}. "
-                f"The stop is the wick. The next swing is under 2R. Not an order.{extra} {listed}."
+                f"The stop is the wick. The next swing is {multiple}R. The button stays. Auto will not send it.{extra} {listed}."
             ).strip(),
             "state": "HIGH RISK",
             "trend": "",
             "tradeable": False,
+            "button": True,
             "entry": round(entry, 5),
             "stop": round(stop, 5),
             "risk_stop": round(stop, 5),
@@ -1599,6 +1628,7 @@ def _push(
         "state": "READY",
         "trend": "",
         "tradeable": True,
+        "button": True,
         "entry": round(entry, 5),
         "stop": round(stop, 5),
         "risk_stop": round(stop, 5),
@@ -3072,7 +3102,7 @@ def mark_taken(row: dict[str, Any]) -> dict[str, Any]:
 _HELD_SIGNALS: dict[str, dict[str, dict[str, Any]]] = {}
 _HELD_KEYS = (
     "chart", "side", "reason", "r", "entry", "stop", "risk_stop", "target", "targets",
-    "time", "zone", "harvest", "market", "score_on",
+    "time", "zone", "harvest", "market", "score_on", "button",
 )
 
 
@@ -3098,6 +3128,46 @@ def _alive_signal(row: dict[str, Any]) -> bool:
     if not row.get("side") or row.get("entry") is None or row.get("stop") is None:
         return False
     return bool(row.get("tradeable") or row.get("late") or str(row.get("state") or "") == "LATE")
+
+
+def _stop_was_traded(row: dict[str, Any], bid: float | None, ask: float | None) -> bool:
+    side = str(row.get("side") or "")
+    if side not in {"BUY", "SELL"}:
+        return False
+    try:
+        stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
+    except (TypeError, ValueError):
+        return False
+    live = ask if side == "BUY" else bid
+    if not isinstance(live, (int, float)) or isinstance(live, bool) or float(live) <= 0:
+        return False
+    if side == "BUY":
+        return float(live) <= stop
+    return float(live) >= stop
+
+
+def _arm_button(row: dict[str, Any]) -> None:
+    """1.5R is the floor. Once the button is on, a later refresh does not take it off."""
+    if str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN":
+        row["button"] = False
+        return
+    if row.get("button"):
+        return
+    try:
+        stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
+        entry = float(row["entry"])
+        target = row.get("target")
+        if target is None:
+            target = (row.get("targets") or [None])[0]
+        target = float(target)
+    except (TypeError, ValueError, IndexError):
+        row["button"] = False
+        return
+    risk = abs(entry - stop)
+    if risk <= 0:
+        row["button"] = False
+        return
+    row["button"] = abs(target - entry) / risk + 1e-9 >= BUTTON_R
 
 
 def settle_rows(
@@ -3239,6 +3309,33 @@ def settle_rows(
         elif not (row.get("late") or row.get("missed")):
             continue
         _offer_missed(row, bid, ask, spread)
+    for chart in charts:
+        row = by_name.get(chart)
+        if row is None or str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN":
+            if row is not None and str(row.get("state") or "") == "OPEN":
+                row["button"] = False
+            continue
+        if _stop_was_traded(row, bid, ask):
+            remembered.pop(chart, None)
+            market = str(row.get("market") or "")
+            name = str(row.get("chart") or chart)
+            row.clear()
+            row.update(_wait(name, "The stop was traded. No order was placed.", market))
+            continue
+        prior = remembered.get(chart)
+        same_signal = (
+            isinstance(prior, dict)
+            and prior.get("button")
+            and str(prior.get("side") or "") == str(row.get("side") or "")
+            and prior.get("stop") == row.get("stop")
+        )
+        if same_signal:
+            row["button"] = True
+        _arm_button(row)
+        if row.get("button") and row.get("side") and row.get("entry") is not None:
+            kept = _signal_snap(row)
+            kept["button"] = True
+            remembered[chart] = kept
 
 
 def _offer_missed(
@@ -3293,13 +3390,14 @@ def _offer_missed(
         return
     if str(row.get("chart")) == "RESPONSIVE":
         ordered = sorted(ahead, key=lambda price: abs(price - live))
-        chosen = next((price for price in ordered if abs(price - live) / risk >= 2.0), None)
+        chosen = next((price for price in ordered if abs(price - live) / risk >= BUTTON_R), None)
         if chosen is None:
             nearest = _r_multiple(live, stop, ahead[0])
             row["target"] = round(ahead[0], 5)
             row["targets"] = [round(price, 5) for price in ahead]
             row["r"] = nearest
-            row["note"] = f"From {round(live, 5)} the stop stays {round(stop, 5)}. No target is still 2R. Not an order."
+            row["button"] = False
+            row["note"] = f"From {round(live, 5)} the stop stays {round(stop, 5)}. No target is still 1.5R. Not an order."
             return
         kept = [price for price in ahead if (price >= chosen if side == "BUY" else price <= chosen)]
     else:
@@ -3310,19 +3408,21 @@ def _offer_missed(
             return
         chosen = ahead[0]
         kept = ahead
-        if abs(chosen - live) / risk < 2.0:
+        if abs(chosen - live) / risk < BUTTON_R:
             row["target"] = round(chosen, 5)
             row["targets"] = [round(price, 5) for price in kept]
             row["r"] = _r_multiple(live, stop, chosen)
+            row["button"] = False
             row["note"] = (
                 f"From {round(live, 5)} the stop stays {round(stop, 5)}. "
-                f"{round(chosen, 5)} is {row['r']}R. Under 2R. Not an order."
+                f"{round(chosen, 5)} is {row['r']}R. Under 1.5R. Not an order."
             )
             return
     row["target"] = round(chosen, 5)
     row["targets"] = [round(price, 5) for price in kept]
     row["r"] = _r_multiple(live, stop, chosen)
     row["tradeable"] = True
+    row["button"] = True
     row["missed"] = True
     row["note"] = (
         f"Missed the first price. From {round(live, 5)} the stop stays {round(stop, 5)}. "
