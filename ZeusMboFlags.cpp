@@ -141,6 +141,7 @@ static void WriteMarks(FILE* file, SCStudyInterfaceRef sc, const char* root, dou
     const int last = sc.ArraySize - 1;
     const SCDateTime sessionStart = sc.GetTradingDayStartDateTimeOfBar(sc.BaseDateTimeIn[last]);
     std::map<int, std::pair<unsigned int, unsigned int>> atTick;
+    std::map<int, std::pair<unsigned int, unsigned int>> closedTick;
     for (int bar = last; bar >= 0; --bar)
     {
         if (sc.BaseDateTimeIn[bar] < sessionStart) break;
@@ -151,6 +152,9 @@ static void WriteMarks(FILE* file, SCStudyInterfaceRef sc, const char* root, dou
             if (!vap->GetVAPElementAtIndex(bar, level, &row) || row == nullptr) continue;
             atTick[row->PriceInTicks].first += row->BidVolume;
             atTick[row->PriceInTicks].second += row->AskVolume;
+            if (bar == last) continue;
+            closedTick[row->PriceInTicks].first += row->BidVolume;
+            closedTick[row->PriceInTicks].second += row->AskVolume;
         }
     }
     if (atTick.empty())
@@ -189,12 +193,28 @@ static void WriteMarks(FILE* file, SCStudyInterfaceRef sc, const char* root, dou
             stackBid = bidStack ? 1 : 0;
         }
     }
-    const unsigned int lowBid = rows.front().second.first;
-    const unsigned int lowAsk = rows.front().second.second;
-    const unsigned int highBid = rows.back().second.first;
-    const unsigned int highAsk = rows.back().second.second;
-    const bool unfinishedLow = lowBid > 0 && lowAsk == 0;
-    const bool unfinishedHigh = highAsk > 0 && highBid == 0;
+    int unfinishedLowTick = 0;
+    int unfinishedHighTick = 0;
+    bool unfinishedLow = false;
+    bool unfinishedHigh = false;
+    bool haveClosed = false;
+    for (const auto& item : closedTick)
+    {
+        const unsigned int bid = item.second.first;
+        const unsigned int ask = item.second.second;
+        if (bid == 0 && ask == 0) continue;
+        if (!haveClosed || item.first < unfinishedLowTick)
+        {
+            unfinishedLowTick = item.first;
+            unfinishedLow = bid > 0 && ask == 0;
+        }
+        if (!haveClosed || item.first > unfinishedHighTick)
+        {
+            unfinishedHighTick = item.first;
+            unfinishedHigh = ask > 0 && bid == 0;
+        }
+        haveClosed = true;
+    }
     std::fprintf(file, "\"ladder\":[");
     const int count = static_cast<int>(rows.size());
     const int start = count > 800 ? (count - 800) / 2 : 0;
@@ -211,11 +231,11 @@ static void WriteMarks(FILE* file, SCStudyInterfaceRef sc, const char* root, dou
     else
         std::fprintf(file, "\"stack\":null,");
     if (unfinishedHigh)
-        std::fprintf(file, "\"unfinished_high\":%.10g,", rows.back().first * sc.TickSize);
+        std::fprintf(file, "\"unfinished_high\":%.10g,", unfinishedHighTick * sc.TickSize);
     else
         std::fprintf(file, "\"unfinished_high\":null,");
     if (unfinishedLow)
-        std::fprintf(file, "\"unfinished_low\":%.10g,", rows.front().first * sc.TickSize);
+        std::fprintf(file, "\"unfinished_low\":%.10g,", unfinishedLowTick * sc.TickSize);
     else
         std::fprintf(file, "\"unfinished_low\":null,");
 }

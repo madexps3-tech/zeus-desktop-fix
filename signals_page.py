@@ -369,7 +369,7 @@ function draw(){
   const cv=$("cv"), width=Math.max(700,(cv.parentElement.clientWidth||1100)-8);
   cv.width=width; cv.height=520;
   const ctx=cv.getContext("2d"), rows=windowRows();
-  const plotL=56, plotR=width-78, plotT=88, plotB=490;
+  const plotL=56, plotR=width-78, plotT=124, plotB=490;
   ctx.clearRect(0,0,cv.width,cv.height);
   ctx.fillStyle="#050b11"; ctx.fillRect(0,0,cv.width,cv.height);
   ctx.font="12px Consolas,monospace";
@@ -504,9 +504,17 @@ function draw(){
   ctx.font="700 22px Arial,sans-serif";
   ctx.fillStyle=headline.indexOf("BULL")>=0?"#67d6a3":headline.indexOf("BEAR")>=0?"#ef7f88":"#e9c66b";
   ctx.fillText(headline, 12, 46);
+  const reason=headline.indexOf("BULL")>=0?"The last two 15-minute highs and lows are both rising.":headline.indexOf("BEAR")>=0?"The last two 15-minute highs and lows are both falling.":"One side is not confirming.";
+  ctx.font="700 15px Arial,sans-serif";
+  ctx.fillStyle="#d5deea";
+  ctx.fillText(reason, 12, 68);
+  const val=Number((data.flow||{}).val), vah=Number((data.flow||{}).vah), mid=Number(q.bid);
+  const where=isFinite(val)&&isFinite(mid)&&mid<val?"Price is under the value low.":(isFinite(vah)&&isFinite(mid)&&mid>vah?"Price is over the value high.":"");
+  ctx.fillStyle="#e9c66b";
+  ctx.fillText(where, 12, 88);
   ctx.font="13px Consolas,monospace";
   ctx.fillStyle="#d5deea";
-  ctx.fillText((picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+(feed.candles_stale?"   CANDLES OLD":"")+"   "+marketClocks(new Date()), 12, 68);
+  ctx.fillText((picked.state||"")+"   "+(feed.session||(data.sessions||{}).current||"")+(feed.candles_stale?"   CANDLES OLD":"")+"   "+marketClocks(new Date()), 12, 108);
   if(isFinite(Number(q.bid))&&Number(q.bid)>=lo&&Number(q.bid)<=hi){
     const yy=y(Number(q.bid));
     ctx.strokeStyle="#e9c66b"; ctx.lineWidth=2;
