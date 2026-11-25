@@ -13,6 +13,7 @@ ROWS = ("ICEBERG", "INTRADAY", "INTERDAY", "SCALP", "SWING")
 MIN_R = 0.5
 TRADE_R = 0.5
 BUTTON_R = 1.5
+SCALP_R = 1.0
 MANUAL = {"PULLBACK", "BREAK", "RANGE", "SWING", "ICEBERG", "CHOCH", "SCALP", "PUSH"}
 # One price step. Five of these is close enough to bank the first target.
 PIP = {
@@ -3151,8 +3152,8 @@ def _arm_button(row: dict[str, Any]) -> None:
     if str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN":
         row["button"] = False
         return
-    if row.get("button"):
-        return
+    chart = str(row.get("chart") or "")
+    floor = SCALP_R if chart == "SCALP" else BUTTON_R
     try:
         stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
         entry = float(row["entry"])
@@ -3167,7 +3168,14 @@ def _arm_button(row: dict[str, Any]) -> None:
     if risk <= 0:
         row["button"] = False
         return
-    row["button"] = abs(target - entry) / risk + 1e-9 >= BUTTON_R
+    if abs(target - entry) / risk + 1e-9 >= floor:
+        row["button"] = True
+        return
+    if chart == "SCALP":
+        row["button"] = False
+        return
+    if not row.get("button"):
+        row["button"] = False
 
 
 def settle_rows(
@@ -3326,6 +3334,7 @@ def settle_rows(
         same_signal = (
             isinstance(prior, dict)
             and prior.get("button")
+            and str(row.get("chart") or chart) != "SCALP"
             and str(prior.get("side") or "") == str(row.get("side") or "")
             and prior.get("stop") == row.get("stop")
         )

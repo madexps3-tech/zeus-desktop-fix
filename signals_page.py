@@ -182,7 +182,9 @@ tr.pick{outline:1px solid var(--warn)}
   <label>RISK $ <input id="cash" value="" placeholder="opt" style="width:72px" oninput="if(data)paint()"></label>
   <button id="manage" data-on="0" onclick="toggleManage()">MANAGE OFF</button>
   <button id="ice" data-on="0" onclick="toggleIce()">ICE AUTO OFF</button>
-  <span class="muted">MARKET sends now. LIMIT rests at the row price. ICE AUTO sends a gold, oil, or Nasdaq iceberg as a limit.</span>
+  <button id="scalp" data-on="0" onclick="toggleScalp()">SCALP AUTO OFF</button>
+  <select id="broker" onchange="useBroker(this.value)" style="max-width:240px"></select>
+  <span class="muted">MARKET sends now. LIMIT rests at the row price. ICE AUTO sends a gold, oil, or Nasdaq iceberg as a limit. SCALP AUTO sends a fresh scalp at 1.5R.</span>
 </div>
 <main>
   <section class="card">
@@ -299,6 +301,8 @@ async function load(force, view){
     if(ice){
       ice.dataset.on=j.ice_auto?"1":"0";
       ice.textContent=j.ice_auto?"ICE AUTO ON":"ICE AUTO OFF";
+      const scalp=$("scalp");
+      if(scalp){scalp.dataset.on=j.scalp_auto?"1":"0";scalp.textContent=j.scalp_auto?"SCALP AUTO ON":"SCALP AUTO OFF";}
     }
     draw(); paint(); consider(j);
   }catch(e){
@@ -325,6 +329,50 @@ async function toggleManage(){
   }catch(e){
     $("status").textContent="MANAGE NOT SAVED · "+e.message;
   }finally{button.disabled=false}
+}
+async function toggleScalp(){
+  const button=$("scalp");
+  const on=button.dataset.on!=="1";
+  button.disabled=true;
+  try{
+    const r=await fetch("/api/v19/signals/scalp",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:on})});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw Error(j.message||"scalp auto was not saved");
+    button.dataset.on=j.on?"1":"0";
+    button.textContent=j.on?"SCALP AUTO ON":"SCALP AUTO OFF";
+    $("status").textContent=j.on?"SCALP AUTO ON. A fresh scalp at 1.5R is sent once. A late one is not chased.":"SCALP AUTO OFF. A scalp needs the MARKET button.";
+  }catch(e){
+    $("status").textContent="SCALP AUTO NOT SAVED · "+e.message;
+  }finally{button.disabled=false}
+}
+async function useBroker(path){
+  if(!path) return;
+  try{
+    const r=await fetch("/api/v19/system/switch-account",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({owner_approved:true,terminal_path:path})});
+    const j=await r.json();
+    setStatus(j.ok===false?(j.message||"The switch was refused"):"That account is now the one Zeus uses.", 12000);
+    load();
+  }catch(e){setStatus("BROKER NOT SWITCHED · "+e.message, 12000)}
+}
+async function brokers(){
+  const box=$("broker");
+  if(!box) return;
+  try{
+    const r=await fetch("/api/v19/system/terminal-identities");
+    const j=await r.json();
+    box.innerHTML="";
+    const blank=document.createElement("option");
+    blank.value="";
+    blank.textContent="Broker";
+    box.appendChild(blank);
+    (j.terminal_identities||[]).forEach(row=>{
+      const o=document.createElement("option");
+      o.value=row.terminal_path||"";
+      o.textContent=(row.company||row.server||"MetaTrader")+" · "+(row.login||"");
+      if(row.current_runtime) o.selected=true;
+      box.appendChild(o);
+    });
+  }catch(e){}
 }
 async function toggleIce(){
   const button=$("ice");
@@ -676,10 +724,11 @@ function boardLine(payload){
   const rank={INTRADAY:0,INTERDAY:1,RESPONSIVE:2,SCALP:3,SWING:4,ICEBERG:5};
   const live=rows.filter(r=>rank[r.chart]!=null);
   const ranked=live.filter(r=>r.side&&r.entry!=null).sort((a,b)=>rank[a.chart]-rank[b.chart]);
-  const hit=ranked.find(r=>r.tradeable);
+  const hit=ranked.find(r=>r.button||r.tradeable);
   if(hit){
     const money=String(moneyLine(hit, payload.account)).split(" · ")[0];
-    return {kind:"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
+    const late=!!(hit.late||hit.missed||hit.state==="LATE");
+    return {kind:late?"LATE":"SIGNAL", side:hit.side, text:hit.chart+" "+hit.side+" "+px(hit.entry), sub:"stop "+px(hit.stop)+" · "+money};
   }
   const push=live.find(r=>r.push&&r.side&&r.entry!=null);
   if(push){
@@ -699,7 +748,7 @@ function paintBoard(){
   if(!box) return;
   box.innerHTML=PAIRS.map(p=>{
     const item=board[p[0]]||{kind:"QUIET", text:"reading", sub:""};
-    const tone=item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"?"warn":"muted");
+    const tone=item.kind==="LATE"?"late":(item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"?"warn":"muted"));
     return `<div class="pairq" onclick="setPair('${p[0]}')"><b class="${tone}">${p[1]} · ${item.text}</b>${item.sub?`<span class="sub">${item.sub}</span>`:""}</div>`;
   }).join("");
 }
@@ -933,7 +982,7 @@ cv.addEventListener("pointerleave",()=>{cursor=null;draw()});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
 window.addEventListener("pagehide",()=>{clearInterval(timer);if(control)control.abort()});
 paintSaved();
-buttons();load();timer=setInterval(load,2000);
+buttons();brokers();load();timer=setInterval(load,2000);
 let fastBid=null,fastAsk=null,drawnAt=0;
 async function fastQuote(){
   if(document.visibilityState==="hidden"||!data||data.symbol!==symbol)return;
@@ -1162,17 +1211,17 @@ _PRICE = {
     "NG-C": (0.5, 20.0),
     "GER40": (4000.0, 40000.0),
 }
-# The cash name is first. A future is last. StarTrader adds +. Vantage raw adds .r.
+# The cash name is first. A future is last. StarTrader adds +. Vantage raw adds .r or .pro.
 _TRY = {
-    "XAUUSD": ("XAUUSD+", "XAUUSD", "XAUUSD.r", "XAUUSD.a", "GOLD+", "GOLD"),
-    "XAGUSD": ("XAGUSD+", "XAGUSD", "XAGUSD.r", "SILVER+", "SILVER"),
-    "NAS100": ("NAS100+", "NAS100", "NAS100.r", "US100+", "US100", "USTEC+", "USTEC", "USTECH", "NAS100ft+"),
-    "BTCUSD": ("BTCUSD", "BTCUSD+", "BTCUSD.r"),
-    "EURUSD": ("EURUSD+", "EURUSD", "EURUSD.r"),
-    "USDJPY": ("USDJPY+", "USDJPY", "USDJPY.r"),
-    "WTI": ("USOUSD+", "USOUSD", "USOIL+", "USOIL", "WTI+", "WTI", "CL-OIL"),
-    "NG-C": ("NG-C", "NG-C+", "NATGAS+", "NATGAS", "NGAS+", "NGAS"),
-    "GER40": ("GER40+", "GER40", "GER40.r", "DE40+", "DE40", "DAX40", "GER40ft+"),
+    "XAUUSD": ("XAUUSD+", "XAUUSD", "XAUUSD.r", "XAUUSD.pro", "XAUUSD.sc", "XAUUSD.a", "GOLD+", "GOLD", "GOLD.r", "GOLD.pro"),
+    "XAGUSD": ("XAGUSD+", "XAGUSD", "XAGUSD.r", "XAGUSD.pro", "SILVER+", "SILVER", "SILVER.r"),
+    "NAS100": ("NAS100+", "NAS100", "NAS100.r", "NAS100.pro", "US100+", "US100", "US100.r", "US100.pro", "USTEC+", "USTEC", "USTEC.r", "USTECH", "NAS100ft+"),
+    "BTCUSD": ("BTCUSD", "BTCUSD+", "BTCUSD.r", "BTCUSD.pro"),
+    "EURUSD": ("EURUSD+", "EURUSD", "EURUSD.r", "EURUSD.pro"),
+    "USDJPY": ("USDJPY+", "USDJPY", "USDJPY.r", "USDJPY.pro"),
+    "WTI": ("USOUSD+", "USOUSD", "USOIL+", "USOIL", "USOIL.r", "USOIL.pro", "WTI+", "WTI", "XTIUSD+", "XTIUSD", "XTIUSD.r", "XTIUSD.pro", "CL-OIL"),
+    "NG-C": ("NG-C", "NG-C+", "NATGAS+", "NATGAS", "NATGAS.r", "NGAS+", "NGAS", "XNGUSD", "XNGUSD+", "XNGUSD.r", "XNGUSD.pro"),
+    "GER40": ("GER40+", "GER40", "GER40.r", "GER40.pro", "DE40+", "DE40", "DE40.r", "DE40.pro", "DAX40", "DAX40.r", "GER40ft+"),
 }
 _ROOTS = {
     "XAUUSD": ("XAUUSD", "GOLD"),
@@ -1185,11 +1234,11 @@ _ROOTS = {
     "NG-C": ("NGC", "NATGAS", "NGAS", "XNGUSD"),
     "GER40": ("GER40", "GER30", "DE40", "DAX40", "GDAXI", "DAX"),
 }
-_TAIL = {"", "R", "M", "C", "I", "P", "E", "FT", "FUT", "FUTURE", "CASH", "PRO", "RAW", "ECN", "SB"}
+_TAIL = {"", "R", "M", "C", "I", "P", "E", "FT", "FUT", "FUTURE", "CASH", "PRO", "RAW", "ECN", "SB", "SC", "STD", "VIP"}
 
 
 def _flat_name(name: str) -> str:
-    return str(name).upper().replace(".", "").replace("+", "").replace("-", "").replace("_", "").replace(" ", "")
+    return str(name).upper().replace(".", "").replace("+", "").replace("-", "").replace("_", "").replace(" ", "").replace("#", "")
 
 
 def _in_band(symbol: str, bid: float) -> bool:
@@ -2029,6 +2078,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         "positions": positions,
         "manage": manage_enabled(),
         "ice_auto": ice_enabled(),
+        "scalp_auto": scalp_enabled(),
         "account": _account(host),
         "research": research,
         "feed": _feed(quote, ((bars_by_chart.get(chart) or [None])[-1] or {}).get("time", ""), chart),
@@ -2072,6 +2122,81 @@ async def signals_ice(host: Any, request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "on": ice_enabled()})
     set_ice(bool(payload.get("on")))
     return web.json_response({"ok": True, "on": ice_enabled()})
+
+
+def _scalp_file() -> Path:
+    return Path.cwd() / "scalp_auto.txt"
+
+
+def scalp_enabled() -> bool:
+    try:
+        return _scalp_file().read_text(encoding="utf-8").strip().lower() == "on"
+    except Exception:
+        return False
+
+
+def set_scalp(on: bool) -> None:
+    _scalp_file().write_text("on\n" if on else "off\n", encoding="utf-8")
+
+
+_SCALP_SENT: set[str] = set()
+_SCALP_LOCK = threading.Lock()
+
+
+def _scalp_auto_send(host: Any, payload: dict[str, Any]) -> None:
+    """One fresh scalp at 1.5R. A late scalp is not chased. No other row is sent."""
+    if not scalp_enabled() or not isinstance(payload, dict):
+        return
+    if payload.get("positions"):
+        return
+    symbol = str(payload.get("symbol") or "")
+    broker = str(payload.get("broker") or symbol)
+    row = next((item for item in (payload.get("rows") or []) if isinstance(item, dict) and item.get("chart") == "SCALP"), None)
+    if row is None or not row.get("button") or not row.get("tradeable"):
+        return
+    if row.get("late") or row.get("missed") or str(row.get("state") or "") in {"LATE", "OPEN"}:
+        return
+    try:
+        multiple = float(row.get("r") or 0)
+        stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
+        target = float(row.get("target") or (row.get("targets") or [None])[0])
+    except (TypeError, ValueError, IndexError):
+        return
+    if multiple < 1.5 or stop <= 0 or target <= 0:
+        return
+    key = "|".join((symbol, str(row.get("side")), format(stop, ".5f"), format(target, ".5f")))
+    with _SCALP_LOCK:
+        if key in _SCALP_SENT:
+            return
+        _SCALP_SENT.add(key)
+    try:
+        host.runtime.execute_owner_order_clean(
+            symbol=broker,
+            timeframe=Timeframe.M1,
+            order_type="MARKET_BUY" if row.get("side") == "BUY" else "MARKET_SELL",
+            requested_entry=None,
+            stop=stop,
+            targets=(target,),
+            target_specs=(),
+            requested_risk_pct=2.0,
+            horizon_lane="INTRADAY",
+            owner_note="ZEUS SCALP AUTO",
+        )
+    except Exception:
+        with _SCALP_LOCK:
+            _SCALP_SENT.discard(key)
+
+
+async def signals_scalp(host: Any, request: web.Request) -> web.Response:
+    """Scalp auto. Off until this is on. It sends one fresh scalp and does not chase a late one."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or "on" not in body:
+        return web.json_response({"ok": True, "on": scalp_enabled()})
+    set_scalp(bool(body.get("on")))
+    return web.json_response({"ok": True, "on": scalp_enabled()})
 
 
 async def signals_positions(host: Any, request: web.Request) -> web.Response:
@@ -2155,6 +2280,7 @@ async def signals_snapshot(host: Any, request: web.Request) -> web.Response:
 
         start(host)
         announce(payload)
+        _scalp_auto_send(host, payload)
     except Exception:
         pass
     return web.json_response(payload)
@@ -2353,7 +2479,7 @@ def _auto_pass(host: Any, cfg: dict[str, Any]) -> None:
         if row is None:
             continue
         target = float((row.get("targets") or [row.get("target")])[0])
-        mark = symbol + "|" + str(row.get("chart")) + "|" + str(row.get("side")) + "|" + format(float(row.get("entry") or 0), ".5f")
+        mark = symbol + "|" + str(row.get("chart")) + "|" + str(row.get("side")) + "|" + format(float(row.get("risk_stop") or row.get("stop") or 0), ".5f") + "|" + format(target, ".5f")
         previous = sent.get(symbol) if isinstance(sent.get(symbol), dict) else {}
         if previous.get("mark") == mark:
             continue
@@ -2361,7 +2487,7 @@ def _auto_pass(host: Any, cfg: dict[str, Any]) -> None:
         pct = (risk_usd / balance) * 100.0 if balance else None
         try:
             result = host.runtime.execute_owner_order_clean(
-                symbol=symbol,
+                symbol=str(payload.get("broker") or symbol),
                 timeframe=Timeframe.M1,
                 order_type="MARKET_BUY" if row.get("side") == "BUY" else "MARKET_SELL",
                 requested_entry=None,

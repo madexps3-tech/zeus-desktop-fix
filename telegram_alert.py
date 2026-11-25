@@ -595,8 +595,12 @@ def announce(payload: dict[str, Any]) -> None:
         if target is None:
             continue
         guide = str(row.get("guide") or "").strip()
-        key = f"T|{symbol}|{chart}|{row.get('side')}|{row.get('entry')}|{row.get('stop')}|{target}"
-        if row.get("tradeable") and _fresh(key):
+        late = bool(row.get("late") or row.get("missed") or str(row.get("state") or "") == "LATE")
+        open_trade = str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN"
+        stop = row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop")
+        first = targets[0] if targets else target
+        key = f"T|{symbol}|{chart}|{row.get('side')}|{stop}|{first}"
+        if row.get("tradeable") and row.get("button") and not late and not open_trade and _fresh(key):
             offer = token_hex(4)
             cash = _cash_amount()
             money = _money(row, payload.get("account"), _order_percent({"risk": risk, "cash": cash}) or risk, cash)
@@ -664,7 +668,7 @@ def announce(payload: dict[str, Any]) -> None:
                 with _LOCK:
                     _OFFERS.pop(offer, None)
                 _SENT.pop(key, None)
-        if guide and _fresh(f"G|{symbol}|{chart}|{row.get('side')}|{guide}"):
+        if open_trade and guide and _fresh(f"G|{symbol}|{chart}|{row.get('side')}|{guide}"):
             text = f"{label} {chart} {row.get('side')}\n{guide}"
             buttons = _manage_buttons(symbol, str(row.get("side") or ""))
             if buttons:

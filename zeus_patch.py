@@ -204,6 +204,32 @@ if "/api/v19/signals/ice" not in text:
     )
     print("Iceberg auto route added.", flush=True)
 
+if "def signals_scalp" not in text:
+    scalp_method = (
+        "    async def signals_scalp(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import signals_scalp" + newline
+        + "        return await signals_scalp(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the scalp auto handler.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, scalp_method + marker, 1)
+    print("Scalp auto handler added.", flush=True)
+
+if "/api/v19/signals/scalp" not in text:
+    old_ice_route = 'app.router.add_post("/api/v19/signals/ice", self.signals_ice)'
+    if old_ice_route not in text:
+        print("Could not find the iceberg route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_ice_route,
+        old_ice_route + newline + '        app.router.add_post("/api/v19/signals/scalp", self.signals_scalp)',
+        1,
+    )
+    print("Scalp auto route added.", flush=True)
+
 if "def signals_ticket" not in text:
     ticket_method = (
         "    async def signals_ticket(self, request: web.Request) -> web.Response:" + newline
