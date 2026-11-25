@@ -33,6 +33,7 @@ from zeus3.v19.signals_engine import (
     record,
     session_levels,
     settle_rows,
+    quiet_walk,
     _band,
     _closed,
     _time,
@@ -822,6 +823,7 @@ function paint(){
     <div>DELTA 5s</div><b>${f.delta_5s??"not in this book"}</b>
     <div>DELTA 60s</div><b>${f.delta_60s??"not in this book"}</b>
     <div>WHO IS HITTING</div><b class="${f.stepping==="BUYERS"?"good":(f.stepping==="SELLERS"?"bad":"")}">${f.stepping||"—"}</b>
+    ${f.walk?`<div>WALK</div><b>${f.walk}</b>`:""}
     <div>VALUE HIGH</div><b>${f.vah??"not in the file"}</b>
     <div>POC</div><b>${f.poc??"not in the file"}</b>
     <div>VALUE LOW</div><b>${f.val??"not in the file"}</b>
@@ -2028,6 +2030,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     stepping = "BUYERS" if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta > 0 else (
         "SELLERS" if isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta < 0 else "QUIET"
     )
+    walk = quiet_walk(symbol, bars_by_chart.get("M1") or [], bid, ask, book)
     shots: dict[str, list[dict[str, float]]] = {}
     if any(isinstance(row, dict) and row.get("tradeable") for row in rows):
         def compact(name: str) -> list[dict[str, float]]:
@@ -2073,6 +2076,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
             "unfinished_high": book.get("unfinished_high"),
             "unfinished_low": book.get("unfinished_low"),
             "stepping": stepping,
+            "walk": walk,
             "note": str(book.get("reason") or ""),
         },
         "positions": positions,

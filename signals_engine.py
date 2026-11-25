@@ -2614,6 +2614,44 @@ def manage_decision(
 
 
 
+def quiet_walk(symbol: str, bars: list[dict[str, Any]] | None, bid: Any, ask: Any, book: dict[str, Any] | None) -> str:
+    """Price has travelled while nobody is hitting. Not a trade."""
+    amount = float(EDGE.get(symbol, 0.0) or 0.0)
+    if amount <= 0 or not isinstance(book, dict):
+        return ""
+    longer = book.get("delta_60s")
+    if not isinstance(longer, (int, float)) or isinstance(longer, bool) or abs(float(longer)) >= 10:
+        return ""
+    short = book.get("delta_5s")
+    if isinstance(short, (int, float)) and not isinstance(short, bool) and float(short) != 0:
+        return ""
+    try:
+        price = (float(bid) + float(ask)) / 2.0
+    except (TypeError, ValueError):
+        return ""
+    if price <= 0:
+        return ""
+    lows: list[float] = []
+    highs: list[float] = []
+    for bar in (bars or [])[-90:]:
+        if not isinstance(bar, dict):
+            continue
+        try:
+            lows.append(float(bar["low"]))
+            highs.append(float(bar["high"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not lows or not highs:
+        return ""
+    up = price - min(lows)
+    down = max(highs) - price
+    if up >= amount and up > down:
+        return f"Walked up {up:.10g}. The book is quiet."
+    if down >= amount and down > up:
+        return f"Walked down {down:.10g}. The book is quiet."
+    return ""
+
+
 def _band(symbol: str, pips: float = 5.0) -> float:
     """Five pips is close enough to bank. The step is the pair's own pip."""
     return float(PIP.get(symbol, 0.0)) * pips
