@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 URL = "http://127.0.0.1:8783/"
+HOME = "http://127.0.0.1:8783/v19/signals"
 LOG = ROOT / "ZEUS_SERVER.log"
 PROGRESS = ROOT / "ZEUS_PROGRESS.txt"
 ICON = ROOT / "zeus.ico"
@@ -212,7 +213,7 @@ def main() -> int:
         for _ in range(900):
             _set_window_icon(ICON)
             if _up():
-                window.load_url(URL)
+                window.load_url(HOME)
                 return
             line = _status()
             try:

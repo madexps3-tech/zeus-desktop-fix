@@ -492,6 +492,26 @@ else:
     page.write_bytes(page_text.encode("utf-8"))
     print("Trading page opens before the research brain.", flush=True)
 
+page_path = Path("src") / "zeus3" / "v19" / "web.py"
+page_now = page_path.read_text(encoding="utf-8")
+pnl = "\r\n" if "\r\n" in page_now else "\n"
+brain_call = "self.integrated_brain = await asyncio.to_thread(" + pnl + "                    self._new_integrated_brain, self.runtime)"
+if "_open_page_then_finish" in page_now and brain_call in page_now:
+    page_now = page_now.replace(
+        brain_call,
+        "self.integrated_brain = None",
+        1,
+    )
+    page_now = page_now.replace("start_shadow_hunt()", "None", 1)
+    page_path.write_bytes(page_now.encode("utf-8"))
+    print("World Brain is not started.", flush=True)
+elif "start_shadow_hunt()" in page_now:
+    page_now = page_now.replace("start_shadow_hunt()", "None", 1)
+    page_path.write_bytes(page_now.encode("utf-8"))
+    print("The shadow hunt is not started.", flush=True)
+else:
+    print("World Brain is already left off.", flush=True)
+
 
 boot_path = Path("src") / "zeus3" / "v19" / "web.py"
 boot = boot_path.read_text(encoding="utf-8")

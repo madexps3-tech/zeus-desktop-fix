@@ -40,11 +40,76 @@ from zeus3.v19.signals_engine import (
 )
 
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_CANDLE_FILE = Path("signal_candles.json")
+ROW_FEED = ("M1", "M15", "H1", "H4", "D1")
+_REFRESHING: set[str] = set()
+_REFRESH_LOCK = threading.Lock()
 _POINT_VALUE: dict[str, tuple[float, float]] = {}
 _LOCK = threading.Lock()
 _ORDER_BUSY = threading.Event()
 _LAST: dict[str, dict[str, Any]] = {}
 _VIEW: dict[str, dict[str, Any]] = {}
+
+
+def _feed_names(chart: str) -> tuple[str, ...]:
+    if chart in ROW_FEED:
+        return ROW_FEED
+    return ROW_FEED + (chart,)
+
+
+def _remember_bars(key: str, bars: list[dict[str, Any]]) -> None:
+    try:
+        data: dict[str, Any] = {}
+        if _CANDLE_FILE.is_file():
+            loaded = json.loads(_CANDLE_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        data[key] = bars[-200:]
+        _CANDLE_FILE.write_text(json.dumps(data), encoding="utf-8")
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return
+
+
+def _load_saved_bars() -> None:
+    if not _CANDLE_FILE.is_file():
+        return
+    try:
+        loaded = json.loads(_CANDLE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(loaded, dict):
+        return
+    for key, bars in loaded.items():
+        if isinstance(key, str) and isinstance(bars, list) and bars:
+            _CACHE[key] = (0.0, bars)
+
+
+def _refresh_later(host: Any, symbol: str, names: list[str]) -> None:
+    pending = []
+    with _REFRESH_LOCK:
+        for name in names:
+            key = symbol + "|" + name
+            if key in _REFRESHING:
+                continue
+            _REFRESHING.add(key)
+            pending.append(name)
+    if not pending:
+        return
+
+    def work() -> None:
+        for name in pending:
+            try:
+                _bars(host, symbol, name, 0.0, 200)
+            except Exception:
+                pass
+            finally:
+                with _REFRESH_LOCK:
+                    _REFRESHING.discard(symbol + "|" + name)
+
+    threading.Thread(target=work, name="zeus-candles", daemon=True).start()
+
+
+_load_saved_bars()
 
 LABELS = {
     "XAUUSD": "GOLD",
@@ -102,7 +167,7 @@ tr.pick{outline:1px solid var(--warn)}
 .pairq .sub{display:block;color:var(--muted);font:11px Consolas,monospace}
 </style></head><body>
 <header>
-  <a href="/v19/chart">CHART</a><a href="/v19/trade-desk">TRADE DESK</a><a href="/v19/auto">AUTO</a><a href="/v19/shadow">SHADOW</a>
+  <a href="/v19/auto">AUTO</a>
   <h1>SIGNALS</h1>
   <span class="muted" id="clock"></span>
 </header>
@@ -133,7 +198,6 @@ tr.pick{outline:1px solid var(--warn)}
     <div class="muted watchlabel">WATCHER</div>
     <div id="alerts" class="muted">Quiet until a new signal on one of the nine pairs.</div>
     <table id="grid"></table>
-    <div id="research" class="muted" style="margin-top:8px"></div>
   </section>
   <aside>
     <section class="card">
@@ -164,7 +228,25 @@ function buttons(){
   $("pairs").innerHTML=PAIRS.map(p=>`<button class="${p[0]===symbol?"on":""}" onclick="setPair('${p[0]}')">${p[1]}</button>`).join("");
   $("charts").innerHTML=CHARTS.map(c=>`<button class="${c===chart?"on":""}" onclick="setChart('${c}')">${c}</button>`).join("");
 }
-function remember(j){ if(j&&j.symbol)saved[j.symbol+"|"+(j.chart||chart)]=j; }
+function rememberView(j){
+  if(!j||!j.symbol)return;
+  const key=j.symbol+"|"+(j.chart||chart);
+  saved[key]=j;
+  try{
+    const slim=Object.assign({}, j, {candles:(j.candles||[]).slice(-180)});
+    delete slim.shots;
+    localStorage.setItem("sig_last_"+key, JSON.stringify(slim));
+  }catch(e){}
+}
+function paintSaved(){
+  try{
+    const raw=localStorage.getItem("sig_last_"+symbol+"|"+chart);
+    if(!raw)return;
+    const j=JSON.parse(raw);
+    if(!j||!j.candles||!j.candles.length)return;
+    data=j; draw(); paint();
+  }catch(e){}
+}
 function setPair(s){
   symbol=s; localStorage.setItem("sig_symbol",s); pan=0; fastBid=null; fastAsk=null;
   const kept=saved[s+"|"+chart];
@@ -207,7 +289,7 @@ async function load(force, view){
     if(id!==loadId || want!==symbol || wantChart!==chart)return;
     if(j.chart && j.chart!==wantChart)return;
     if(!r.ok||!j.ok)throw Error(j.message||("HTTP "+r.status));
-    data=j; remember(j); $("clock").textContent=j.server_time||"";
+    data=j; rememberView(j); $("clock").textContent=j.server_time||"";
     const manage=$("manage");
     if(manage){
       manage.dataset.on=j.manage?"1":"0";
@@ -694,9 +776,6 @@ function paint(){
     <div class="muted">${f.note||""}</div>`;
   const pos=data.positions||[];
   $("positions").innerHTML=positionBox(pos);
-  const research=data.research||{};
-  const openBits=(research.open||[]).filter(x=>x.chart==="INTRADAY"||x.chart==="SWING"||x.chart==="ICEBERG"||x.chart==="INTERDAY"||x.chart==="SCALP"||x.chart==="RESPONSIVE").map(x=>x.chart+" "+x.side+" went "+(x.mfe??0)+" before turning");
-  $("research").textContent=(openBits.length?("OPEN · "+openBits.join(" · ")):"No open signal on this pair.")+"\nTAKEN is an order this page sent. The win and loss counts stay in the log.";
   const row=(data.rows||[]).find(r=>r.chart===pickedRow);
   const news=data.news||{};
   const feed=data.feed||{};
@@ -843,6 +922,7 @@ cv.addEventListener("pointermove",e=>{
 cv.addEventListener("pointerleave",()=>{cursor=null;draw()});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
 window.addEventListener("pagehide",()=>{clearInterval(timer);if(control)control.abort()});
+paintSaved();
 buttons();load();timer=setInterval(load,2000);
 let fastBid=null,fastAsk=null,drawnAt=0;
 async function fastQuote(){
@@ -1156,11 +1236,25 @@ def _broker_feed(host: Any, symbol: str, chart: str, scan: bool) -> tuple[Any, d
         return None
     found.sort(key=lambda item: item[0], reverse=True)
     _rank, chosen, quote = found[0]
+    names = ROW_FEED if scan else _feed_names(chart)
     bars_by_chart: dict[str, list[dict[str, Any]]] = {}
-    names = ("M1", "M15", "H1", "H4", "D1") if scan else CHARTS
+    if not scan and all(_CACHE.get(symbol + "|" + name) for name in ROW_FEED):
+        for name in names:
+            cached = _CACHE.get(symbol + "|" + name)
+            if cached:
+                bars_by_chart[name] = cached[1]
+        stale = [
+            name for name in names
+            if monotonic() - _CACHE.get(symbol + "|" + name, (0.0, []))[0] >= (25.0 if name == chart else 90.0)
+        ]
+        if stale:
+            _refresh_later(host, symbol, stale)
+        return quote, bars_by_chart, chosen
     for name in names:
         try:
-            bars_by_chart[name] = _candles_from_rows(worker.bars(chosen, Timeframe(name), count=160 if scan else 400))
+            bars_by_chart[name] = _candles_from_rows(worker.bars(chosen, Timeframe(name), count=200))
+            _CACHE[symbol + "|" + name] = (monotonic(), bars_by_chart[name])
+            _remember_bars(symbol + "|" + name, bars_by_chart[name])
         except Exception:
             bars_by_chart[name] = []
     return quote, bars_by_chart, chosen
@@ -1185,6 +1279,7 @@ def _bars(host: Any, symbol: str, chart: str, max_age: float, count: int = 160) 
         for row in rows
     ]
     _CACHE[key] = (monotonic(), found)
+    _remember_bars(key, found)
     return found
 
 
@@ -1192,33 +1287,35 @@ _FILLED: dict[str, float] = {}
 
 
 def _chart_bars(host: Any, symbol: str, chart: str, scan: bool) -> dict[str, list[dict[str, Any]]]:
-    """The pair on screen can wait for one missing chart. A scan has to see the charts a trade is built from."""
+    """Saved candles paint first. M5 and M30 do not hold the rows up."""
+    names = ("M1", "M15", "H1", "H4", "D1") if scan else _feed_names(chart)
     found: dict[str, list[dict[str, Any]]] = {}
-    if scan:
-        for name in ("M1", "M15", "H1", "H4", "D1"):
-            found[name] = _bars(host, symbol, name, 90.0, 160)
-        for name in CHARTS:
-            found.setdefault(name, _CACHE.get(symbol + "|" + name, (0.0, []))[1])
-        return found
-    missing: list[str] = []
-    for name in CHARTS:
-        key = symbol + "|" + name
-        cached = _CACHE.get(key)
+    stale: list[str] = []
+    for name in names:
+        cached = _CACHE.get(symbol + "|" + name)
         fresh = cached is not None and monotonic() - cached[0] < (25.0 if name == chart else 90.0)
-        if fresh:
-            found[name] = cached[1]
-        elif name == chart and not scan:
-            found[name] = _bars(host, symbol, name, 25.0, 200)
-        else:
-            found[name] = cached[1] if cached else []
-            if not cached:
-                missing.append(name)
-    if missing and not _ORDER_BUSY.is_set():
-        for name in missing:
+        found[name] = cached[1] if cached else []
+        if not fresh:
+            stale.append(name)
+    have_rows = all(found.get(name) for name in ROW_FEED)
+    if scan and stale:
+        for name in ROW_FEED:
             try:
-                found[name] = _bars(host, symbol, name, 90.0, 120)
+                found[name] = _bars(host, symbol, name, 90.0, 200)
             except Exception:
-                found[name] = []
+                found[name] = found.get(name) or []
+        return found
+    if have_rows:
+        if stale and not _ORDER_BUSY.is_set():
+            _refresh_later(host, symbol, stale)
+        return found
+    for name in ROW_FEED:
+        try:
+            found[name] = _bars(host, symbol, name, 90.0, 200)
+        except Exception:
+            found[name] = []
+    if chart not in ROW_FEED and not scan and not _ORDER_BUSY.is_set():
+        _refresh_later(host, symbol, [chart])
     return found
 
 
@@ -2317,7 +2414,7 @@ table{width:100%;border-collapse:collapse;font:12px Consolas,monospace}
 td{padding:6px;border-top:1px solid #1a2c3c}
 </style></head><body>
 <header>
-  <a href="/v19/signals">SIGNALS</a><a href="/v19/chart">CHART</a><a href="/v19/trade-desk">TRADE DESK</a>
+  <a href="/v19/signals">SIGNALS</a>
   <h1>AUTO</h1><span class="muted" id="arm">OFF</span>
 </header>
 <main>
