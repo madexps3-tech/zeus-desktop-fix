@@ -22,6 +22,7 @@ from zeus3.v19.signals_engine import (
     align_ladder,
     build_rows,
     liquidity,
+    m5_bands,
     mark_taken,
     manage_decision,
     place_yen,
@@ -182,6 +183,7 @@ tr.pick{outline:1px solid var(--warn)}
   <button onclick="zoom(20)">ZOOM OUT</button>
   <button onclick="fit()">FIT</button>
   <button id="zones" onclick="toggleZones()">ZONES ON</button>
+  <button id="m5" onclick="toggleM5()">M5 OFF</button>
   <label>RISK % <input id="risk" value="2" style="width:72px" oninput="if(data)paint()"></label>
   <label>RISK $ <input id="cash" value="" placeholder="opt" style="width:72px" oninput="if(data)paint()"></label>
   <button id="manage" data-on="0" onclick="toggleManage()">MANAGE OFF</button>
@@ -228,6 +230,7 @@ let data=null, visible=80, pan=0, drag=null, cursor=null, selected=chart, picked
 let busy=false, timer=null, control=null, holdStatusUntil=0, loadId=0;
 const saved={};
 let showZones=localStorage.getItem("sig_zones")!=="0";
+let showM5=localStorage.getItem("sig_m5")==="1";
 function $(id){return document.getElementById(id)}
 function setStatus(text, holdMs){$("status").textContent=text; holdStatusUntil=Date.now()+(holdMs||0)}
 function buttons(){
@@ -278,6 +281,13 @@ function toggleZones(){
   localStorage.setItem("sig_zones", showZones?"1":"0");
   const button=$("zones");
   if(button){button.textContent=showZones?"ZONES ON":"ZONES OFF";button.className=showZones?"on":""}
+  draw();
+}
+function toggleM5(){
+  showM5=!showM5;
+  localStorage.setItem("sig_m5", showM5?"1":"0");
+  const button=$("m5");
+  if(button){button.textContent=showM5?"M5 ON":"M5 OFF";button.className=showM5?"on":""}
   draw();
 }
 async function load(force, view){
@@ -444,22 +454,24 @@ function draw(){
   const step=(plotR-plotL)/Math.max(1,rows.length);
   const zoneButton=$("zones");
   if(zoneButton){zoneButton.textContent=showZones?"ZONES ON":"ZONES OFF";zoneButton.className=showZones?"on":""}
+  const m5Button=$("m5");
+  if(m5Button){m5Button.textContent=showM5?"M5 ON":"M5 OFF";m5Button.className=showM5?"on":""}
+  const view=hi-lo;
+  const bidNow=Number((data.quote||{}).bid);
+  const bandFor=span=>Math.max(view*0.012, Math.min(view*0.04, Math.abs(span)*0.08));
+  const paintZone=(price, height, name, color, x0)=>{
+    const top=price+height/2, bot=price-height/2;
+    if(top<lo||bot>hi) return;
+    const yTop=y(Math.min(hi, top)), yBot=y(Math.max(lo, bot));
+    const boxTop=Math.min(yTop,yBot), boxH=Math.max(3, Math.abs(yBot-yTop));
+    ctx.fillStyle=color; ctx.globalAlpha=0.2;
+    ctx.fillRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
+    ctx.globalAlpha=1; ctx.strokeStyle=color;
+    ctx.strokeRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
+    ctx.fillStyle=color;
+    ctx.fillText(name, x0+4, Math.max(plotT+11, boxTop-3));
+  };
   if(showZones){
-    const view=hi-lo;
-    const bidNow=Number((data.quote||{}).bid);
-    const bandFor=span=>Math.max(view*0.012, Math.min(view*0.04, Math.abs(span)*0.08));
-    const paintZone=(price, height, name, color, x0)=>{
-      const top=price+height/2, bot=price-height/2;
-      if(top<lo||bot>hi) return;
-      const yTop=y(Math.min(hi, top)), yBot=y(Math.max(lo, bot));
-      const boxTop=Math.min(yTop,yBot), boxH=Math.max(3, Math.abs(yBot-yTop));
-      ctx.fillStyle=color; ctx.globalAlpha=0.2;
-      ctx.fillRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
-      ctx.globalAlpha=1; ctx.strokeStyle=color;
-      ctx.strokeRect(x0, boxTop, Math.max(8, plotR-x0), boxH);
-      ctx.fillStyle=color;
-      ctx.fillText(name, x0+4, Math.max(plotT+11, boxTop-3));
-    };
     levels.filter(level=>level.kind==="RANGE").forEach(level=>{
       const high=Number(level.high), lowP=Number(level.low);
       const color=LEVEL_COLOR[(level.name||"").split(" ")[0]]||"#8ea3b8";
@@ -488,6 +500,12 @@ function draw(){
       paintZone(Number(level.price), bandFor(span), level.name, color, x0);
     });
     ctx.globalAlpha=1;
+  }
+  if(showM5){
+    (data.m5||[]).forEach(level=>{
+      const color=level.kind==="LOW"?"#7dcea0":"#f5c16c";
+      paintZone(Number(level.price), bandFor(0), level.name, color, plotL);
+    });
   }
   const flowNow=data.flow||{};
   [["#f0c956", flowNow.poc, "POC"], ["#8ea3b8", flowNow.vah, "VALUE HIGH"], ["#8ea3b8", flowNow.val, "VALUE LOW"]].forEach(line=>{
@@ -2071,6 +2089,7 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         "spread": spread,
         "sessions": levels,
         "pools": pools,
+        "m5": m5_bands(symbol, bars_by_chart, bid),
         "reaction": reaction(bars_by_chart.get(chart) or [], pools),
         "rows": rows,
         "shots": shots,

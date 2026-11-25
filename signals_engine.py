@@ -3291,6 +3291,65 @@ def liquidity(levels: dict[str, Any], bars_by_chart: dict[str, list[dict[str, An
     return pools
 
 
+def m5_bands(symbol: str, bars_by_chart: dict[str, list[dict[str, Any]]], bid: float | None) -> list[dict[str, Any]]:
+    """The nearest 5-minute swing, and only when the 15-minute one is far. Not a trade."""
+    edge = float(EDGE.get(symbol, 0.0) or 0.0)
+    try:
+        mark = float(bid)
+    except (TypeError, ValueError):
+        return []
+    if mark <= 0 or edge <= 0:
+        return []
+    m5 = bars_by_chart.get("M5") or _fold_minutes(bars_by_chart.get("M1") or [], 5)
+    _points5, highs5, lows5 = _ends(m5)
+    _points15, highs15, lows15 = _ends(bars_by_chart.get("M15") or [])
+    found: list[dict[str, Any]] = []
+    for kind, near, far in (("HIGH", highs5, highs15), ("LOW", lows5, lows15)):
+        if not near:
+            continue
+        point = min(near, key=lambda item: abs(float(item["price"]) - mark))
+        if far:
+            other = min(far, key=lambda item: abs(float(item["price"]) - mark))
+            if abs(float(other["price"]) - mark) <= edge:
+                continue
+        price = float(point["price"])
+        found.append({
+            "name": "M5 SWING " + kind,
+            "price": price,
+            "high": price,
+            "low": price,
+            "kind": kind,
+            "time": point.get("time"),
+        })
+    return found
+
+
+def _fold_minutes(bars: list[dict[str, Any]], minutes: int) -> list[dict[str, Any]]:
+    """Build closed bars from 1-minute candles. A short bucket is left out."""
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for bar in bars[:-1] if len(bars) > 1 else []:
+        stamp = _time(bar)
+        try:
+            when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            key = int(when.timestamp()) // (minutes * 60) * (minutes * 60)
+        except (TypeError, ValueError):
+            continue
+        groups.setdefault(key, []).append(bar)
+    folded = []
+    for key in sorted(groups):
+        group = groups[key]
+        if len(group) < minutes:
+            continue
+        folded.append({
+            "open": _num(group[0], "open"),
+            "high": max(_num(bar, "high") for bar in group),
+            "low": min(_num(bar, "low") for bar in group),
+            "close": _num(group[-1], "close"),
+            "time": _time(group[0]),
+        })
+    return folded
+
+
 def reaction(bars: list[dict[str, Any]], pools: list[dict[str, Any]]) -> dict[str, Any]:
     """A wick through a pool that closes back inside is taken. The next pool is only a target."""
     closed = bars[:-1] if len(bars) > 1 else []
