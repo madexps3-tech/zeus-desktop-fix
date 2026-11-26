@@ -769,6 +769,11 @@ function boardLine(payload){
     const tps=coming.coming.tps?coming.coming.tps+" · ":"";
     return {kind:"INCOMING", side:coming.coming.side, text:coming.chart+" "+coming.coming.side+" into "+px(coming.coming.zone), sub:tps+"not a trade yet"};
   }
+  const shown=ranked[0];
+  if(shown){
+    const late=!!(shown.late||shown.missed||shown.state==="LATE");
+    return {kind:late?"LATE":"SHOWN", side:shown.side, text:shown.chart+" "+shown.side+" "+px(shown.entry), sub:late?"late · not an order":"shown · not an order"};
+  }
   return {kind:"QUIET", text:"quiet", sub:""};
 }
 function paintBoard(){
@@ -776,7 +781,7 @@ function paintBoard(){
   if(!box) return;
   box.innerHTML=PAIRS.map(p=>{
     const item=board[p[0]]||{kind:"QUIET", text:"reading", sub:""};
-    const tone=item.kind==="LATE"?"late":(item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"||item.kind==="SWEEP"?"warn":"muted"));
+    const tone=item.kind==="LATE"?"late":(item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"||item.kind==="SWEEP"||item.kind==="SHOWN"?"warn":"muted"));
     return `<div class="pairq" onclick="setPair('${p[0]}')"><b class="${tone}">${p[1]} · ${item.text}</b>${item.sub?`<span class="sub">${item.sub}</span>`:""}</div>`;
   }).join("");
 }
@@ -1068,7 +1073,7 @@ async function watchOthers(){
   }catch(e){}
   finally{ scanning=false; }
 }
-setInterval(watchOthers, 12000);
+setInterval(watchOthers, 4000);
 let positionHtml="", manageNote="";
 function showManageNote(){
   const box=$("positions");
