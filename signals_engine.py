@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,9 @@ ICE_TICK = {
 WING = 2
 LOG = Path("signal_research_v2.jsonl")
 STATE = Path("signal_research_state_v2.json")
+AUCTION = Path("auction_state.json")
+NY = ZoneInfo("America/New_York")
+PROFILE_PAIRS = {"XAUUSD", "XAGUSD", "NAS100", "WTI"}
 FLOW_PAIRS = set(PAIRS)
 # How far a zone may sit past the value edge and still be that edge. Not five pips on every pair.
 EDGE = {
@@ -2049,6 +2053,356 @@ def _test_event(row: dict[str, Any]) -> None:
         return
 
 
+def _ny(moment: datetime | None = None) -> datetime:
+    now = moment or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(NY)
+
+
+def _load_auction() -> dict[str, Any]:
+    try:
+        state = json.loads(AUCTION.read_text(encoding="utf-8")) if AUCTION.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    return state if isinstance(state, dict) else {}
+
+
+def _save_auction(state: dict[str, Any]) -> None:
+    try:
+        AUCTION.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _bar_ny(bar: dict[str, Any]) -> datetime | None:
+    text = str(_time(bar) or "")
+    if not text:
+        return None
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(NY)
+
+
+def _cash_start(now: datetime) -> datetime:
+    """The latest 9:30 New York that has already started. Weekends roll back to Friday."""
+    day = now
+    if day.weekday() >= 5:
+        day = day - timedelta(days=day.weekday() - 4)
+    start = day.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now < start:
+        prev = day - timedelta(days=1)
+        while prev.weekday() >= 5:
+            prev = prev - timedelta(days=1)
+        start = prev.replace(hour=9, minute=30, second=0, microsecond=0)
+    return start
+
+
+def _remember_prior(symbol: str, area: tuple[float, float, float] | None) -> None:
+    """One snapshot per New York date, taken at or after 16:00. Today's snapshot is not yesterday."""
+    if symbol not in PROFILE_PAIRS or area is None:
+        return
+    now = _ny()
+    if (now.hour, now.minute) < (16, 0) or now.weekday() >= 5:
+        return
+    day = now.date().isoformat()
+    state = _load_auction()
+    book = state.setdefault("prior", {})
+    rows = book.get(symbol) if isinstance(book.get(symbol), list) else []
+    if any(isinstance(item, dict) and item.get("day") == day for item in rows):
+        return
+    val, poc, vah = area
+    rows.append({"day": day, "val": float(val), "poc": float(poc), "vah": float(vah)})
+    book[symbol] = rows[-6:]
+    _save_auction(state)
+
+
+def _prior_area(symbol: str, session: datetime) -> tuple[float, float, float] | None:
+    rows = (_load_auction().get("prior") or {}).get(symbol)
+    if not isinstance(rows, list):
+        return None
+    day = session.date().isoformat()
+    older = [item for item in rows if isinstance(item, dict) and str(item.get("day") or "") < day]
+    if not older:
+        return None
+    saved = older[-1]
+    try:
+        val, poc, vah = float(saved["val"]), float(saved["poc"]), float(saved["vah"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (val <= poc <= vah) or vah <= val:
+        return None
+    return val, poc, vah
+
+
+def _freeze(symbol: str, chart: str, side: str, level: float, day: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """The first prices for this level stand. A later tick does not become a new entry."""
+    state = _load_auction()
+    fired = state.setdefault("fired", {})
+    key = "|".join((symbol, chart, side, str(round(float(level), 2)), day))
+    saved = fired.get(key) if isinstance(fired.get(key), dict) else None
+    if saved is not None:
+        return saved
+    fired[key] = fields
+    if len(fired) > 400:
+        for old in list(fired)[:-400]:
+            fired.pop(old, None)
+    _save_auction(state)
+    return fields
+
+
+def _auction_order(
+    chart: str,
+    side: str,
+    reason: str,
+    entry: float,
+    stop: float,
+    targets: list[float],
+    when: str,
+    note: str,
+    trend: str,
+) -> dict[str, Any]:
+    risk = abs(entry - stop)
+    ahead = [price for price in targets if (price > entry if side == "BUY" else price < entry)]
+    row = _wait(chart, note, trend)
+    row["button"] = False
+    if risk <= 0 or not ahead:
+        row["note"] = note + " Nothing is ahead of the close. Not an order."
+        return row
+    first = ahead[0]
+    multiple = abs(first - entry) / risk
+    row.update({
+        "side": side,
+        "reason": reason,
+        "entry": round(entry, 5),
+        "stop": round(stop, 5),
+        "risk_stop": round(stop, 5),
+        "target": round(first, 5),
+        "targets": [round(price, 5) for price in ahead],
+        "r": round(multiple, 2),
+        "time": when,
+        "state": "READY" if multiple + 1e-9 >= BUTTON_R else "SHOWN",
+        "tradeable": multiple + 1e-9 >= BUTTON_R,
+        "button": multiple + 1e-9 >= BUTTON_R,
+        "note": note,
+    })
+    if not row["tradeable"]:
+        row["note"] = note + f" {row['r']}R. Under 1.5R. Not an order."
+    return row
+
+
+def _prior_row(symbol: str, bars: list[dict[str, Any]], spread: float, trend: str) -> dict[str, Any]:
+    if symbol not in PROFILE_PAIRS:
+        return _wait("PRIOR", "This market has no futures value in the file. Not a trade.", trend)
+    session = _cash_start(_ny())
+    area = _prior_area(symbol, session)
+    if area is None:
+        return _wait("PRIOR", "Yesterday's value is not saved yet. It is written at 16:00 New York.", trend)
+    val, poc, vah = area
+    start = session
+    end = start + timedelta(hours=6, minutes=30)
+    chosen = None
+    outside = ""
+    extreme = 0.0
+    counted = 0
+    for bar in _closed(bars):
+        stamp = _bar_ny(bar)
+        if stamp is None or stamp < start or stamp >= end:
+            continue
+        close = _num(bar, "close")
+        high = _num(bar, "high")
+        low = _num(bar, "low")
+        if outside == "LOW":
+            extreme = min(extreme, low)
+            counted += 1
+            if close > val:
+                chosen = ("FAIL", "BUY", val, extreme, bar)
+                outside = ""
+                continue
+            if counted >= 2 and close < val:
+                chosen = ("ACCEPT", "SELL", val, extreme, bar)
+                outside = ""
+                continue
+        elif outside == "HIGH":
+            extreme = max(extreme, high)
+            counted += 1
+            if close < vah:
+                chosen = ("FAIL", "SELL", vah, extreme, bar)
+                outside = ""
+                continue
+            if counted >= 2 and close > vah:
+                chosen = ("ACCEPT", "BUY", vah, extreme, bar)
+                outside = ""
+                continue
+        if close < val:
+            if outside != "LOW":
+                outside, extreme, counted = "LOW", low, 1
+        elif close > vah:
+            if outside != "HIGH":
+                outside, extreme, counted = "HIGH", high, 1
+    if chosen is None:
+        return _wait("PRIOR", f"Prior value {round(val, 5)} to {round(vah, 5)}. No close back in, and no two closes still outside.", trend)
+    kind, side, level, extreme, bar = chosen
+    pad = max(float(spread or 0.0), float(PIP.get(symbol, 0.0) or 0.0))
+    entry = _num(bar, "close")
+    width = vah - val
+    if kind == "FAIL":
+        stop = extreme - pad if side == "BUY" else extreme + pad
+        targets = [poc, vah] if side == "BUY" else [poc, val]
+        text = f"Prior {round(val, 5)} to {round(vah, 5)}. Close back inside. Failed auction."
+    else:
+        stop = level + pad if side == "SELL" else level - pad
+        targets = [level + width] if side == "BUY" else [level - width]
+        text = f"Prior {round(val, 5)} to {round(vah, 5)}. Two closes still outside. Accepted."
+    frozen = _freeze(symbol, "PRIOR", side, level, start.date().isoformat(), {
+        "entry": entry, "stop": stop, "targets": targets, "time": _time(bar), "note": text, "reason": kind,
+    })
+    return _auction_order("PRIOR", side, str(frozen.get("reason") or kind), float(frozen["entry"]), float(frozen["stop"]), list(frozen["targets"]), str(frozen.get("time") or ""), str(frozen.get("note") or text), trend)
+
+
+def _balance_row(symbol: str, bars: list[dict[str, Any]], spread: float, trend: str) -> dict[str, Any]:
+    if symbol != "NAS100":
+        return _wait("BALANCE", "The initial balance is the first hour after 9:30 New York. That is Nasdaq, not this market.", trend)
+    start = _cash_start(_ny())
+    hour = start + timedelta(hours=1)
+    now = _ny()
+    if now < hour:
+        return _wait("BALANCE", "The first hour after 9:30 New York is still forming. Not a trade.", trend)
+    highs = []
+    lows = []
+    later = []
+    for bar in _closed(bars):
+        stamp = _bar_ny(bar)
+        if stamp is None or stamp < start:
+            continue
+        if stamp < hour:
+            highs.append(_num(bar, "high"))
+            lows.append(_num(bar, "low"))
+        else:
+            later.append(bar)
+    if not highs or not lows:
+        return _wait("BALANCE", "The first hour has no candles yet. Not a trade.", trend)
+    top, bottom = max(highs), min(lows)
+    if top <= bottom:
+        return _wait("BALANCE", "The first hour has no range. Not a trade.", trend)
+    chosen = None
+    outside = ""
+    extreme = 0.0
+    counted = 0
+    for bar in later:
+        close = _num(bar, "close")
+        high = _num(bar, "high")
+        low = _num(bar, "low")
+        if outside == "HIGH":
+            extreme = max(extreme, high)
+            counted += 1
+            if close < top:
+                chosen = ("FAIL", "SELL", top, extreme, bar)
+                outside = ""
+                continue
+            if counted >= 2 and close > top:
+                chosen = ("DRIVE", "BUY", top, extreme, bar)
+                outside = ""
+                continue
+        elif outside == "LOW":
+            extreme = min(extreme, low)
+            counted += 1
+            if close > bottom:
+                chosen = ("FAIL", "BUY", bottom, extreme, bar)
+                outside = ""
+                continue
+            if counted >= 2 and close < bottom:
+                chosen = ("DRIVE", "SELL", bottom, extreme, bar)
+                outside = ""
+                continue
+        if close > top:
+            if outside != "HIGH":
+                outside, extreme, counted = "HIGH", high, 1
+        elif close < bottom:
+            if outside != "LOW":
+                outside, extreme, counted = "LOW", low, 1
+    if chosen is None:
+        return _wait("BALANCE", f"Initial balance {round(bottom, 5)} to {round(top, 5)}. No two closes outside, and no close back in.", trend)
+    kind, side, level, extreme, bar = chosen
+    pad = max(float(spread or 0.0), 1.0)
+    entry = _num(bar, "close")
+    height = top - bottom
+    if kind == "FAIL":
+        stop = extreme + pad if side == "SELL" else extreme - pad
+        targets = [bottom if side == "SELL" else top, bottom if side == "BUY" else top]
+        text = f"Initial balance {round(bottom, 5)} to {round(top, 5)}. Close back inside. The break failed."
+    else:
+        stop = (top - pad) if side == "BUY" else (bottom + pad)
+        targets = [top + height] if side == "BUY" else [bottom - height]
+        text = f"Initial balance {round(bottom, 5)} to {round(top, 5)}. Two closes still outside. Initiative."
+    frozen = _freeze(symbol, "BALANCE", side, level, start.date().isoformat(), {
+        "entry": entry, "stop": stop, "targets": targets, "time": _time(bar), "note": text, "reason": kind,
+    })
+    return _auction_order("BALANCE", side, str(frozen.get("reason") or kind), float(frozen["entry"]), float(frozen["stop"]), list(frozen["targets"]), str(frozen.get("time") or ""), str(frozen.get("note") or text), trend)
+
+
+def _unfinished_row(symbol: str, bars: list[dict[str, Any]], book: dict[str, Any] | None, spread: float, area: tuple[float, float, float] | None, trend: str) -> dict[str, Any]:
+    if symbol not in LADDER_PAIRS:
+        return _wait("UNFINISHED", "No unfinished price in the file. Not a trade.", trend)
+    low = _price_field(book, "unfinished_low")
+    high = _price_field(book, "unfinished_high")
+    if low is None and high is None:
+        return _wait("UNFINISHED", "No unfinished price in the file. Not a trade.", trend)
+    hits = []
+    start = _cash_start(_ny())
+    for level, side in ((low, "BUY"), (high, "SELL")):
+        if level is None:
+            continue
+        seen = False
+        extreme = float(level)
+        for bar in _closed(bars):
+            stamp = _bar_ny(bar)
+            if stamp is None or stamp < start:
+                continue
+            price_low = _num(bar, "low")
+            price_high = _num(bar, "high")
+            close = _num(bar, "close")
+            if side == "BUY" and price_low <= float(level):
+                seen = True
+                extreme = min(extreme, price_low)
+            if side == "SELL" and price_high >= float(level):
+                seen = True
+                extreme = max(extreme, price_high)
+            if not seen:
+                continue
+            back = close > float(level) if side == "BUY" else close < float(level)
+            if back:
+                hits.append((side, float(level), extreme, bar))
+                break
+    if not hits:
+        shown = []
+        if low is not None:
+            shown.append(f"low {round(low, 5)}")
+        if high is not None:
+            shown.append(f"high {round(high, 5)}")
+        return _wait("UNFINISHED", "Unfinished " + " and ".join(shown) + ". No close back through it.", trend)
+    side, level, extreme, bar = max(hits, key=lambda item: str(_time(item[3])))
+    pad = max(float(spread or 0.0), float(PIP.get(symbol, 0.0) or 0.0))
+    entry = _num(bar, "close")
+    stop = extreme - pad if side == "BUY" else extreme + pad
+    targets: list[float] = []
+    if area is not None:
+        val, poc, vah = area
+        targets = [poc, vah] if side == "BUY" else [poc, val]
+    text = f"Unfinished {'low' if side == 'BUY' else 'high'} {round(level, 5)}. Price traded it and closed back through."
+    if not targets:
+        text += " Nothing in value is ahead."
+    day = _cash_start(_ny()).date().isoformat()
+    frozen = _freeze(symbol, "UNFINISHED", side, level, day, {
+        "entry": entry, "stop": stop, "targets": targets, "time": _time(bar), "note": text, "reason": "REVISIT",
+    })
+    return _auction_order("UNFINISHED", side, "REVISIT", float(frozen["entry"]), float(frozen["stop"]), list(frozen.get("targets") or []), str(frozen.get("time") or ""), str(frozen.get("note") or text), trend)
+
+
 def build_rows(
     symbol: str,
     bars_by_chart: dict[str, list[dict[str, Any]]],
@@ -2082,6 +2436,7 @@ def build_rows(
     if isinstance(bid, (int, float)) and isinstance(ask, (int, float)):
         mid = (float(bid) + float(ask)) / 2.0
     area = _value_area(book, mid if mid is not None else bid, symbol)
+    _remember_prior(symbol, area)
     intraday = _choose(symbol, "INTRADAY", state, closed, intraday_zones, spread, beyond)
     intraday_note = "No close back from the value low or the value high."
     if area is None:
@@ -2283,6 +2638,12 @@ def build_rows(
     for row in rows:
         if row.get("side") and row.get("entry") is not None and row.get("stop") is not None:
             _guide(row, book, closed, symbol, bid, ask)
+    for maker in (_prior_row(symbol, m1, spread, state), _balance_row(symbol, m1, spread, state), _unfinished_row(symbol, m1, book, spread, area, state)):
+        if maker.get("tradeable"):
+            _limits(maker, symbol, spread)
+            _arm_button(maker)
+        maker["market"] = state
+        rows.append(maker)
     sweep = _sweep_row(symbol, m1, area, book, spread, highs15, lows15)
     if sweep is not None:
         rows.append(sweep)
