@@ -1802,10 +1802,10 @@ def _spent(symbol: str, chart: str, side: str, zone: float) -> bool:
 
 
 def _limits(row: dict[str, Any], symbol: str, spread: float) -> None:
-    """A zero spread, a one-pip euro stop, and a gold stop inside $2 are not buttons."""
+    """A missing quote, a one-pip euro stop, and a gold stop inside $2 are not buttons. A raw quote can have no spread."""
     if not row.get("side") or row.get("entry") is None or row.get("stop") is None or not row.get("tradeable"):
         return
-    if spread is None or float(spread) <= 0:
+    if spread is None or float(spread) < 0:
         _silence(row, "The spread is not on the quote, so this is not an order.")
         return
     risk = abs(float(row["entry"]) - float(row["stop"]))
