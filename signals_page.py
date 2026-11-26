@@ -38,6 +38,7 @@ from zeus3.v19.signals_engine import (
     session_levels,
     settle_rows,
     quiet_walk,
+    _append,
     _band,
     _closed,
     _time,
@@ -1798,6 +1799,16 @@ def _run_manage(
         if warn and warn != saved["told"]:
             _announce_manage(symbol, warn, int(pos["ticket"]), entry)
             saved["told"] = warn
+            _append({
+                "event": "MANAGE",
+                "book": "ticket",
+                "symbol": symbol,
+                "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "ticket": int(pos["ticket"]),
+                "side": side,
+                "entry": entry,
+                "line": warn,
+            })
         trades[key] = saved
         if saved["line"] and close:
             pos["manage_line"] = saved["line"]
@@ -2121,11 +2132,16 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         dom_day["idle"] = dom_reason["text"]
     _broker_protection(rows, positions)
     _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
-    if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:
+    hot = any(
+        isinstance(row, dict) and row.get("tradeable") and row.get("side") and row.get("entry") is not None
+        for row in rows
+    )
+    due = scan or hot or monotonic() - _FILLED.get(symbol, 0.0) >= 15.0
+    if not due:
         research = {"taken": {}, "if_taken": {}}
     else:
         try:
-            research = record(symbol, rows, bars_by_chart)
+            research = record(symbol, rows, bars_by_chart, bid, ask, book)
         except Exception:
             research = {"taken": {}, "if_taken": {}}
         else:

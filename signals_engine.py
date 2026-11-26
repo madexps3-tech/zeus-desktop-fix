@@ -3589,18 +3589,105 @@ def _finish(state: dict[str, Any], store: str, summary_name: str, bars_by_chart:
         open_rows.pop(key, None)
 
 
-def record(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def _note_manage(
+    state: dict[str, Any],
+    symbol: str,
+    bid: float | None,
+    ask: float | None,
+    book: dict[str, Any] | None,
+    now: str,
+) -> None:
+    """One research line when an open row changes from hold, to break-even, to bank, or to hold the rest."""
+    if not isinstance(bid, (int, float)) or isinstance(bid, bool):
+        return
+    if not isinstance(ask, (int, float)) or isinstance(ask, bool):
+        return
+    for row in (state.get("if_open") or {}).values():
+        if str(row.get("symbol")) != symbol or row.get("entry") is None:
+            continue
+        try:
+            entry = float(row["entry"])
+            stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
+        except (TypeError, ValueError):
+            continue
+        targets = []
+        for price in row.get("targets") or []:
+            try:
+                targets.append(float(price))
+            except (TypeError, ValueError):
+                continue
+        if not targets and row.get("target") is not None:
+            try:
+                targets = [float(row["target"])]
+            except (TypeError, ValueError):
+                targets = []
+        decision = _open_guide(
+            side=str(row.get("side") or ""),
+            entry=entry,
+            stop=stop,
+            bid=float(bid),
+            ask=float(ask),
+            targets=targets,
+            book=book,
+            symbol=symbol,
+        )
+        line = str(decision.get("line") or "")
+        if not line or line == row.get("manage_line"):
+            continue
+        row["manage_line"] = line
+        _append({
+            "event": "MANAGE",
+            "book": "if_taken",
+            "symbol": symbol,
+            "at": now,
+            "chart": row.get("chart"),
+            "side": row.get("side"),
+            "entry": row.get("entry"),
+            "stop": stop,
+            "line": line,
+        })
+
+
+def record(
+    symbol: str,
+    rows: list[dict[str, Any]],
+    bars_by_chart: dict[str, list[dict[str, Any]]],
+    bid: float | None = None,
+    ask: float | None = None,
+    book: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Score a sent trade for real. Score every other ready row only as IF TAKEN."""
     state = _load_state()
     if_open: dict[str, dict[str, Any]] = state.setdefault("if_open", {})
     if_summary: dict[str, dict[str, int]] = state.setdefault("if_taken", {})
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    seen = state.setdefault("seen_entries", {})
+    for row in rows:
+        coming = row.get("coming") if isinstance(row.get("coming"), dict) else None
+        if not coming or not coming.get("side") or coming.get("zone") is None:
+            continue
+        try:
+            zone = round(float(coming["zone"]), 5)
+        except (TypeError, ValueError):
+            continue
+        coming_key = "|".join(("COMING", now[:10], symbol, str(row.get("chart")), str(coming.get("side")), str(zone)))
+        if coming_key in seen:
+            continue
+        seen[coming_key] = now
+        _append({
+            "event": "COMING",
+            "symbol": symbol,
+            "at": now,
+            "chart": row.get("chart"),
+            "side": coming.get("side"),
+            "zone": zone,
+            "text": coming.get("text") or "",
+        })
     for row in rows:
         if not row.get("side") or not row.get("tradeable"):
             continue
         if row.get("entry") is None:
             continue
-        seen = state.setdefault("seen_entries", {})
         anchor = row.get("risk_stop")
         if anchor is None:
             anchor = row.get("stop")
@@ -3630,6 +3717,7 @@ def record(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, lis
         _append({"event": "IF_TAKEN", "symbol": symbol, "at": now, **{k: row[k] for k in row if k != "note"}})
     _finish(state, "if_open", "if_taken", bars_by_chart, symbol, now)
     _finish(state, "taken_open", "taken", bars_by_chart, symbol, now)
+    _note_manage(state, symbol, bid, ask, book, now)
     _save_state(state)
     open_detail = [
         {
