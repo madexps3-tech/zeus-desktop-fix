@@ -2887,6 +2887,47 @@ def _dom_bucket(summary: dict[str, Any], name: str) -> dict[str, int]:
     }
 
 
+def _dom_same(symbol: str, row: dict[str, Any], saved: dict[str, Any], step: float) -> bool:
+    try:
+        return (
+            str(saved.get("symbol")) == symbol
+            and str(saved.get("side")) == str(row.get("side"))
+            and abs(float(saved["stop"]) - float(row["stop"])) <= step
+            and abs(float(saved["target"]) - float(row["target"])) <= step
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _dom_row_note(
+    symbol: str,
+    row: dict[str, Any],
+    open_rows: dict[str, dict[str, Any]],
+    closed: list[dict[str, Any]],
+    allow: bool,
+    idle: str,
+    step: float,
+) -> str:
+    """The row says what happened to this level. Logged is not a result."""
+    for saved in closed:
+        if not _dom_same(symbol, row, saved, step):
+            continue
+        result = str(saved.get("result") or "")
+        if result == "target":
+            return "Logged. The target printed. The stop did not."
+        if result == "stop":
+            return "Logged. The stop printed. The target did not."
+        if result == "both":
+            return "Logged. The target and the stop both printed. Not counted as a win."
+        return "Logged. Neither printed. It expired."
+    for saved in open_rows.values():
+        if _dom_same(symbol, row, saved, step):
+            return "Logged. Open. Neither the target nor the stop has printed."
+    if not allow:
+        return idle or "Not logged."
+    return "Logged. Open. Neither the target nor the stop has printed."
+
+
 def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market: str = "") -> dict[str, Any] | None:
     """Keep each ladder scalp until a price prints. Both in one check is not called a win."""
     if symbol not in DOM_RANGE:
@@ -3001,13 +3042,13 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
             saved["mfe"] = round(max(float(saved.get("mfe") or 0.0), bid_f - entry), 5)
             if bid_f >= target:
                 saved["target_hit"] = True
-            if ask_f <= stop:
+            if bid_f <= stop:
                 saved["stop_hit"] = True
         elif side == "SELL" and ask_f > 0:
             saved["mfe"] = round(max(float(saved.get("mfe") or 0.0), entry - ask_f), 5)
             if ask_f <= target:
                 saved["target_hit"] = True
-            if bid_f >= stop:
+            if ask_f >= stop:
                 saved["stop_hit"] = True
         aged = (now - opened).total_seconds() >= 1800 and not saved.get("target_hit") and not saved.get("stop_hit")
         if not (saved.get("target_hit") or saved.get("stop_hit") or aged):
@@ -3039,9 +3080,12 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
             summary["expired"] = int(summary.get("expired") or 0) + 1
         saved["closed"] = now.strftime("%Y-%m-%d %H:%M:%S")
         _append({"event": "DOM_DONE", **saved})
-        done.append(key)
-    for key in done:
-        open_rows.pop(key, None)
+        done.append(saved)
+    for key in list(open_rows):
+        if any(saved is open_rows.get(key) for saved in done):
+            open_rows.pop(key, None)
+    if isinstance(row, dict) and row.get("side"):
+        row["note"] = _dom_row_note(symbol, row, open_rows, done, allow, idle, step)
     summary["open"] = sum(1 for saved in open_rows.values() if saved.get("symbol") == symbol)
     summary["idle"] = idle
     _save_state(state)
