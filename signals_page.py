@@ -852,7 +852,11 @@ function paint(){
     <div>DELTA 60s</div><b>${f.delta_60s??"not in this book"}</b>
     <div>WHO IS HITTING</div><b class="${f.stepping==="BUYERS"?"good":(f.stepping==="SELLERS"?"bad":"")}">${f.stepping||"—"}</b>
     ${f.walk?`<div>WALK</div><b>${f.walk}</b>`:""}
-    ${f.dom_day?`<div>LADDER</div><b>${f.dom_day.logged||0} logged · ${f.dom_day.target||0} target · ${f.dom_day.stop||0} stop · ${f.dom_day.both||0} both · ${f.dom_day.open||0} open</b>`:""}
+    ${f.dom_day?`<div>LADDER</div><b>${f.dom_day.logged||0} logged · ${f.dom_day.target||0} target · ${f.dom_day.stop||0} stop · ${f.dom_day.both||0} both · ${f.dom_day.open||0} open</b>
+    <div>WITH THE 15-MINUTE</div><b>${(f.dom_day.with&&f.dom_day.with.logged)||0} logged · ${(f.dom_day.with&&f.dom_day.with.target)||0} target · ${(f.dom_day.with&&f.dom_day.with.stop)||0} stop</b>
+    <div>AGAINST IT</div><b>${(f.dom_day.against&&f.dom_day.against.logged)||0} logged · ${(f.dom_day.against&&f.dom_day.against.target)||0} target · ${(f.dom_day.against&&f.dom_day.against.stop)||0} stop</b>
+    <div>RANGE</div><b>${(f.dom_day.range&&f.dom_day.range.logged)||0} logged · ${(f.dom_day.range&&f.dom_day.range.target)||0} target · ${(f.dom_day.range&&f.dom_day.range.stop)||0} stop</b>
+    ${f.dom_day.idle?`<div class="muted">${f.dom_day.idle}</div>`:""}`:""}
     <div>VALUE HIGH</div><b>${f.vah??"not in the file"}</b>
     <div>POC</div><b>${f.poc??"not in the file"}</b>
     <div>VALUE LOW</div><b>${f.val??"not in the file"}</b>
@@ -2102,11 +2106,14 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     latest = _time(minute[-1]) if minute else ""
     settle_rows(symbol, rows, positions, bid, ask, spread, book, latest)
     note_sweep(symbol, next((row for row in rows if row.get("chart") == "SWEEP"), None), bars_by_chart.get("M1") or [])
-    dom = gold_dom_setup(symbol, book, bid, ask, spread)
+    dom_reason: dict[str, str] = {}
+    dom = gold_dom_setup(symbol, book, bid, ask, spread, dom_reason)
     if dom is not None:
         rows.append(dom)
     market = next((str(item.get("market") or "") for item in rows if item.get("market")), "")
     dom_day = note_dom(symbol, dom, bid, ask, market)
+    if isinstance(dom_day, dict) and not dom_day.get("idle") and dom_reason.get("text"):
+        dom_day["idle"] = dom_reason["text"]
     _broker_protection(rows, positions)
     _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
     if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:

@@ -217,8 +217,28 @@ static void WriteMarks(FILE* file, SCStudyInterfaceRef sc, const char* root, dou
     }
     std::fprintf(file, "\"ladder\":[");
     const int count = static_cast<int>(rows.size());
-    const int start = count > 800 ? (count - 800) / 2 : 0;
-    const int stop = count > 800 ? start + 800 : count;
+    int start = 0;
+    int stop = count;
+    if (count > 800)
+    {
+        int center = 0;
+        int best = rows[0].first - tradeTick;
+        if (best < 0) best = -best;
+        for (int index = 1; index < count; ++index)
+        {
+            int distance = rows[index].first - tradeTick;
+            if (distance < 0) distance = -distance;
+            if (distance < best)
+            {
+                best = distance;
+                center = index;
+            }
+        }
+        start = center - 400;
+        if (start < 0) start = 0;
+        if (start > count - 800) start = count - 800;
+        stop = start + 800;
+    }
     for (int index = start; index < stop; ++index)
     {
         if (index > start) std::fprintf(file, ",");

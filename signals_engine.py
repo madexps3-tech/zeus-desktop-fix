@@ -33,6 +33,13 @@ DOM_RANGE = {
     "WTI": (0.10, 0.30),
     "NAS100": (10.0, 30.0),
 }
+# After a stop, the same side is not written again inside this distance for 5 minutes.
+DOM_COOL = {
+    "XAUUSD": 2.0,
+    "WTI": 0.30,
+    "NAS100": 30.0,
+}
+DOM_COOL_SECONDS = 300
 GOLD_MIN_STOP = 2.0
 # A 1-minute wick wider than this is not a scalp. Price units, not pips.
 MAX_WICK = {
@@ -1986,6 +1993,8 @@ def _failed_test(
         return row
     if side == "BUY" and str(market).upper() == "BEARISH":
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
+    if side == "SELL" and str(market).upper() == "BULLISH":
+        row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still rising. The stop is the exit.").strip()
     return row
 
 
@@ -2357,8 +2366,12 @@ def _sweep_row(
     }
 
 
-def gold_dom_setup(symbol: str, book: dict[str, Any] | None, bid: Any, ask: Any, spread: Any) -> dict[str, Any] | None:
+def gold_dom_setup(symbol: str, book: dict[str, Any] | None, bid: Any, ask: Any, spread: Any, reason: dict[str, str] | None = None) -> dict[str, Any] | None:
     """A ladder scalp on gold, oil, or Nasdaq. The distance is that market's own, and only at 1R. Not an order."""
+    def idle(text: str) -> None:
+        if reason is not None:
+            reason["text"] = text
+
     band = DOM_RANGE.get(symbol)
     if band is None or not isinstance(book, dict):
         return None
@@ -2376,10 +2389,12 @@ def gold_dom_setup(symbol: str, book: dict[str, Any] | None, bid: Any, ask: Any,
     except (TypeError, ValueError):
         last = book.get("last")
         if isinstance(last, bool) or not isinstance(last, (int, float)) or float(last) <= 0:
+            idle("The ladder file has no futures price.")
             return None
         futures = float(last)
     shift = ((bid_f + ask_f) / 2.0) - futures
     if abs(shift) > MAX_BASIS.get(symbol, 0.0):
+        idle("The futures price is too far from this quote.")
         return None
     levels = []
     for level in book.get("levels") or []:
@@ -2394,13 +2409,24 @@ def gold_dom_setup(symbol: str, book: dict[str, Any] | None, bid: Any, ask: Any,
         if price > 0:
             levels.append((price, bid_size, ask_size))
     if not levels:
+        idle("The ladder file has no prices.")
         return None
     buy = _dom_side("BUY", ask_f, pad, levels, near, far)
     sell = _dom_side("SELL", bid_f, pad, levels, near, far)
     if buy and sell:
-        return None
-    chosen = buy or sell
+        buy_size = float(buy.get("size") or 0)
+        sell_size = float(sell.get("size") or 0)
+        if buy_size >= sell_size * 2.0:
+            chosen = buy
+        elif sell_size >= buy_size * 2.0:
+            chosen = sell
+        else:
+            idle("Both sides are there. Not logged.")
+            return None
+    else:
+        chosen = buy or sell
     if chosen is None:
+        idle("No size inside this market's own distance.")
         return None
     longer = book.get("delta_60s")
     short = book.get("delta_5s")
@@ -2478,7 +2504,29 @@ def _dom_side(
     }
 
 
-def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market: str = "") -> dict[str, int] | None:
+def _dom_book(side: str, market: str) -> str:
+    """With the 15-minute, against it, or range. A blank state is not a book."""
+    name = str(market or "").upper()
+    if name == "RANGE":
+        return "range"
+    if (name == "BULLISH" and side == "BUY") or (name == "BEARISH" and side == "SELL"):
+        return "with"
+    if (name == "BULLISH" and side == "SELL") or (name == "BEARISH" and side == "BUY"):
+        return "against"
+    return ""
+
+
+def _dom_bucket(summary: dict[str, Any], name: str) -> dict[str, int]:
+    raw = summary.get(name) if isinstance(summary.get(name), dict) else {}
+    return {
+        "logged": int(raw.get("logged") or 0),
+        "target": int(raw.get("target") or 0),
+        "stop": int(raw.get("stop") or 0),
+        "both": int(raw.get("both") or 0),
+    }
+
+
+def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market: str = "") -> dict[str, Any] | None:
     """Keep each ladder scalp until a price prints. Both in one check is not called a win."""
     if symbol not in DOM_RANGE:
         return None
@@ -2496,11 +2544,44 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
     step = float(PIP.get(symbol, 0.1) or 0.1)
     open_for_symbol = any(saved.get("symbol") == symbol for saved in open_rows.values())
     allow = isinstance(row, dict) and bool(row.get("side")) and not open_for_symbol
+    idle = ""
     if allow and symbol == "XAUUSD":
         try:
             allow = abs(float(row["entry"]) - float(row["stop"])) + 1e-9 >= 0.50
         except (TypeError, ValueError):
             allow = False
+        if not allow and not idle:
+            idle = "The gold stop is inside $0.50. Not logged."
+    book_name = ""
+    if allow:
+        book_name = _dom_book(str(row.get("side") or ""), market or str(row.get("market") or ""))
+        if not book_name:
+            allow = False
+            idle = "No 15-minute state. Not counted."
+    cool_rows: list[dict[str, Any]] = state.setdefault("dom_cool", {}).setdefault(symbol, [])
+    now = datetime.now(timezone.utc)
+    fresh_cool = []
+    for item in cool_rows:
+        if not isinstance(item, dict):
+            continue
+        try:
+            when = datetime.strptime(str(item.get("at")), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if (now - when).total_seconds() < DOM_COOL_SECONDS:
+            fresh_cool.append(item)
+    state["dom_cool"][symbol] = fresh_cool
+    if allow:
+        gap = float(DOM_COOL.get(symbol, 0.0) or 0.0)
+        for item in fresh_cool:
+            try:
+                same = str(item.get("side")) == str(row.get("side")) and abs(float(item.get("entry")) - float(row["entry"])) <= gap
+            except (TypeError, ValueError):
+                same = False
+            if same:
+                allow = False
+                idle = "A stop on this side is still inside 5 minutes."
+                break
     if allow:
         key = "|".join((
             symbol,
@@ -2527,6 +2608,7 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
                 "pulled": bool(row.get("pulled")),
                 "iceberg": bool(row.get("iceberg")),
                 "market": market or str(row.get("market") or ""),
+                "book": book_name,
                 "opened": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "mfe": 0.0,
                 "target_hit": False,
@@ -2534,6 +2616,8 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
                 "result": "",
             }
             summary["logged"] = int(summary.get("logged") or 0) + 1
+            bucket = summary.setdefault(book_name, {"logged": 0, "target": 0, "stop": 0, "both": 0})
+            bucket["logged"] = int(bucket.get("logged") or 0) + 1
             _append({"event": "DOM_SCALP", **open_rows[key]})
     try:
         bid_f = float(bid)
@@ -2541,7 +2625,6 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
     except (TypeError, ValueError):
         bid_f = ask_f = 0.0
     done = []
-    now = datetime.now(timezone.utc)
     for key, saved in open_rows.items():
         if saved.get("symbol") != symbol:
             continue
@@ -2568,15 +2651,28 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
         aged = (now - opened).total_seconds() >= 1800 and not saved.get("target_hit") and not saved.get("stop_hit")
         if not (saved.get("target_hit") or saved.get("stop_hit") or aged):
             continue
+        name = str(saved.get("book") or _dom_book(side, str(saved.get("market") or "")))
+        bucket = summary.setdefault(name, {"logged": 0, "target": 0, "stop": 0, "both": 0}) if name in {"with", "against", "range"} else None
         if saved.get("target_hit") and saved.get("stop_hit"):
             saved["result"] = "both"
             summary["both"] = int(summary.get("both") or 0) + 1
+            if bucket is not None:
+                bucket["both"] = int(bucket.get("both") or 0) + 1
         elif saved.get("target_hit"):
             saved["result"] = "target"
             summary["target"] = int(summary.get("target") or 0) + 1
+            if bucket is not None:
+                bucket["target"] = int(bucket.get("target") or 0) + 1
         elif saved.get("stop_hit"):
             saved["result"] = "stop"
             summary["stop"] = int(summary.get("stop") or 0) + 1
+            if bucket is not None:
+                bucket["stop"] = int(bucket.get("stop") or 0) + 1
+            state["dom_cool"][symbol].append({
+                "side": side,
+                "entry": entry,
+                "at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            })
         else:
             saved["result"] = "expired"
             summary["expired"] = int(summary.get("expired") or 0) + 1
@@ -2586,6 +2682,7 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
     for key in done:
         open_rows.pop(key, None)
     summary["open"] = sum(1 for saved in open_rows.values() if saved.get("symbol") == symbol)
+    summary["idle"] = idle
     _save_state(state)
     return {
         "logged": int(summary.get("logged") or 0),
@@ -2593,6 +2690,10 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
         "stop": int(summary.get("stop") or 0),
         "both": int(summary.get("both") or 0),
         "open": int(summary.get("open") or 0),
+        "with": _dom_bucket(summary, "with"),
+        "against": _dom_bucket(summary, "against"),
+        "range": _dom_bucket(summary, "range"),
+        "idle": idle,
     }
 
 
@@ -3961,6 +4062,8 @@ def _offer_missed(
     )
     if str(row.get("chart")) == "RESPONSIVE" and side == "BUY" and str(row.get("market") or "").upper() == "BEARISH":
         row["note"] = (row["note"] + " Higher risk. The price is still falling. The stop is the exit.").strip()
+    if str(row.get("chart")) == "RESPONSIVE" and side == "SELL" and str(row.get("market") or "").upper() == "BULLISH":
+        row["note"] = (row["note"] + " Higher risk. The price is still rising. The stop is the exit.").strip()
 
 
 def _mark_late(row: dict[str, Any]) -> None:
