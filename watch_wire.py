@@ -30,5 +30,13 @@ watch = Path("src") / "zeus3" / "v19" / "watch_page.py"
 if not watch.exists():
     print("Could not find the phone page.", flush=True)
     raise SystemExit(1)
-import watch_face
+face_path = Path(__file__).resolve().with_name("watch_face.py")
+if not face_path.exists():
+    print("Could not find the phone chart file.", flush=True)
+    print(face_path, flush=True)
+    raise SystemExit(1)
+import importlib.util
+spec = importlib.util.spec_from_file_location("watch_face", face_path)
+watch_face = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(watch_face)
 watch_face.apply(watch)
