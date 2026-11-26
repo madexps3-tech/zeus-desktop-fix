@@ -871,8 +871,9 @@ function paint(){
   const newsBox=$("newsline");
   if(newsBox){
     const rows=news.events||[];
-    if(!rows.length) newsBox.innerHTML=`<div class="empty">${news.line||"No news on the calendar."}</div>`;
-    else newsBox.innerHTML=rows.map(ev=>{
+    const after=news.after?`<div class="item high"><span>${String(news.after).replace(/[&<>]/g,c=>({"&":"&","<":"<",">":">"}[c]))}</span></div>`:"";
+    if(!rows.length&&!after) newsBox.innerHTML=`<div class="empty">${news.line||"No news on the calendar."}</div>`;
+    else newsBox.innerHTML=after+rows.map(ev=>{
       const impact=String(ev.impact||"");
       const cls=impact==="HIGH"||impact==="HOLIDAY"?"high":"";
       const name=String(ev.name||"event").replace(/[&<>]/g,c=>({"&":"&","<":"<",">":">"}[c]));
@@ -1246,13 +1247,13 @@ _PRICE = {
 _TRY = {
     "XAUUSD": ("XAUUSD+", "XAUUSD", "XAUUSD.r", "XAUUSD.pro", "XAUUSD.sc", "XAUUSD.a", "GOLD+", "GOLD", "GOLD.r", "GOLD.pro"),
     "XAGUSD": ("XAGUSD+", "XAGUSD", "XAGUSD.r", "XAGUSD.pro", "SILVER+", "SILVER", "SILVER.r"),
-    "NAS100": ("NAS100+", "NAS100", "NAS100.r", "NAS100.pro", "US100+", "US100", "US100.r", "US100.pro", "USTEC+", "USTEC", "USTEC.r", "USTECH", "NAS100ft+"),
+    "NAS100": ("US100.cash", "NAS100+", "NAS100", "NAS100.r", "NAS100.pro", "US100+", "US100", "US100.r", "US100.pro", "USTEC+", "USTEC", "USTEC.r", "USTECH", "NAS100ft+"),
     "BTCUSD": ("BTCUSD", "BTCUSD+", "BTCUSD.r", "BTCUSD.pro"),
     "EURUSD": ("EURUSD+", "EURUSD", "EURUSD.r", "EURUSD.pro"),
     "USDJPY": ("USDJPY+", "USDJPY", "USDJPY.r", "USDJPY.pro"),
-    "WTI": ("USOUSD+", "USOUSD", "USOIL+", "USOIL", "USOIL.r", "USOIL.pro", "WTI+", "WTI", "XTIUSD+", "XTIUSD", "XTIUSD.r", "XTIUSD.pro", "CL-OIL"),
-    "NG-C": ("NG-C", "NG-C+", "NATGAS+", "NATGAS", "NATGAS.r", "NGAS+", "NGAS", "XNGUSD", "XNGUSD+", "XNGUSD.r", "XNGUSD.pro"),
-    "GER40": ("GER40+", "GER40", "GER40.r", "GER40.pro", "DE40+", "DE40", "DE40.r", "DE40.pro", "DAX40", "DAX40.r", "GER40ft+"),
+    "WTI": ("USOIL.cash", "USOUSD+", "USOUSD", "USOIL+", "USOIL", "USOIL.r", "USOIL.pro", "WTI+", "WTI", "XTIUSD+", "XTIUSD", "XTIUSD.r", "XTIUSD.pro", "CL-OIL"),
+    "NG-C": ("NATGAS.cash", "NG-C", "NG-C+", "NATGAS+", "NATGAS", "NATGAS.r", "NGAS+", "NGAS", "XNGUSD", "XNGUSD+", "XNGUSD.r", "XNGUSD.pro"),
+    "GER40": ("GER40.cash", "GER40+", "GER40", "GER40.r", "GER40.pro", "DE40+", "DE40", "DE40.r", "DE40.pro", "DAX40", "DAX40.r", "GER40ft+"),
 }
 _ROOTS = {
     "XAUUSD": ("XAUUSD", "GOLD"),
@@ -1754,13 +1755,7 @@ def _run_manage(
         saved["line"] = decision.get("line") or ""
         saved["risk"] = decision.get("risk")
         saved["dip"] = decision.get("dip")
-        armed = False
-        try:
-            cfg = _auto_load()
-            armed = bool(cfg.get("armed")) and symbol in (cfg.get("symbols") or [])
-        except Exception:
-            armed = False
-        acting = (managing or armed) and close
+        acting = managing and close
         if acting and decision.get("bank"):
             try:
                 _ticket_by_volume(host, int(pos["ticket"]), "CLOSE", None, None, ())
@@ -1848,6 +1843,67 @@ def _feed(quote: Any, candle_time: str, chart: str) -> dict[str, Any]:
     }
 
 
+def _news_kind(name: str) -> str:
+    text = str(name or "").lower()
+    if "pce" in text:
+        return "PCE"
+    if "cpi" in text or "consumer price" in text:
+        return "CPI"
+    if any(word in text for word in ("nonfarm", "non-farm", "nfp", "payroll")):
+        return "JOBS"
+    if "gdp" in text:
+        return "GDP"
+    if any(word in text for word in ("fomc", "federal funds", "interest rate decision", "fed rate")):
+        return "FED"
+    return ""
+
+
+def _news_number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace("%", "").replace(",", "")
+    if not text or text.upper() in {"N/A", "NA", "-"}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _released_line(events: list[dict[str, Any]]) -> str:
+    """After one of the five releases. No figure in the file means no direction."""
+    for row in events:
+        if float(row.get("seconds_from_now") or 0) >= 0:
+            continue
+        kind = _news_kind(str(row.get("name") or ""))
+        if not kind:
+            continue
+        name = str(row.get("name") or kind)
+        actual = _news_number(row.get("actual"))
+        if actual is None:
+            actual = _news_number(row.get("actual_value"))
+        previous = _news_number(row.get("previous"))
+        if previous is None:
+            previous = _news_number(row.get("previous_value"))
+        if previous is None:
+            previous = _news_number(row.get("prior"))
+        if actual is None or previous is None:
+            return f"{name} is out. The figure is not in the file. The direction is not known."
+        if actual == previous:
+            lean = "The usual lean is flat."
+            change = "Unchanged"
+        elif kind == "FED":
+            lean = "The usual lean for gold is down." if actual > previous else "The usual lean for gold is up."
+            change = "Higher" if actual > previous else "Lower"
+        else:
+            lean = "The usual lean for gold is down." if actual > previous else "The usual lean for gold is up."
+            change = "Hotter" if actual > previous else "Cooler"
+        return f"{name} {actual:g} against {previous:g}. {change}. {lean} Not an order."
+    return ""
+
+
 def _news(symbol: str) -> dict[str, Any]:
     global _NEWS
     try:
@@ -1907,6 +1963,7 @@ def _news(symbol: str) -> dict[str, Any]:
         "holiday": holiday_name,
         "events": events,
         "warn": warn,
+        "after": _released_line(upcoming),
     }
 
 
@@ -2048,7 +2105,8 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
     dom = gold_dom_setup(symbol, book, bid, ask, spread)
     if dom is not None:
         rows.append(dom)
-    dom_day = note_dom(symbol, dom, bid, ask)
+    market = next((str(item.get("market") or "") for item in rows if item.get("market")), "")
+    dom_day = note_dom(symbol, dom, bid, ask, market)
     _broker_protection(rows, positions)
     _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
     if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:

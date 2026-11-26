@@ -1353,6 +1353,15 @@ def _guide(
         traveled = (mark - entry) if side == "BUY" else (entry - mark)
         if traveled < 0:
             traveled = 0.0
+    near_target = False
+    if mark is not None:
+        span = abs(float(aim) - entry)
+        if risk > 0 and span <= risk * 1.25:
+            near_target = traveled >= span * 0.90
+        else:
+            near_target = abs(mark - float(aim)) <= _band(symbol)
+    one_r = risk > 0 and traveled + 1e-9 >= risk
+    book_agrees = _hold_full(side, book)
     if passed and not remaining:
         line = f"The last target {round(passed[-1], 5)} is reached."
     elif open_trade:
@@ -1373,18 +1382,14 @@ def _guide(
         )
     elif not known:
         line = "No 60-second delta in this book. The targets stay. Nothing says hold or bank."
-    elif absorption:
-        line = "Absorption at the target. Bank half. Move the stop to the entry."
-    elif quiet:
-        line = f"Hold for {round(aim, 5)}." if not (passed and remaining) else f"Hold the rest for {round(remaining[0], 5)}."
-    elif both_against:
-        line = "Both the 5-second and the 60-second book are against the trade. Bank half. Move the stop to the entry."
-    elif with_60 is False and with_5 is not False:
-        line = f"The 60-second book is against the trade. The last 5 seconds are not. Hold for {round(aim, 5)}."
-    elif passed and remaining:
+    elif both_against and near_target:
+        line = "Bank. Both clocks are against the trade and the price is near the target."
+    elif passed and remaining and book_agrees:
         line = f"Hold the rest for {round(remaining[0], 5)}."
+    elif one_r and not both_against:
+        line = "Move to break even."
     else:
-        line = f"Hold for {round(aim, 5)}."
+        line = "Hold. The stop is still the exit."
     previous = str(row.get("guide") or "")
     row["guide"] = line
     sentence = str(row.get("note") or "").strip()
@@ -1873,6 +1878,7 @@ def _failed_test(
     spread: float,
     bid: float | None,
     ask: float | None,
+    market: str = "",
 ) -> dict[str, Any]:
     """A 1-minute close back through an excess. The button is only on that candle, and only while value is still ahead."""
     if area is None:
@@ -1978,6 +1984,8 @@ def _failed_test(
         row["late"] = True
         row["note"] = "Entry is late. Not an order."
         return row
+    if side == "BUY" and str(market).upper() == "BEARISH":
+        row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
     return row
 
 
@@ -2257,7 +2265,8 @@ def build_rows(
         if zone is not None and row.get("side") and _spent(symbol, str(row.get("chart")), str(row.get("side")), float(zone)):
             _silence(row, "Not a new order. This zone already has one.")
     _gate(rows, book)
-    responsive = _failed_test(symbol, m1, m15, area, book, spread, bid, ask)
+    responsive = _failed_test(symbol, m1, m15, area, book, spread, bid, ask, state)
+    responsive["market"] = state
     if responsive.get("side") and responsive.get("tradeable"):
         _live_stop(responsive, bid, ask, symbol)
         _limits(responsive, symbol, spread)
@@ -2469,7 +2478,7 @@ def _dom_side(
     }
 
 
-def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any) -> dict[str, int] | None:
+def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market: str = "") -> dict[str, int] | None:
     """Keep each ladder scalp until a price prints. Both in one check is not called a win."""
     if symbol not in DOM_RANGE:
         return None
@@ -2485,7 +2494,14 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any) -> dic
         summary.clear()
         summary["day"] = day
     step = float(PIP.get(symbol, 0.1) or 0.1)
-    if isinstance(row, dict) and row.get("side"):
+    open_for_symbol = any(saved.get("symbol") == symbol for saved in open_rows.values())
+    allow = isinstance(row, dict) and bool(row.get("side")) and not open_for_symbol
+    if allow and symbol == "XAUUSD":
+        try:
+            allow = abs(float(row["entry"]) - float(row["stop"])) + 1e-9 >= 0.50
+        except (TypeError, ValueError):
+            allow = False
+    if allow:
         key = "|".join((
             symbol,
             str(row.get("side")),
@@ -2510,6 +2526,7 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any) -> dic
                 "sweep": bool(row.get("sweep")),
                 "pulled": bool(row.get("pulled")),
                 "iceberg": bool(row.get("iceberg")),
+                "market": market or str(row.get("market") or ""),
                 "opened": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "mfe": 0.0,
                 "target_hit": False,
@@ -2809,7 +2826,7 @@ def _open_guide(
     symbol: str,
 ) -> dict[str, Any]:
     """Words for an open ticket. The stop is not moved. Bank is only said at the target."""
-    blank = {"line": "The stop is still in play.", "bank": False, "take_profit": None, "risk": None}
+    blank = {"line": "Hold. The stop is still the exit.", "bank": False, "take_profit": None, "risk": None, "stop": None}
     if side not in {"BUY", "SELL"} or entry <= 0:
         return blank
     prices = []
@@ -2848,7 +2865,6 @@ def _open_guide(
             "risk": risk or None,
         }
     aim = remaining[0]
-    following = remaining[1] if len(remaining) > 1 else None
     span = abs(aim - entry)
     if risk > 0 and span <= risk * 1.25:
         near = traveled >= span * 0.90
@@ -2858,41 +2874,20 @@ def _open_guide(
         near = False
     against = _both_against(side, book)
     with_it = _hold_full(side, book)
-    absorption = bool((book or {}).get("absorption"))
-    at_level = abs(mark - aim) <= max(band, risk * 1e-6 if risk else 0.0)
-    result = {"line": "", "bank": False, "take_profit": None, "risk": risk or None}
-    if against and (near or (absorption and at_level)):
-        if absorption and at_level:
-            who = "Buyers" if side == "BUY" else "Sellers"
-            result["line"] = f"{who} failed at {round(aim, 5)}. Bank."
-        else:
-            result["line"] = "Bank. The stop is still the exit."
+    result = {"line": "", "bank": False, "take_profit": None, "risk": risk or None, "stop": None}
+    if against and near:
+        result["line"] = "Bank. Both clocks are against the trade and the price is near the target."
         result["bank"] = True
         return result
     if passed and with_it and remaining:
         result["line"] = f"Hold the rest for {round(aim, 5)}."
         result["take_profit"] = aim
         return result
-    if near and with_it and following is not None:
-        result["line"] = f"Hold for {round(following, 5)}."
-        result["take_profit"] = following
+    if risk > 0 and traveled + 1e-9 >= risk and not against:
+        result["line"] = "Move to break even."
+        result["stop"] = entry
         return result
-    if near and with_it:
-        result["line"] = f"Let {round(aim, 5)} print."
-        return result
-    if against:
-        result["line"] = "Both clocks are against the trade. The stop is still the exit."
-        return result
-    if risk <= 0 or traveled < risk * 0.90:
-        result["line"] = "The stop is still in play."
-        return result
-    if traveled < risk and with_it:
-        result["line"] = "Let the first R print."
-        return result
-    if traveled < risk:
-        result["line"] = "The stop is still in play. Nothing is locked."
-        return result
-    result["line"] = "The stop stays where you put it."
+    result["line"] = "Hold. The stop is still the exit."
     return result
 
 
@@ -2980,7 +2975,7 @@ def manage_decision(
         symbol=symbol,
     )
     return {
-        "stop": None,
+        "stop": decision.get("stop"),
         "take_profit": decision.get("take_profit"),
         "bank": bool(decision.get("bank")),
         "line": decision.get("line") or "",
@@ -3505,7 +3500,18 @@ def record(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, lis
         if row.get("entry") is None:
             continue
         seen = state.setdefault("seen_entries", {})
-        key = "|".join((symbol, str(row.get("chart")), str(row.get("side")), str(round(float(row["entry"]), 5))))
+        anchor = row.get("risk_stop")
+        if anchor is None:
+            anchor = row.get("stop")
+        if anchor is None:
+            anchor = row.get("entry")
+        key = "|".join((
+            now[:10],
+            symbol,
+            str(row.get("chart")),
+            str(row.get("side")),
+            str(round(float(anchor), 2)),
+        ))
         if key in if_open or key in seen:
             continue
         seen[key] = now
@@ -3576,7 +3582,7 @@ def mark_taken(row: dict[str, Any]) -> dict[str, Any]:
 _HELD_SIGNALS: dict[str, dict[str, dict[str, Any]]] = {}
 _HELD_KEYS = (
     "chart", "side", "reason", "r", "entry", "stop", "risk_stop", "target", "targets",
-    "time", "zone", "harvest", "market", "score_on", "button",
+    "time", "zone", "harvest", "market", "score_on", "button", "left",
 )
 
 
@@ -3621,11 +3627,17 @@ def _stop_was_traded(row: dict[str, Any], bid: float | None, ask: float | None) 
 
 
 def _arm_button(row: dict[str, Any]) -> None:
-    """1.5R is the floor. Once the button is on, a later refresh does not take it off."""
+    """1.5R is the floor for a fresh order. Under 1R never gets a button. A red row is not an order."""
     if str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN":
         row["button"] = False
         return
     if str(row.get("chart") or "") in ("SWEEP", "DOM"):
+        row["button"] = False
+        return
+    if row.get("late") or str(row.get("state") or "") == "LATE":
+        row["button"] = False
+        return
+    if not row.get("tradeable") and str(row.get("reason") or "") != "PUSH":
         row["button"] = False
         return
     chart = str(row.get("chart") or "")
@@ -3641,7 +3653,7 @@ def _arm_button(row: dict[str, Any]) -> None:
         row["button"] = False
         return
     risk = abs(entry - stop)
-    if risk <= 0:
+    if risk <= 0 or abs(target - entry) / risk + 1e-9 < 1.0:
         row["button"] = False
         return
     if abs(target - entry) / risk + 1e-9 >= floor:
@@ -3725,11 +3737,22 @@ def settle_rows(
             claimed.add(id(ticket))
             _write_open(row, snap, ticket, tickets, book, bid, ask, symbol)
             continue
-        if printed:
+        chart_name = str(row.get("chart") or chart)
+        held_for_2r = chart_name in {"INTERDAY", "SWING", "RESPONSIVE"}
+        if printed and not held_for_2r:
             remembered.pop(chart, None)
-            if same:
+            if same and str(row.get("reason") or "") != "PUSH":
                 row.clear()
                 row.update(_wait(chart, "The first target is already reached. Not a new order.", str(row.get("market") or "")))
+            continue
+        if held_for_2r:
+            fresh = bool(row.get("side")) and bool(row.get("tradeable") or row.get("late") or row.get("missed"))
+            if chart_name != "INTERDAY" and not fresh and snap.get("side") and snap.get("entry") is not None:
+                market = str(row.get("market") or snap.get("market") or "")
+                row.clear()
+                row.update(snap)
+                row["chart"] = chart_name
+                row["market"] = market
             continue
         if row.get("tradeable") and row.get("side") == side and row.get("entry") is not None:
             live_entry = float(row["entry"])
@@ -3738,12 +3761,23 @@ def settle_rows(
             room = late_room(live_entry, live_stop, spread)
             stale = bool(latest_time) and str(row.get("time") or "") not in {"", latest_time}
             away = isinstance(live, (int, float)) and not isinstance(live, bool) and abs(float(live) - live_entry) > room
+            if chart_name == "SCALP":
+                if not stale:
+                    continue
+                _mark_late(row)
+                remembered[chart] = _signal_snap(row)
+                continue
             if not stale and not away:
                 continue
             _mark_late(row)
+            if chart_name == "INTRADAY" and away:
+                row["note"] = "The entry price is gone."
+                row["left"] = True
             remembered[chart] = _signal_snap(row)
             continue
         if row.get("tradeable"):
+            continue
+        if str(row.get("reason") or "") == "PUSH":
             continue
         _mark_late_from(row, snap)
 
@@ -3781,8 +3815,14 @@ def settle_rows(
         if row is None or str(row.get("state") or "") == "OPEN":
             continue
         if chart == "INTERDAY":
-            missed_parent = intra is not None and str(intra.get("state") or "") == "LATE" and intra.get("side")
-            if not (row.get("late") or row.get("missed") or missed_parent):
+            missed_parent = intra is not None and str(intra.get("state") or "") == "LATE" and bool(intra.get("side"))
+            intraday_live = (
+                intra is not None
+                and bool(intra.get("side"))
+                and bool(intra.get("tradeable"))
+                and str(intra.get("state") or "") not in {"LATE", "OPEN"}
+            )
+            if intraday_live:
                 continue
             if missed_parent and not row.get("side"):
                 row["side"] = intra.get("side")
@@ -3790,7 +3830,14 @@ def settle_rows(
                 row["risk_stop"] = row["stop"]
                 row["targets"] = list(intra.get("targets") or [])
                 row["target"] = intra.get("target")
-        elif not (row.get("late") or row.get("missed")):
+                row["market"] = intra.get("market") or row.get("market")
+            if not row.get("side"):
+                continue
+            if not (row.get("tradeable") or row.get("late") or row.get("missed") or missed_parent):
+                continue
+        elif not row.get("side"):
+            continue
+        elif not (row.get("tradeable") or row.get("late") or row.get("missed")):
             continue
         _offer_missed(row, bid, ask, spread)
     for chart in charts:
@@ -3829,7 +3876,7 @@ def _offer_missed(
     ask: float | None,
     spread: float,
 ) -> None:
-    """A missed interday, swing, or responsive entry can still be placed. Auto does not send it."""
+    """Interday, swing, and responsive stay an order while the first target is still 2R from the live price."""
     if str(row.get("chart") or "") not in {"INTERDAY", "SWING", "RESPONSIVE"}:
         return
     if str(row.get("state") or "") == "OPEN" or str(row.get("reason") or "") == "OPEN":
@@ -3851,68 +3898,69 @@ def _offer_missed(
             targets = [float(row["target"])]
         except (TypeError, ValueError):
             targets = []
-    row["late"] = True
-    row["state"] = "LATE"
-    row["missed"] = False
-    row["tradeable"] = False
     row["stop"] = stop
     row["risk_stop"] = stop
-    row["entry"] = round(live, 5)
     through = (side == "BUY" and live <= stop) or (side == "SELL" and live >= stop)
     if through:
-        row["note"] = "Price is through the stop. Not an order."
+        row["tradeable"] = False
+        row["button"] = False
         return
-    ahead = [price for price in targets if price > live] if side == "BUY" else [price for price in targets if price < live]
-    if targets and not ahead:
-        row["note"] = "The first target is already reached. Not an order."
-        return
-    if not ahead:
+    if not targets:
+        row["late"] = True
+        row["state"] = "LATE"
+        row["tradeable"] = False
+        row["button"] = False
         row["note"] = "No target is left. Not an order."
+        return
+    first = float(targets[0])
+    printed = (side == "BUY" and live >= first) or (side == "SELL" and live <= first)
+    if printed:
+        row["entry"] = round(live, 5)
+        row["target"] = round(first, 5)
+        row["targets"] = [round(price, 5) for price in targets]
+        row["late"] = True
+        row["state"] = "LATE"
+        row["tradeable"] = False
+        row["button"] = False
+        row["missed"] = False
+        row["note"] = "The first target is already reached. Not a new order."
         return
     risk = abs(live - stop)
     if risk <= abs(float(spread or 0.0)):
+        row["late"] = True
+        row["state"] = "LATE"
+        row["tradeable"] = False
+        row["button"] = False
         row["note"] = "The price is inside the spread of the stop. Not an order."
         return
-    if str(row.get("chart")) == "RESPONSIVE":
-        ordered = sorted(ahead, key=lambda price: abs(price - live))
-        chosen = next((price for price in ordered if abs(price - live) / risk >= BUTTON_R), None)
-        if chosen is None:
-            nearest = _r_multiple(live, stop, ahead[0])
-            row["target"] = round(ahead[0], 5)
-            row["targets"] = [round(price, 5) for price in ahead]
-            row["r"] = nearest
-            row["button"] = False
-            row["note"] = f"From {round(live, 5)} the stop stays {round(stop, 5)}. No target is still 1.5R. Not an order."
-            return
-        kept = [price for price in ahead if (price >= chosen if side == "BUY" else price <= chosen)]
-    else:
-        first = targets[0]
-        first_printed = (side == "BUY" and live >= first) or (side == "SELL" and live <= first)
-        if first_printed:
-            row["note"] = "The first target is already reached. Not an order."
-            return
-        chosen = ahead[0]
-        kept = ahead
-        if abs(chosen - live) / risk < BUTTON_R:
-            row["target"] = round(chosen, 5)
-            row["targets"] = [round(price, 5) for price in kept]
-            row["r"] = _r_multiple(live, stop, chosen)
-            row["button"] = False
-            row["note"] = (
-                f"From {round(live, 5)} the stop stays {round(stop, 5)}. "
-                f"{round(chosen, 5)} is {row['r']}R. Under 1.5R. Not an order."
-            )
-            return
-    row["target"] = round(chosen, 5)
-    row["targets"] = [round(price, 5) for price in kept]
-    row["r"] = _r_multiple(live, stop, chosen)
+    shown = _r_multiple(live, stop, first)
+    row["entry"] = round(live, 5)
+    row["target"] = round(first, 5)
+    row["targets"] = [round(price, 5) for price in targets]
+    row["r"] = shown
+    if shown is None or shown < 2:
+        row["late"] = True
+        row["state"] = "LATE"
+        row["tradeable"] = False
+        row["button"] = False
+        row["missed"] = False
+        row["note"] = (
+            f"From {round(live, 5)} the stop stays {round(stop, 5)}. "
+            f"{round(first, 5)} is {shown}R. Under 2R. Not an order."
+        )
+        return
+    row["late"] = False
+    row["left"] = False
+    row["state"] = "READY"
     row["tradeable"] = True
     row["button"] = True
-    row["missed"] = True
+    row["missed"] = False
     row["note"] = (
-        f"Missed the first price. From {round(live, 5)} the stop stays {round(stop, 5)}. "
-        f"{round(chosen, 5)} is {row['r']}R. Auto will not send it."
+        f"From {round(live, 5)} the stop stays {round(stop, 5)}. "
+        f"{round(first, 5)} is {shown}R."
     )
+    if str(row.get("chart")) == "RESPONSIVE" and side == "BUY" and str(row.get("market") or "").upper() == "BEARISH":
+        row["note"] = (row["note"] + " Higher risk. The price is still falling. The stop is the exit.").strip()
 
 
 def _mark_late(row: dict[str, Any]) -> None:
@@ -3926,11 +3974,15 @@ def _mark_late(row: dict[str, Any]) -> None:
 def _mark_late_from(row: dict[str, Any], snap: dict[str, Any]) -> None:
     chart = str(row.get("chart") or snap.get("chart") or "")
     market = str(row.get("market") or snap.get("market") or "")
+    left = bool(snap.get("left")) and chart == "INTRADAY"
     row.clear()
     row.update(snap)
     row["chart"] = chart
     row["market"] = market
     _mark_late(row)
+    if left:
+        row["note"] = "The entry price is gone."
+        row["left"] = True
 
 
 def _manual_levels(ticket: dict[str, Any], remembered: dict[str, dict[str, Any]], book: dict[str, Any] | None) -> list[float]:
