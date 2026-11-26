@@ -1,0 +1,203 @@
+PHONE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZEUS</title>
+<style>
+:root{--bg:#071019;--panel:#0c1824;--line:#24384c;--text:#e7eef5;--muted:#8ea3b8;--good:#67d6a3;--bad:#ef7f88;--warn:#e9c66b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}
+main{padding:12px 10px 64px}h1{font-size:16px;letter-spacing:.16em;margin:0 0 8px}
+form{display:flex;flex-direction:column;gap:10px}input,button{font:16px Arial;padding:12px;border-radius:8px}
+input{background:#08131c;color:var(--text);border:1px solid var(--line)}
+button{background:#17324a;color:var(--text);border:1px solid #3d6f93}
+.msg{color:var(--warn);min-height:1.2em}
+.row{display:flex;gap:6px;overflow:auto;padding-bottom:8px}
+.row button{padding:8px 10px;white-space:nowrap}
+.row button.on{background:#24527a}
+.quotes{display:flex;gap:8px;margin:0 0 8px}
+.quotes div{flex:1;background:#08131c;border:1px solid var(--line);border-radius:8px;padding:8px}
+.quotes span{display:block;color:var(--muted);font-size:11px;letter-spacing:.08em}
+.quotes b{font-size:18px}
+.bid{color:var(--warn)}.ask{color:#7eb6ff}
+canvas{width:100%;height:340px;background:#050b11;border-radius:8px;display:block}
+.flow{margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.flow div{color:var(--muted);font-size:12px;margin-top:8px}.flow b{display:block;color:var(--text);font-size:15px}
+.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+.note{color:var(--muted);font-size:13px;margin-top:8px}
+.mark{position:fixed;left:0;right:0;bottom:0;padding:8px 12px;background:#08131c;border-top:1px solid var(--line);color:var(--warn);font-weight:700}
+</style></head><body>
+<main id="app"></main>
+<div class="mark" id="mark"></div>
+<script>
+const app=document.getElementById("app");
+const mark=document.getElementById("mark");
+const PAIRS=[["XAUUSD","GOLD"],["XAGUSD","SILVER"],["NAS100","NASDAQ"],["BTCUSD","BITCOIN"],["EURUSD","EURO"],["USDJPY","USDJPY"],["WTI","OIL"],["NG-C","GAS"],["GER40","DAX"]];
+const CHARTS=["M1","M5","M15","H1"];
+let symbol="XAUUSD", chart="M1", view=null, timer=0;
+function esc(v){return String(v==null?"":v).replace(/&/g,"&"+"amp;").replace(/</g,"&"+"lt;").replace(/>/g,"&"+"gt;");}
+function px(v){const n=Number(v); if(!isFinite(n)) return ""; return n>100?n.toFixed(2):n.toFixed(5);}
+function loginBox(message){
+  mark.textContent="";
+  app.innerHTML="<h1>ZEUS</h1><p class='note'>Watch only. Place the order in MT5.</p><form id='in'><input name='name' placeholder='Name' autocapitalize='off'><input name='password' type='password' placeholder='Password'><button>Sign in</button></form><p class='msg'>"+esc(message||"")+"</p>";
+  document.getElementById("in").onsubmit=async function(event){
+    event.preventDefault();
+    const response=await fetch("/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:this.name.value,password:this.password.value})});
+    const data=await response.json();
+    if(!response.ok){loginBox(data.message||"Sign in failed.");return;}
+    shell(); paint();
+  };
+}
+function shell(){
+  app.innerHTML="<h1>ZEUS</h1><div class='row' id='pairs'></div><div class='row' id='charts'></div><div class='quotes' id='quotes'></div><canvas id='cv'></canvas><div class='flow' id='flow'></div><p class='note' id='line'></p>";
+  document.getElementById("pairs").innerHTML=PAIRS.map(p=>"<button data-s='"+p[0]+"'>"+p[1]+"</button>").join("");
+  document.getElementById("charts").innerHTML=CHARTS.map(c=>"<button data-c='"+c+"'>"+c+"</button>").join("");
+  app.onclick=function(event){
+    const s=event.target.getAttribute("data-s"), c=event.target.getAttribute("data-c");
+    if(s){symbol=s; paint();}
+    if(c){chart=c; paint();}
+  };
+}
+function buttons(){
+  document.querySelectorAll("[data-s]").forEach(b=>b.className=b.getAttribute("data-s")===symbol?"on":"");
+  document.querySelectorAll("[data-c]").forEach(b=>b.className=b.getAttribute("data-c")===chart?"on":"");
+}
+function draw(){
+  const cv=document.getElementById("cv");
+  if(!cv) return;
+  const width=cv.parentElement.clientWidth||360, height=340, ratio=window.devicePixelRatio||1;
+  cv.width=Math.floor(width*ratio); cv.height=Math.floor(height*ratio);
+  cv.style.width=width+"px"; cv.style.height=height+"px";
+  const ctx=cv.getContext("2d");
+  ctx.setTransform(ratio,0,0,ratio,0,0);
+  ctx.fillStyle="#050b11"; ctx.fillRect(0,0,width,height);
+  const data=view||{};
+  const bars=(data.candles||[]).slice(-70);
+  const q=data.quote||{}, flow=data.flow||{};
+  ctx.font="12px Consolas,monospace";
+  ctx.fillStyle=q&&data.feed&&data.feed.quote_stale?"#ef7f88":"#e7eef5";
+  ctx.fillText((data.feed&&data.feed.quote_stale?"STALE":"LIVE")+"  "+((data.feed&&data.feed.session)||""), 10, 16);
+  const headline=String(data.market||"RANGE").toUpperCase();
+  ctx.font="700 20px Arial";
+  ctx.fillStyle=headline.indexOf("BULL")>=0?"#67d6a3":headline.indexOf("BEAR")>=0?"#ef7f88":"#e9c66b";
+  ctx.fillText(headline, 10, 40);
+  ctx.font="13px Arial"; ctx.fillStyle="#d5deea";
+  const reason=headline.indexOf("BULL")>=0?"The last two 15-minute highs and lows are both rising.":headline.indexOf("BEAR")>=0?"The last two 15-minute highs and lows are both falling.":"One side is not confirming.";
+  ctx.fillText(reason, 10, 58);
+  if(!bars.length){ctx.fillStyle="#8ea3b8"; ctx.fillText(data.message||"No candles yet.", 10, 90); return;}
+  const plotL=8, plotR=width-62, plotT=72, plotB=height-22;
+  let lo=Infinity, hi=-Infinity;
+  const use=v=>{const n=Number(v); return isFinite(n)&&n>0?n:null;};
+  bars.forEach(b=>{const a=use(b.low), c=use(b.high); if(a!=null)lo=Math.min(lo,a); if(c!=null)hi=Math.max(hi,c);});
+  const bid=use(q.bid); if(bid!=null){lo=Math.min(lo,bid); hi=Math.max(hi,bid);}
+  const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
+  const y=p=>plotT+((hi-p)/(hi-lo))*(plotB-plotT);
+  const step=(plotR-plotL)/Math.max(1,bars.length);
+  function zone(price, name, color, x0){
+    const n=use(price); if(n==null||n<lo||n>hi) return;
+    const band=Math.max((hi-lo)*0.012, 0.01);
+    const top=y(n+band/2), bot=y(n-band/2);
+    ctx.globalAlpha=0.22; ctx.fillStyle=color; ctx.fillRect(x0, Math.min(top,bot), Math.max(8,plotR-x0), Math.max(3,Math.abs(bot-top)));
+    ctx.globalAlpha=1; ctx.strokeStyle=color; ctx.strokeRect(x0, Math.min(top,bot), Math.max(8,plotR-x0), Math.max(3,Math.abs(bot-top)));
+    ctx.fillStyle=color; ctx.font="11px Consolas,monospace"; ctx.fillText(name, x0+3, Math.max(plotT+12, Math.min(top,bot)-2));
+  }
+  const pools=(data.pools||[]).filter(level=>level.kind==="HIGH"||level.kind==="LOW");
+  pools.sort((a,b)=>Math.abs(Number(a.price)-bid)-Math.abs(Number(b.price)-bid));
+  pools.slice(0,6).forEach(level=>zone(level.price, level.name, level.kind==="LOW"?"#67d6a3":"#ef7f88", plotL));
+  (data.pools||[]).filter(level=>level.kind==="RANGE" && /LATE|LONDON|ASIA|YORK|YESTERDAY/.test(level.name||"")).slice(0,3).forEach(level=>{
+    zone(level.high, level.name+" HIGH", "#8ea3b8", plotL);
+    zone(level.low, level.name+" LOW", "#8ea3b8", plotL);
+  });
+  [["#f0c956", flow.poc, "POC"],["#8ea3b8", flow.vah, "VALUE HIGH"],["#8ea3b8", flow.val, "VALUE LOW"]].forEach(line=>{
+    const price=use(line[1]); if(price==null||price<lo||price>hi) return;
+    ctx.setLineDash([2,4]); ctx.strokeStyle=line[0]; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle=line[0]; ctx.fillText(line[2], plotL+4, y(price)-3);
+  });
+  [[flow.unfinished_high,"UNFINISHED HIGH"],[flow.unfinished_low,"UNFINISHED LOW"]].forEach(line=>{
+    const price=use(line[0]); if(price==null||price<lo||price>hi) return;
+    ctx.setLineDash([8,4]); ctx.strokeStyle="#f4e8ff"; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle="#ffe38a"; ctx.fillText(line[1], plotL+4, y(price)+12);
+  });
+  const row=(data.rows||[]).find(r=>r.entry!=null);
+  if(row){
+    ctx.setLineDash([4,4]);
+    [["#67d6a3",row.entry,"ENTRY"],["#ef7f88",row.stop,"STOP"],["#e9c66b",row.target,"TARGET"]].forEach(line=>{
+      const price=use(line[1]); if(price==null||price<lo||price>hi) return;
+      ctx.strokeStyle=line[0]; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+      ctx.fillStyle=line[0]; ctx.fillText(line[2], plotR-70, y(price)-3);
+    });
+    ctx.setLineDash([]);
+  }
+  bars.forEach((b,i)=>{
+    const x=plotL+i*step+step*0.5, up=Number(b.close)>=Number(b.open);
+    ctx.strokeStyle=up?"#67d6a3":"#ef7f88"; ctx.fillStyle=ctx.strokeStyle;
+    ctx.beginPath(); ctx.moveTo(x,y(b.high)); ctx.lineTo(x,y(b.low)); ctx.stroke();
+    const top=y(Math.max(b.open,b.close)), bot=y(Math.min(b.open,b.close));
+    ctx.fillRect(x-Math.max(1.5,step*0.28), top, Math.max(3,step*0.56), Math.max(1,bot-top));
+  });
+  if(bid!=null && bid>=lo && bid<=hi){
+    ctx.strokeStyle="#e9c66b"; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(plotL,y(bid)); ctx.lineTo(plotR,y(bid)); ctx.stroke(); ctx.lineWidth=1;
+    ctx.fillStyle="#e9c66b"; ctx.fillText("BID "+px(bid), plotR-58, y(bid)-4);
+  }
+  ctx.fillStyle="#8ea3b8"; ctx.font="11px Consolas,monospace";
+  for(let i=0;i<=4;i++){const price=hi-(hi-lo)*i/4; ctx.fillText(px(price), plotR+4, y(price)+4);}
+  const ladder=(data.ladder&&data.ladder.levels)||[];
+  ladder.forEach(level=>{
+    const price=use(level.price); if(price==null||price<lo||price>hi) return;
+    const yy=y(price);
+    ctx.fillStyle="#35597a"; ctx.fillRect(plotR+2, yy-1, Math.min(18, Number(level.bid_contracts)||0), 2);
+    ctx.fillStyle="#7a3b46"; ctx.fillRect(plotR+22, yy-1, Math.min(18, Number(level.ask_contracts)||0), 2);
+  });
+}
+function flowBox(){
+  const f=(view&&view.flow)||{}, day=f.dom_day||null, ladder=(view&&view.ladder)||{};
+  const hit=f.stepping==="BUYERS"?"good":(f.stepping==="SELLERS"?"bad":"");
+  const count=part=>part?((part.logged||0)+" logged \u00b7 "+(part.target||0)+" target \u00b7 "+(part.stop||0)+" stop"):"";
+  let html="<div>DELTA 5s</div><b>"+esc(f.delta_5s==null?"not in this book":f.delta_5s)+"</b>";
+  html+="<div>DELTA 60s</div><b>"+esc(f.delta_60s==null?"not in this book":f.delta_60s)+"</b>";
+  html+="<div>WHO IS HITTING</div><b class='"+hit+"'>"+esc(f.stepping||"\u2014")+"</b>";
+  if(day){
+    html+="<div>LADDER</div><b>"+esc((day.logged||0)+" logged \u00b7 "+(day.target||0)+" target \u00b7 "+(day.stop||0)+" stop \u00b7 "+(day.both||0)+" both \u00b7 "+(day.open||0)+" open")+"</b>";
+    html+="<div>WITH THE 15-MINUTE</div><b>"+esc(count(day.with))+"</b>";
+    html+="<div>AGAINST IT</div><b>"+esc(count(day.against))+"</b>";
+    html+="<div>RANGE</div><b>"+esc(count(day.range))+"</b>";
+    if(day.idle) html+="<div>"+esc(day.idle)+"</div>";
+  }
+  html+="<div>VALUE HIGH</div><b>"+esc(f.vah==null?"not in the file":f.vah)+"</b>";
+  html+="<div>POC</div><b>"+esc(f.poc==null?"not in the file":f.poc)+"</b>";
+  html+="<div>VALUE LOW</div><b>"+esc(f.val==null?"not in the file":f.val)+"</b>";
+  html+="<div>ABSORPTION</div><b>"+(f.absorption?"YES":"no")+"</b>";
+  html+="<div>ICEBERG</div><b>"+esc(f.iceberg_price!=null?("YES \u00b7 "+(f.iceberg_side||"")+" "+f.iceberg_price):(f.iceberg?"YES \u00b7 no price":"no"))+"</b>";
+  html+="<div>PULLED</div><b>"+(f.pulled?"YES \u00b7 no price":"no")+"</b>";
+  html+="<div class='note'>"+esc(ladder.shown?("Ladder shifted by "+ladder.shift+". Not an entry."):(ladder.reason||""))+"</div>";
+  document.getElementById("flow").innerHTML=html;
+  const quote=(view&&view.quote)||{};
+  document.getElementById("quotes").innerHTML="<div><span>"+esc(symbol+" \u00b7 "+chart)+"</span><b>"+esc((view&&view.label)||symbol)+"</b></div><div><span>BID</span><b class='bid'>"+esc(px(quote.bid))+"</b></div><div><span>ASK</span><b class='ask'>"+esc(px(quote.ask))+"</b></div><div><span>SPREAD</span><b>"+esc(view&&view.spread!=null?view.spread:"")+"</b></div>";
+  const row=(view&&view.rows||[]).find(r=>r.side&&r.entry!=null);
+  const bits=[];
+  if(row){bits.push(row.chart+" "+row.side); if(row.entry!=null)bits.push("entry "+row.entry); if(row.stop!=null)bits.push("stop "+row.stop); if((row.targets||[]).length)bits.push("target "+row.targets.join(" \u00b7 ")); else if(row.target!=null)bits.push("target "+row.target); if(row.note)bits.push(row.note);} 
+  document.getElementById("line").textContent=bits.join(" \u00b7 ")||"No order from this page.";
+}
+async function paint(){
+  if(!document.getElementById("cv")) shell();
+  buttons();
+  const response=await fetch("/view?symbol="+encodeURIComponent(symbol)+"&chart="+encodeURIComponent(chart));
+  const data=await response.json().catch(()=>({}));
+  if(response.status===401){ if(timer){clearInterval(timer); timer=0;} loginBox(data.message||""); return; }
+  view=data.ok===false?{message:data.message||"Zeus is not ready.", candles:[], quote:{}, flow:{}, rows:[]}:data;
+  draw(); flowBox();
+  if(!timer) timer=setInterval(paint, 3000);
+}
+fetch("/view?symbol=XAUUSD&chart=M1").then(r=>{ if(r.status===401) loginBox(""); else { shell(); paint(); } }).catch(()=>loginBox("The page is not ready."));
+</script></body></html>"""
+
+DESK_LOGIN = """<!doctype html><html><head><meta charset="utf-8"><title>ZEUS phone</title>
+<style>body{background:#071019;color:#e7eef5;font-family:Arial;padding:24px}input,button{font:16px Arial;padding:10px;margin:6px 0;display:block}.warn{color:#e9c66b}</style>
+</head><body><h1>Phone names</h1><p>This password is in WATCH_OWNER.txt on this PC.</p>
+<form method="post"><input type="hidden" name="action" value="enter"><input name="password" type="password" placeholder="Owner password"><button>Open</button></form>
+<p class="warn"><!--MSG--></p></body></html>"""
+
+DESK = """<!doctype html><html><head><meta charset="utf-8"><title>ZEUS phone</title>
+<style>body{background:#071019;color:#e7eef5;font-family:Arial;padding:24px}input,button{font:16px Arial;padding:8px;margin:4px}form{margin:8px 0}a{color:#9fb3c8}</style>
+</head><body><h1>Phone names</h1>
+<p>Blocking a name cuts off the phone that is open. The others stay on. This page does not send an order.</p>
+<form method="post"><input name="name" placeholder="Name"><input name="password" placeholder="Password"><input type="hidden" name="action" value="add"><button>Add</button></form>
+<!--USERS-->
+</body></html>"""
