@@ -2134,6 +2134,8 @@ def _failed_test(
         reached_far = furthest - 1e-9 <= val
     ratios = [round(abs(price - entry) / risk, 2) for price in targets]
     band = _band(symbol)
+    still_high = None
+    still_low = None
 
     def _unfinished(name: str) -> float:
         if not isinstance(book, dict):
@@ -2153,7 +2155,7 @@ def _failed_test(
             above = sorted(price for price in (ahead_highs or []) if price > anchor + band)[:2]
             above = [price for price in above if price > entry + band]
         if above:
-            return _wait("RESPONSIVE", f"A high is still above at {round(min(above), 5)}. The market is still rising. Not a sell.", "")
+            still_high = min(above)
     if side == "BUY" and str(market).upper() == "BEARISH":
         unfinished = _unfinished("unfinished_low")
         if unfinished and unfinished < entry - band:
@@ -2163,7 +2165,7 @@ def _failed_test(
             below = sorted((price for price in (ahead_lows or []) if price < anchor - band), reverse=True)[:2]
             below = [price for price in below if price < entry - band]
         if below:
-            return _wait("RESPONSIVE", f"A low is still below at {round(max(below), 5)}. The market is still falling. Not a buy.", "")
+            still_low = max(below)
     at_signal = close_at >= len(series) - 1
     _remember_test({
         "symbol": symbol, "side": side, "extreme": extreme, "entry": entry, "stop": stop,
@@ -2203,10 +2205,20 @@ def _failed_test(
         row["late"] = True
         row["note"] = "Entry is late. Not an order."
         return row
-    if side == "BUY" and str(market).upper() == "BEARISH":
-        row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
     if side == "SELL" and str(market).upper() == "BULLISH":
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still rising. The stop is the exit.").strip()
+        if still_high is not None:
+            extra = f"A high is still above at {round(still_high, 5)}. The market is still rising."
+            if symbol == "XAUUSD":
+                extra += " Price can move $5 to $10, then push up to that high before the sell."
+            row["note"] = (str(row.get("note") or "") + " " + extra).strip()
+    if side == "BUY" and str(market).upper() == "BEARISH":
+        row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
+        if still_low is not None:
+            extra = f"A low is still below at {round(still_low, 5)}. The market is still falling."
+            if symbol == "XAUUSD":
+                extra += " Price can move $5 to $10, then push down to that low before the buy."
+            row["note"] = (str(row.get("note") or "") + " " + extra).strip()
     if ranging and symbol == "XAUUSD":
         row["range_gold"] = True
     if ranging and _m15_against(m15, side):
