@@ -2208,17 +2208,11 @@ def _failed_test(
     if side == "SELL" and str(market).upper() == "BULLISH":
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still rising. The stop is the exit.").strip()
         if still_high is not None:
-            extra = f"A high is still above at {round(still_high, 5)}. The market is still rising."
-            if symbol == "XAUUSD":
-                extra += " Price can move $5 to $10, then push up to that high before the sell."
-            row["note"] = (str(row.get("note") or "") + " " + extra).strip()
+            row["note"] = (str(row.get("note") or "") + f" A high is still above at {round(still_high, 5)}. The market is still rising.").strip()
     if side == "BUY" and str(market).upper() == "BEARISH":
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
         if still_low is not None:
-            extra = f"A low is still below at {round(still_low, 5)}. The market is still falling."
-            if symbol == "XAUUSD":
-                extra += " Price can move $5 to $10, then push down to that low before the buy."
-            row["note"] = (str(row.get("note") or "") + " " + extra).strip()
+            row["note"] = (str(row.get("note") or "") + f" A low is still below at {round(still_low, 5)}. The market is still falling.").strip()
     if ranging and symbol == "XAUUSD":
         row["range_gold"] = True
     if ranging and _m15_against(m15, side):
