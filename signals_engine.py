@@ -78,6 +78,7 @@ ICE_TICK = {
 WING = 2
 LOG = Path("signal_research_v2.jsonl")
 BANK_LOG = Path("gold_bank.log")
+BITCOIN_LOG = Path("bitcoin_scalp.log")
 STATE = Path("signal_research_state_v2.json")
 AUCTION = Path("auction_state.json")
 NY = ZoneInfo("America/New_York")
@@ -4221,6 +4222,174 @@ def _note_manage(
         })
 
 
+def _bitcoin_block(title: str, rows: list[tuple[str, str]]) -> None:
+    lines = [title]
+    for name, value in rows:
+        lines.append(f"{name} {value}")
+    lines.append("")
+    with BITCOIN_LOG.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
+def bitcoin_scalp(
+    state: dict[str, Any],
+    symbol: str,
+    bars_by_chart: dict[str, list[dict[str, Any]]],
+    book: dict[str, Any] | None,
+    now: str,
+) -> None:
+    """Weekend Bitcoin, on paper. Do not be the bid or the offer the other algos are hitting."""
+    if symbol != "BTCUSD" or not isinstance(book, dict):
+        return
+    delta = book.get("delta_60s")
+    if not isinstance(delta, (int, float)) or isinstance(delta, bool):
+        return
+    try:
+        bid = float(book.get("bid"))
+        ask = float(book.get("ask"))
+    except (TypeError, ValueError):
+        return
+    if ask <= bid or bid <= 0:
+        return
+    spread = ask - bid
+    _points, highs, lows = _ends(bars_by_chart.get("M15") or [])
+    closed = _closed(bars_by_chart.get("M1") or [])
+    if not highs or not lows or not closed:
+        return
+    last = closed[-1]
+    try:
+        book_price = float(book.get("last"))
+    except (TypeError, ValueError):
+        book_price = (bid + ask) / 2.0
+    if abs(book_price - _num(last, "close")) > max(spread * 5.0, 50.0):
+        return
+    low_level = float(lows[-1]["price"])
+    high_level = float(highs[-1]["price"])
+    candle_high = _num(last, "high")
+    candle_low = _num(last, "low")
+    close = _num(last, "close")
+    opened = _num(last, "open")
+    seen = state.setdefault("bitcoin_seen", {})
+
+    def prices_beyond(side: str, entry: float, risk: float) -> list[float]:
+        if side == "BUY":
+            ahead = sorted(price for price in (float(point["price"]) for point in highs) if price >= entry + risk)
+        else:
+            ahead = sorted((price for price in (float(point["price"]) for point in lows) if price <= entry - risk), reverse=True)
+        return ahead
+
+    side = ""
+    level = 0.0
+    stop = 0.0
+    if candle_low <= low_level and close > low_level and close >= opened:
+        side, level, stop = "BUY", low_level, candle_low
+        if float(delta) < 0:
+            key = "|".join((now[:10], "SELLING", str(round(level, 0))))
+            if key not in seen:
+                seen[key] = now
+                _bitcoin_block("DIRECTION", [
+                    ("time", now),
+                    ("algos", "SELL"),
+                    ("level", f"{level:.2f}"),
+                    ("why", "The low was swept and the 60-second book is still selling. A buy would be their bid."),
+                    ("sent", "no"),
+                ])
+            side = ""
+    elif candle_high >= high_level and close < high_level and close <= opened:
+        side, level, stop = "SELL", high_level, candle_high
+        if float(delta) > 0:
+            key = "|".join((now[:10], "BUYING", str(round(level, 0))))
+            if key not in seen:
+                seen[key] = now
+                _bitcoin_block("DIRECTION", [
+                    ("time", now),
+                    ("algos", "BUY"),
+                    ("level", f"{level:.2f}"),
+                    ("why", "The high was swept and the 60-second book is still buying. A sell would be their offer."),
+                    ("sent", "no"),
+                ])
+            side = ""
+    if side:
+        entry = close
+        risk = abs(entry - stop)
+        ahead = prices_beyond(side, entry, risk)
+        key = "|".join((now[:10], side, str(round(level, 0))))
+        if risk > 0 and spread < risk and ahead and key not in seen and key not in state.setdefault("bitcoin_open", {}):
+            seen[key] = now
+            plan = {
+                "side": side,
+                "entry": entry,
+                "stop": stop,
+                "target": ahead[0],
+                "next": ahead[1] if len(ahead) > 1 else None,
+                "risk": risk,
+                "opened": now,
+            }
+            state.setdefault("bitcoin_open", {})[key] = plan
+            _bitcoin_block("TAKEN", [
+                ("time", now),
+                ("side", side),
+                ("entry", f"{entry:.2f}"),
+                ("stop", f"{stop:.2f}"),
+                ("target", f"{ahead[0]:.2f}"),
+                ("next", "" if plan["next"] is None else f"{plan['next']:.2f}"),
+                ("spread", f"{spread:.2f}"),
+                ("why", "The sweep finished and the book is not still running that way."),
+                ("sent", "no"),
+            ])
+
+    for key, plan in list(state.setdefault("bitcoin_open", {}).items()):
+        if plan.get("done"):
+            continue
+        try:
+            entry = float(plan["entry"])
+            stop = float(plan["stop"])
+            target = float(plan["target"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        buy = plan.get("side") == "BUY"
+        favorable = (bid - entry) if buy else (entry - ask)
+        hit_stop = bid <= stop if buy else ask >= stop
+        hit_target = bid >= target if buy else ask <= target
+        if not hit_stop and not hit_target:
+            plan["mfe"] = max(float(plan.get("mfe") or 0.0), favorable)
+            continue
+        if hit_stop and not hit_target:
+            _bitcoin_block("STOP", [
+                ("time", now),
+                ("side", str(plan.get("side"))),
+                ("entry", f"{entry:.2f}"),
+                ("stop", f"{stop:.2f}"),
+                ("move", f"{float(plan.get('mfe') or 0.0):.2f}"),
+                ("sent", "no"),
+            ])
+            plan["done"] = True
+            continue
+        pushing = (buy and float(delta) > 0) or ((not buy) and float(delta) < 0)
+        if pushing and plan.get("next") is not None:
+            _bitcoin_block("HOLD", [
+                ("time", now),
+                ("side", str(plan.get("side"))),
+                ("entry", f"{entry:.2f}"),
+                ("banked", f"{target:.2f}"),
+                ("next", f"{float(plan['next']):.2f}"),
+                ("why", "The book is still going. The stop stays. It is not moved to the first target."),
+                ("sent", "no"),
+            ])
+            plan["target"] = float(plan["next"])
+            plan["next"] = None
+            continue
+        _bitcoin_block("BANK", [
+            ("time", now),
+            ("side", str(plan.get("side"))),
+            ("entry", f"{entry:.2f}"),
+            ("target", f"{target:.2f}"),
+            ("why", "The book is quiet or it has turned. Bank this one."),
+            ("sent", "no"),
+        ])
+        plan["done"] = True
+
+
 def gold_bank(symbol: str, row: dict[str, Any], book: dict[str, Any] | None) -> dict[str, Any] | None:
     """Gold responsive only. Not armed. Does not change the row and does not send."""
     if symbol != "XAUUSD" or str(row.get("chart")) != "RESPONSIVE":
@@ -4480,6 +4649,7 @@ def record(
     _finish(state, "taken_open", "taken", bars_by_chart, symbol, now)
     _bank_watch(state, symbol, book, now)
     _note_manage(state, symbol, bid, ask, book, now)
+    bitcoin_scalp(state, symbol, bars_by_chart, book, now)
     _save_state(state)
     open_detail = [
         {

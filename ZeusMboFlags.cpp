@@ -127,7 +127,7 @@ static void TradeDelta(SCStudyInterfaceRef sc, double& buy5, double& buy60)
 
 static bool LadderRoot(const char* root)
 {
-    return std::strcmp(root, "GC") == 0 || std::strcmp(root, "CL") == 0 || std::strcmp(root, "NQ") == 0;
+    return std::strcmp(root, "GC") == 0 || std::strcmp(root, "CL") == 0 || std::strcmp(root, "NQ") == 0 || std::strcmp(root, "BTC") == 0;
 }
 
 static void WriteMarks(FILE* file, SCStudyInterfaceRef sc, const char* root, double tradePrice)

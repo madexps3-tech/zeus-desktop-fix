@@ -2843,6 +2843,8 @@ td{padding:8px;border-top:1px solid #1a2c3c}
     <tr><th>Time</th><th>Side</th><th>Entry</th><th>Stop</th><th>Went</th><th>Straight</th><th>Order flow</th></tr>
     """ + "".join(live_rows) + """
   </table>
+  <h1>Bitcoin. Not the gold bank.</h1>
+  <p class="muted">Paper only. The study has to be on the Binance perpetual, the chart that is open on the weekend. If the 60-second book is still selling through a low, there is no buy. That buy would be their bid. If the 60-second book is still buying through a high, there is no sell. The target is the next swing that pays at least the stop. If the book is still going when price gets there, hold. The stop is not moved. If the book is quiet or it has turned, bank. A spread wider than the stop is not a trade. Nothing is sent.</p>
 </main></body></html>"""
 
 
