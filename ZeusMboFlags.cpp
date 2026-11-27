@@ -319,6 +319,62 @@ static void CollectLevels(SCStudyInterfaceRef sc, int bidSide, int levels, Level
     }
 }
 
+static void WriteWalls(FILE* file, SCStudyInterfaceRef sc, const char* root)
+{
+    const double tick = sc.TickSize > 0.0 ? sc.TickSize : 0.01;
+    const char* symbol = sc.Symbol.GetChars();
+    double floorQty = std::strcmp(root, "NQ") == 0 ? 30.0 : 10.0;
+    if (std::strstr(symbol, "MNQ") != nullptr) floorQty = 300.0;
+    else if (std::strstr(symbol, "MGC") != nullptr) floorQty = 100.0;
+    else if (std::strstr(symbol, "MCL") != nullptr) floorQty = 100.0;
+    const int bidLevels = sc.GetBidMarketDepthNumberOfLevels();
+    const int askLevels = sc.GetAskMarketDepthNumberOfLevels();
+    if (bidLevels <= 0 && askLevels <= 0)
+    {
+        std::fprintf(file, "\"bid_wall\":null,\"bid_wall_qty\":null,\"ask_wall\":null,\"ask_wall_qty\":null,");
+        return;
+    }
+    LevelQty levels[64];
+    int count = 0;
+    double adjust = 0.0;
+    int haveAdjust = 0;
+    CollectLevels(sc, 1, bidLevels, levels, count, tick, adjust, haveAdjust);
+    CollectLevels(sc, 0, askLevels, levels, count, tick, adjust, haveAdjust);
+    double bidWall = 0.0;
+    double askWall = 0.0;
+    double bidQty = 0.0;
+    double askQty = 0.0;
+    const double bidPx = sc.Bid > 0.0 ? sc.Bid : sc.LastTradePrice;
+    const double askPx = sc.Ask > 0.0 ? sc.Ask : sc.LastTradePrice;
+    for (int index = 0; index < count; ++index)
+    {
+        if (levels[index].bid && levels[index].qty + 1e-9 >= floorQty && levels[index].price < bidPx - tick * 0.5)
+        {
+            if (bidWall == 0.0 || levels[index].price > bidWall)
+            {
+                bidWall = levels[index].price;
+                bidQty = levels[index].qty;
+            }
+        }
+        if (!levels[index].bid && levels[index].qty + 1e-9 >= floorQty && levels[index].price > askPx + tick * 0.5)
+        {
+            if (askWall == 0.0 || levels[index].price < askWall)
+            {
+                askWall = levels[index].price;
+                askQty = levels[index].qty;
+            }
+        }
+    }
+    if (bidWall > 0.0)
+        std::fprintf(file, "\"bid_wall\":%.10g,\"bid_wall_qty\":%.10g,", bidWall, bidQty);
+    else
+        std::fprintf(file, "\"bid_wall\":null,\"bid_wall_qty\":null,");
+    if (askWall > 0.0)
+        std::fprintf(file, "\"ask_wall\":%.10g,\"ask_wall_qty\":%.10g,", askWall, askQty);
+    else
+        std::fprintf(file, "\"ask_wall\":null,\"ask_wall_qty\":null,");
+}
+
 static void WatchIcebergs(SCStudyInterfaceRef sc, MboState* state, IceBook* book, const char* root, double tradePrice, double tick, double now)
 {
     state->bidIce.active = 0;
@@ -592,6 +648,7 @@ SCSFExport scsf_ZeusMboFlags(SCStudyInterfaceRef sc)
         std::fprintf(file, "{\"price\":%.10g,\"side\":\"%s\",\"shown\":%.10g}", iceBook->out[i].price, iceBook->out[i].bid ? "BUY" : "SELL", iceBook->out[i].qty);
     }
     std::fprintf(file, "],");
+    WriteWalls(file, sc, root);
     WriteMarks(file, sc, root, tradePrice);
     if (area.have)
         std::fprintf(file, "\"poc\":%.10g,\"vah\":%.10g,\"val\":%.10g,\"last\":%.10g,\"delta_5s\":%.10g,\"delta_60s\":%.10g}\n", area.poc, area.vah, area.val, tradePrice, delta5, delta60);

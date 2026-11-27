@@ -2207,11 +2207,11 @@ def _failed_test(
         return row
     if side == "SELL" and str(market).upper() == "BULLISH":
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still rising. The stop is the exit.").strip()
-        if still_high is not None:
+        if still_high is not None and _buying(book):
             row["note"] = (str(row.get("note") or "") + f" A high is still above at {round(still_high, 5)}. The market is still rising.").strip()
     if side == "BUY" and str(market).upper() == "BEARISH":
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
-        if still_low is not None:
+        if still_low is not None and _selling(book):
             row["note"] = (str(row.get("note") or "") + f" A low is still below at {round(still_low, 5)}. The market is still falling.").strip()
     if ranging and symbol == "XAUUSD":
         row["range_gold"] = True
@@ -2227,6 +2227,76 @@ def _failed_test(
         row["min_stop"] = float(BE_MOVE["XAGUSD"])
         _mark_range_order(symbol, side, extreme)
     return row
+
+
+def _buying(book: dict[str, Any] | None) -> bool:
+    if not isinstance(book, dict):
+        return False
+    delta = book.get("delta_60s")
+    return isinstance(delta, (int, float)) and not isinstance(delta, bool) and float(delta) > 0
+
+
+def _selling(book: dict[str, Any] | None) -> bool:
+    if not isinstance(book, dict):
+        return False
+    delta = book.get("delta_60s")
+    return isinstance(delta, (int, float)) and not isinstance(delta, bool) and float(delta) < 0
+
+
+def _wall_price(book: dict[str, Any] | None, name: str) -> float | None:
+    if not isinstance(book, dict):
+        return None
+    try:
+        value = float(book.get(name))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _book_lines(symbol: str, row: dict[str, Any], book: dict[str, Any] | None, bid: float | None, ask: float | None, spread: float) -> str:
+    """Name the live size. A bank sentence is only the higher-risk responsive case. Nothing is closed."""
+    if str(row.get("chart") or "") not in {"INTRADAY", "SCALP", "RESPONSIVE", "PRIOR", "BALANCE", "UNFINISHED"}:
+        return ""
+    if not row.get("tradeable") or not row.get("side"):
+        return ""
+    side = str(row.get("side"))
+    try:
+        entry = float(row.get("entry"))
+        target = float(row.get("target")) if row.get("target") is not None else None
+    except (TypeError, ValueError):
+        return ""
+    room = max(abs(float(spread or 0.0)), _band(symbol) * 4.0, float(BE_MOVE.get(symbol, 0.0) or 0.0))
+    parts: list[str] = []
+    ask_wall = _wall_price(book, "ask_wall")
+    bid_wall = _wall_price(book, "bid_wall")
+    if side == "BUY" and ask_wall is not None and isinstance(ask, (int, float)) and not isinstance(ask, bool) and ask_wall > float(ask):
+        where = "the next zone " if target is not None and target > entry and abs(ask_wall - target) <= room else ""
+        line = f"Offers sitting at {where}{round(ask_wall, 5)}."
+        if _buying(book):
+            line += " The book is still pushing into it."
+        parts.append(line)
+    if side == "SELL" and bid_wall is not None and isinstance(bid, (int, float)) and not isinstance(bid, bool) and bid_wall < float(bid):
+        where = "the next zone " if target is not None and target < entry and abs(bid_wall - target) <= room else ""
+        line = f"Bids sitting at {where}{round(bid_wall, 5)}."
+        if _selling(book):
+            line += " The book is still pushing into it."
+        parts.append(line)
+    against = (side == "SELL" and str(row.get("market") or "").upper() == "BULLISH") or (
+        side == "BUY" and str(row.get("market") or "").upper() == "BEARISH"
+    ) or bool(row.get("range_against"))
+    if str(row.get("chart")) == "RESPONSIVE" and against:
+        unfinished = _wall_price(book, "unfinished_high" if side == "SELL" else "unfinished_low")
+        if side == "SELL" and ask_wall is not None and isinstance(bid, (int, float)) and not isinstance(bid, bool):
+            in_favor = float(bid) < entry - max(abs(float(spread or 0.0)), 0.0)
+            at_band = unfinished is not None and abs(ask_wall - unfinished) <= room
+            if in_favor and at_band and not (_selling(book) and ask_wall is None):
+                parts.append("Bank. Size is still above and the market is still rising. The stop is still the exit.")
+        if side == "BUY" and bid_wall is not None and isinstance(ask, (int, float)) and not isinstance(ask, bool):
+            in_favor = float(ask) > entry + max(abs(float(spread or 0.0)), 0.0)
+            at_band = unfinished is not None and abs(bid_wall - unfinished) <= room
+            if in_favor and at_band and not (_buying(book) and bid_wall is None):
+                parts.append("Bank. Size is still below and the market is still falling. The stop is still the exit.")
+    return " ".join(parts)
 
 
 def _remember_test(fields: dict[str, Any]) -> dict[str, Any]:
@@ -2871,6 +2941,10 @@ def build_rows(
             _arm_button(maker)
         maker["market"] = state
         rows.append(maker)
+    for row in rows:
+        extra = _book_lines(symbol, row, book, bid, ask, spread)
+        if extra:
+            row["note"] = (str(row.get("note") or "") + " " + extra).strip()
     sweep = _sweep_row(symbol, m1, area, book, spread, highs15, lows15)
     if sweep is not None:
         rows.append(sweep)

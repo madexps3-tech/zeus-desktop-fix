@@ -476,6 +476,10 @@ function draw(){
   }
   const nextHighs=(isFinite(uHigh)&&uHigh>0)?uniquePrices(saved("HIGH").filter(price=>price>uHigh)).sort((a,b)=>a-b).slice(0,2):[];
   const nextLows=(isFinite(uLow)&&uLow>0)?uniquePrices(saved("LOW").filter(price=>price<uLow)).sort((a,b)=>b-a).slice(0,2):[];
+  [flowEarly.ask_wall, flowEarly.bid_wall].forEach(price=>{
+    const wall=Number(price);
+    if(isFinite(wall)&&wall>0){lo=Math.min(lo, wall); hi=Math.max(hi, wall)}
+  });
   if(isFinite(uHigh)&&uHigh>0){
     hi=Math.max(hi, uHigh);
     nextHighs.forEach(price=>{ hi=Math.max(hi, price); });
@@ -566,6 +570,14 @@ function draw(){
   }
   nextHighs.forEach((price, index)=>paintNext(price, index?"2ND HIGH":"NEXT HIGH"));
   nextLows.forEach((price, index)=>paintNext(price, index?"2ND LOW":"NEXT LOW"));
+  function paintWall(price, name){
+    const level=Number(price);
+    if(!isFinite(level)||level<=0||level<lo||level>hi) return;
+    ctx.setLineDash([1,3]); ctx.strokeStyle="#d7b56d"; ctx.beginPath(); ctx.moveTo(plotL,y(level)); ctx.lineTo(plotR,y(level)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle="#d7b56d"; ctx.fillText(name+" "+level, plotR-210, y(level)-4);
+  }
+  paintWall(flowNow.ask_wall, "OFFERS");
+  paintWall(flowNow.bid_wall, "BIDS");
   ctx.restore();
   if(row){
     ctx.setLineDash([4,4]);
@@ -2237,6 +2249,10 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
             "val": book.get("val"),
             "unfinished_high": book.get("unfinished_high"),
             "unfinished_low": book.get("unfinished_low"),
+            "bid_wall": book.get("bid_wall"),
+            "bid_wall_qty": book.get("bid_wall_qty"),
+            "ask_wall": book.get("ask_wall"),
+            "ask_wall_qty": book.get("ask_wall_qty"),
             "stepping": stepping,
             "walk": walk,
             "dom_day": dom_day,
