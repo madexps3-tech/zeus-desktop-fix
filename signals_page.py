@@ -469,15 +469,20 @@ function draw(){
   }
   const uHigh=flowEarly.unfinished_high==null?NaN:Number(flowEarly.unfinished_high);
   const uLow=flowEarly.unfinished_low==null?NaN:Number(flowEarly.unfinished_low);
+  function uniquePrices(prices){
+    const out=[];
+    prices.forEach(price=>{ if(!out.some(kept=>Math.abs(kept-price)<1e-8)) out.push(price); });
+    return out;
+  }
+  const nextHighs=(isFinite(uHigh)&&uHigh>0)?uniquePrices(saved("HIGH").filter(price=>price>uHigh)).sort((a,b)=>a-b).slice(0,2):[];
+  const nextLows=(isFinite(uLow)&&uLow>0)?uniquePrices(saved("LOW").filter(price=>price<uLow)).sort((a,b)=>b-a).slice(0,2):[];
   if(isFinite(uHigh)&&uHigh>0){
     hi=Math.max(hi, uHigh);
-    const above=saved("HIGH").filter(price=>price>uHigh);
-    if(above.length) hi=Math.max(hi, Math.min.apply(null, above));
+    nextHighs.forEach(price=>{ hi=Math.max(hi, price); });
   }
   if(isFinite(uLow)&&uLow>0){
     lo=Math.min(lo, uLow);
-    const below=saved("LOW").filter(price=>price<uLow);
-    if(below.length) lo=Math.min(lo, Math.max.apply(null, below));
+    nextLows.forEach(price=>{ lo=Math.min(lo, price); });
   }
   const pad=(hi-lo)*0.08||span*0.08; lo-=pad; hi+=pad;
   const y=p=>plotT+((hi-p)/(hi-lo))*(plotB-plotT);
@@ -559,14 +564,8 @@ function draw(){
     ctx.setLineDash([2,3]); ctx.strokeStyle="#8ea3b8"; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
     ctx.setLineDash([]); ctx.fillStyle="#8ea3b8"; ctx.fillText(name+" "+price, plotL+4, y(price)-4);
   }
-  if(isFinite(uHigh)&&uHigh>0){
-    const above=saved("HIGH").filter(price=>price>uHigh);
-    if(above.length) paintNext(Math.min.apply(null, above), "NEXT HIGH");
-  }
-  if(isFinite(uLow)&&uLow>0){
-    const below=saved("LOW").filter(price=>price<uLow);
-    if(below.length) paintNext(Math.max.apply(null, below), "NEXT LOW");
-  }
+  nextHighs.forEach((price, index)=>paintNext(price, index?"2ND HIGH":"NEXT HIGH"));
+  nextLows.forEach((price, index)=>paintNext(price, index?"2ND LOW":"NEXT LOW"));
   ctx.restore();
   if(row){
     ctx.setLineDash([4,4]);

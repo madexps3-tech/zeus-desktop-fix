@@ -2012,6 +2012,34 @@ def _mark_range_order(symbol: str, side: str, extreme: float) -> None:
         return
 
 
+def _saved_edges(levels: dict[str, Any], bars_by_chart: dict[str, list[dict[str, Any]]], book: dict[str, Any] | None) -> tuple[list[float], list[float]]:
+    """The highs and lows the chart can draw, including the unfinished price."""
+    highs: list[float] = []
+    lows: list[float] = []
+
+    def add(bucket: list[float], price: Any) -> None:
+        try:
+            value = float(price)
+        except (TypeError, ValueError):
+            return
+        if value <= 0 or any(abs(value - kept) <= 1e-9 for kept in bucket):
+            return
+        bucket.append(value)
+
+    for pool in liquidity(levels, bars_by_chart):
+        if pool.get("kind") == "RANGE":
+            add(highs, pool.get("high"))
+            add(lows, pool.get("low"))
+        elif pool.get("kind") == "HIGH":
+            add(highs, pool.get("price"))
+        elif pool.get("kind") == "LOW":
+            add(lows, pool.get("price"))
+    if isinstance(book, dict):
+        add(highs, book.get("unfinished_high"))
+        add(lows, book.get("unfinished_low"))
+    return highs, lows
+
+
 def _failed_test(
     symbol: str,
     m1: list[dict[str, Any]],
@@ -2022,6 +2050,8 @@ def _failed_test(
     bid: float | None,
     ask: float | None,
     market: str = "",
+    ahead_highs: list[float] | None = None,
+    ahead_lows: list[float] | None = None,
 ) -> dict[str, Any]:
     """A 1-minute close back through an excess. The button is only on that candle, and only while value is still ahead."""
     if area is None:
@@ -2103,6 +2133,37 @@ def _failed_test(
         reached_poc = furthest - 1e-9 <= poc
         reached_far = furthest - 1e-9 <= val
     ratios = [round(abs(price - entry) / risk, 2) for price in targets]
+    band = _band(symbol)
+
+    def _unfinished(name: str) -> float:
+        if not isinstance(book, dict):
+            return 0.0
+        try:
+            value = float(book.get(name))
+        except (TypeError, ValueError):
+            return 0.0
+        return value if value > 0 else 0.0
+
+    if side == "SELL" and str(market).upper() == "BULLISH":
+        unfinished = _unfinished("unfinished_high")
+        if unfinished > entry + band:
+            above = [unfinished]
+        else:
+            anchor = unfinished if unfinished else entry
+            above = sorted(price for price in (ahead_highs or []) if price > anchor + band)[:2]
+            above = [price for price in above if price > entry + band]
+        if above:
+            return _wait("RESPONSIVE", f"A high is still above at {round(min(above), 5)}. The market is still rising. Not a sell.", "")
+    if side == "BUY" and str(market).upper() == "BEARISH":
+        unfinished = _unfinished("unfinished_low")
+        if unfinished and unfinished < entry - band:
+            below = [unfinished]
+        else:
+            anchor = unfinished if unfinished else entry
+            below = sorted((price for price in (ahead_lows or []) if price < anchor - band), reverse=True)[:2]
+            below = [price for price in below if price < entry - band]
+        if below:
+            return _wait("RESPONSIVE", f"A low is still below at {round(max(below), 5)}. The market is still falling. Not a buy.", "")
     at_signal = close_at >= len(series) - 1
     _remember_test({
         "symbol": symbol, "side": side, "extreme": extreme, "entry": entry, "stop": stop,
@@ -2789,7 +2850,7 @@ def build_rows(
         if zone is not None and row.get("side") and _spent(symbol, str(row.get("chart")), str(row.get("side")), float(zone)):
             _silence(row, "Not a new order. This zone already has one.")
     _gate(rows, book)
-    responsive = _failed_test(symbol, m1, m15, area, book, spread, bid, ask, state)
+    responsive = _failed_test(symbol, m1, m15, area, book, spread, bid, ask, state, *_saved_edges(levels, bars_by_chart, book))
     responsive["market"] = state
     if responsive.get("side") and responsive.get("tradeable"):
         _live_stop(responsive, bid, ask, symbol)
