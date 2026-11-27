@@ -1912,8 +1912,8 @@ def _range_gold_targets(entry: float, stop: float, targets: list[float]) -> list
     return near + far
 
 
-def _range_level_open(symbol: str, side: str, extreme: float, entry: float) -> bool:
-    """One gold responsive order per level. The same excess may keep updating."""
+def _range_level_open(symbol: str, side: str, extreme: float, entry: float, band: float = 8.0) -> bool:
+    """One responsive order per level. The same excess may keep updating."""
     try:
         saved = json.loads(TEST_STATE.read_text(encoding="utf-8")) if TEST_STATE.exists() else {}
     except (OSError, json.JSONDecodeError):
@@ -1936,7 +1936,7 @@ def _range_level_open(symbol: str, side: str, extreme: float, entry: float) -> b
             continue
         if abs(prior_extreme - extreme) <= 1e-9:
             continue
-        if abs(prior_entry - entry) <= 8.0:
+        if abs(prior_entry - entry) <= float(band):
             return True
     return False
 
@@ -1990,7 +1990,12 @@ def _failed_test(
     if side == "SELL" and not entry > vah:
         return _wait("RESPONSIVE", "TESTING. The close is already through the value high. Not a trade.", "")
     pad = max(float(spread), _band(symbol))
-    stop = extreme - pad if side == "BUY" else extreme + pad
+    natural = extreme - pad if side == "BUY" else extreme + pad
+    if symbol == "XAGUSD" and abs(entry - natural) + 1e-9 < float(BE_MOVE["XAGUSD"]):
+        return _wait("RESPONSIVE", "The stop is inside 0.20. Not a trade.", "")
+    if symbol == "XAGUSD" and _range_level_open(symbol, side, extreme, entry, float(BE_MOVE["XAGUSD"])):
+        return _wait("RESPONSIVE", "A responsive order is already at this level. Not a new trade.", "")
+    stop = natural
     floor = float(BE_MOVE.get(symbol, 0.0) or 0.0)
     if floor > 0:
         stop = min(stop, entry - floor) if side == "BUY" else max(stop, entry + floor)
@@ -2097,6 +2102,9 @@ def _failed_test(
         elif side == "BUY":
             row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
     if ranging and symbol == "XAUUSD" and row.get("tradeable"):
+        _mark_range_order(symbol, side, extreme)
+    if symbol == "XAGUSD" and row.get("tradeable"):
+        row["min_stop"] = float(BE_MOVE["XAGUSD"])
         _mark_range_order(symbol, side, extreme)
     return row
 
@@ -4202,6 +4210,8 @@ def record(
             and str(row.get("market") or "").upper() == "RANGE"
             and symbol == "XAUUSD"
         )
+        silver = str(row.get("chart")) == "RESPONSIVE" and symbol == "XAGUSD"
+        bitcoin = str(row.get("chart")) == "RESPONSIVE" and symbol == "BTCUSD"
         if range_gold:
             try:
                 entry = float(row["entry"])
@@ -4215,6 +4225,23 @@ def record(
                 continue
             state["range_levels"][level_key] = entry
             key = level_key
+        elif silver:
+            try:
+                entry = float(row["entry"])
+            except (TypeError, ValueError):
+                continue
+            book_key = "|".join((now[:10], symbol, str(row.get("side"))))
+            taken = state.setdefault("silver_levels", {}).setdefault(book_key, [])
+            if any(abs(float(price) - entry) <= float(BE_MOVE["XAGUSD"]) for price in taken if isinstance(price, (int, float)) and not isinstance(price, bool)):
+                continue
+            taken.append(entry)
+            key = "|".join((book_key, str(round(entry, 3))))
+            if key in if_open:
+                continue
+        elif bitcoin:
+            key = "|".join((now[:10], symbol, "RESPONSIVE", str(row.get("side"))))
+            if key in if_open:
+                continue
         else:
             key = "|".join((
                 now[:10],
@@ -4640,6 +4667,14 @@ def _offer_missed(
         row["note"] = "The first target is already reached. Not a new order."
         return
     risk = abs(live - stop)
+    floor = row.get("min_stop")
+    if isinstance(floor, (int, float)) and not isinstance(floor, bool) and risk + 1e-9 < float(floor):
+        row["late"] = True
+        row["state"] = "LATE"
+        row["tradeable"] = False
+        row["button"] = False
+        row["note"] = "The stop is inside 0.20. Not a trade."
+        return
     if risk <= abs(float(spread or 0.0)):
         row["late"] = True
         row["state"] = "LATE"
