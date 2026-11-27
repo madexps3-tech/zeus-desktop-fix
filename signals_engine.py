@@ -4221,56 +4221,19 @@ def _note_manage(
         })
 
 
-def _bank_limits(symbol: str, spread: float) -> tuple[float, float, float] | None:
-    """The stop floor, four times that floor, and the distance that banks. Gold stays 2 to 8."""
-    floor = float(BE_MOVE.get(symbol, 0.0) or 0.0)
-    if symbol not in BE_MOVE or floor <= 0:
-        return None
-    least = max(floor, float(spread or 0.0))
-    most = floor * 4.0
-    if least - 1e-9 > most:
-        return None
-    return least, most, floor
-
-
-def _bank_px(price: float, floor: float) -> str:
-    if floor >= 1:
-        return f"{float(price):.2f}"
-    if floor >= 0.01:
-        return f"{float(price):.4f}"
-    return f"{float(price):.5f}"
-
-
-def _book_spread(book: dict[str, Any] | None) -> float:
-    if not isinstance(book, dict):
-        return 0.0
-    try:
-        bid = float(book.get("bid"))
-        ask = float(book.get("ask"))
-    except (TypeError, ValueError):
-        return 0.0
-    if ask > bid > 0:
-        return ask - bid
-    return 0.0
-
-
 def gold_bank(symbol: str, row: dict[str, Any], book: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Responsive only, every symbol. Not armed. Does not change the row and does not send."""
-    if symbol not in BE_MOVE or str(row.get("chart")) != "RESPONSIVE":
+    """Gold responsive only. Not armed. Does not change the row and does not send."""
+    if symbol != "XAUUSD" or str(row.get("chart")) != "RESPONSIVE":
         return None
     if row.get("side") not in ("BUY", "SELL") or not row.get("tradeable"):
         return None
-    limits = _bank_limits(symbol, _book_spread(book))
-    if limits is None:
-        return None
-    least, most, floor = limits
     try:
         entry = float(row["entry"])
         stop = float(row["risk_stop"] if row.get("risk_stop") is not None else row["stop"])
     except (TypeError, ValueError, KeyError):
         return None
     risk = abs(entry - stop)
-    if risk + 1e-9 < least or risk - 1e-9 > most:
+    if risk + 1e-9 < BANK_MIN or risk - 1e-9 > BANK_MAX:
         return None
     delta = book.get("delta_60s") if isinstance(book, dict) else None
     pushing = isinstance(delta, (int, float)) and not isinstance(delta, bool) and (
@@ -4285,7 +4248,6 @@ def gold_bank(symbol: str, row: dict[str, Any], book: dict[str, Any] | None) -> 
         "entry": entry,
         "stop": stop,
         "risk": round(risk, 5),
-        "bank_at": floor,
         "at_two": "HOLD" if pushing else "CLOSE",
     }
 
@@ -4301,16 +4263,12 @@ def _bank_block(title: str, rows: list[tuple[str, str]]) -> None:
 
 
 def _bank_watch(state: dict[str, Any], symbol: str, book: dict[str, Any] | None, now: str) -> None:
-    """One paper line when price first reaches that symbol's bank distance. Never an order."""
-    if symbol not in BE_MOVE:
+    """One paper line when a gold bank first prints $2. Never an order."""
+    if symbol != "XAUUSD":
         return
     pending = state.setdefault("bank_open", {})
     for key, plan in list(pending.items()):
         if plan.get("banked") or str(plan.get("symbol")) != symbol:
-            continue
-        try:
-            bank_at = float(plan.get("bank_at") or BE_MOVE[symbol])
-        except (TypeError, ValueError):
             continue
         mfe = float(plan.get("mfe") or 0.0)
         for open_row in (state.get("if_open") or {}).values():
@@ -4327,7 +4285,7 @@ def _bank_watch(state: dict[str, Any], symbol: str, book: dict[str, Any] | None,
                 mfe = max(mfe, float(open_row.get("mfe") or 0.0))
             except (TypeError, ValueError):
                 continue
-        if mfe + 1e-9 < bank_at:
+        if mfe + 1e-9 < BANK_MIN:
             continue
         delta = book.get("delta_60s") if isinstance(book, dict) else None
         side = plan.get("side")
@@ -4343,19 +4301,16 @@ def _bank_watch(state: dict[str, Any], symbol: str, book: dict[str, Any] | None,
             "entry": plan.get("entry"),
             "stop": plan.get("stop"),
             "mfe": round(mfe, 5),
-            "bank_at": bank_at,
             "action": action,
             "armed": False,
             "send": False,
         })
-        _bank_block("AT BANK", [
-            ("symbol", symbol),
+        _bank_block("AT $2", [
             ("time", now),
             ("side", str(side)),
-            ("entry", _bank_px(float(plan.get("entry")), bank_at)),
-            ("stop", _bank_px(float(plan.get("stop")), bank_at)),
-            ("move", _bank_px(mfe, bank_at)),
-            ("bank", _bank_px(bank_at, bank_at)),
+            ("entry", f"{float(plan.get('entry')):.2f}"),
+            ("stop", f"{float(plan.get('stop')):.2f}"),
+            ("move", f"{mfe:.2f}"),
             ("action", action),
             ("sent", "no"),
         ])
@@ -4478,13 +4433,11 @@ def record(
             plan["opened"] = now
             state["bank_open"][key] = plan
             _bank_block("TAKEN", [
-                ("symbol", symbol),
                 ("time", now),
                 ("side", str(plan["side"])),
-                ("entry", _bank_px(float(plan["entry"]), float(plan["bank_at"]))),
-                ("stop", _bank_px(float(plan["stop"]), float(plan["bank_at"]))),
-                ("risk", _bank_px(float(plan["risk"]), float(plan["bank_at"]))),
-                ("bank", _bank_px(float(plan["bank_at"]), float(plan["bank_at"]))),
+                ("entry", f"{float(plan['entry']):.2f}"),
+                ("stop", f"{float(plan['stop']):.2f}"),
+                ("risk", f"{float(plan['risk']):.2f}"),
                 ("sent", "no"),
             ])
     _finish(state, "if_open", "if_taken", bars_by_chart, symbol, now)
