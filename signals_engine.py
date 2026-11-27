@@ -1880,6 +1880,85 @@ def _probe(bars: list[dict[str, Any]], val: float, vah: float) -> dict[str, Any]
     return found
 
 
+def _m15_against(m15: list[dict[str, Any]], side: str) -> bool:
+    """The last two 15-minute swings are still moving against this side. No extra rule."""
+    points = swings(m15)
+    if side == "SELL":
+        highs = [point for point in points if point["kind"] == "HIGH"][-2:]
+        return len(highs) == 2 and highs[1]["price"] > highs[0]["price"]
+    if side == "BUY":
+        lows = [point for point in points if point["kind"] == "LOW"][-2:]
+        return len(lows) == 2 and lows[1]["price"] < lows[0]["price"]
+    return False
+
+
+def _range_gold_targets(entry: float, stop: float, targets: list[float]) -> list[float] | None:
+    """The first target has to be within $8 and at least 1R. A farther level can stay behind it."""
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    near: list[float] = []
+    far: list[float] = []
+    for price in targets:
+        distance = abs(float(price) - entry)
+        if distance + 1e-9 < risk:
+            continue
+        if distance <= 8.0 + 1e-9:
+            near.append(float(price))
+        else:
+            far.append(float(price))
+    if not near:
+        return None
+    return near + far
+
+
+def _range_level_open(symbol: str, side: str, extreme: float, entry: float) -> bool:
+    """One gold responsive order per level. The same excess may keep updating."""
+    try:
+        saved = json.loads(TEST_STATE.read_text(encoding="utf-8")) if TEST_STATE.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(saved, dict):
+        return False
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for item in saved.values():
+        if not isinstance(item, dict) or not item.get("ordered"):
+            continue
+        if item.get("symbol") != symbol or str(item.get("side") or "") != side:
+            continue
+        opened = str(item.get("opened") or item.get("candle") or "")
+        if not opened.startswith(today):
+            continue
+        try:
+            prior_entry = float(item.get("entry"))
+            prior_extreme = float(item.get("extreme"))
+        except (TypeError, ValueError):
+            continue
+        if abs(prior_extreme - extreme) <= 1e-9:
+            continue
+        if abs(prior_entry - entry) <= 8.0:
+            return True
+    return False
+
+
+def _mark_range_order(symbol: str, side: str, extreme: float) -> None:
+    key = "|".join((str(symbol), str(side), str(round(float(extreme), 5))))
+    try:
+        saved = json.loads(TEST_STATE.read_text(encoding="utf-8")) if TEST_STATE.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(saved, dict):
+        return
+    item = saved.get(key)
+    if not isinstance(item, dict):
+        return
+    item["ordered"] = True
+    try:
+        TEST_STATE.write_text(json.dumps(saved), encoding="utf-8")
+    except OSError:
+        return
+
+
 def _failed_test(
     symbol: str,
     m1: list[dict[str, Any]],
@@ -1918,6 +1997,11 @@ def _failed_test(
     risk = abs(entry - stop)
     if risk <= 0:
         return _wait("RESPONSIVE", "TESTING. The stop is not beyond the extreme. Not a trade.", "")
+    ranging = str(market).upper() == "RANGE"
+    if ranging and symbol == "XAUUSD" and risk + 1e-9 < GOLD_MIN_STOP:
+        return _wait("RESPONSIVE", "The stop is inside $2. Not a trade.", "")
+    if ranging and symbol == "XAUUSD" and _range_level_open(symbol, side, extreme, entry):
+        return _wait("RESPONSIVE", "A responsive order is already at this level. Not a new trade.", "")
     ladder = [val, poc, vah] if side == "BUY" else [vah, poc, val]
     targets = [price for price in ladder if (price > entry if side == "BUY" else price < entry)]
     if not targets:
@@ -1929,6 +2013,11 @@ def _failed_test(
     ]
     if not deciding:
         return _wait("RESPONSIVE", "TESTING. The point of control and the far side are not further than the stop. Not a trade.", "")
+    if ranging and symbol == "XAUUSD":
+        held = _range_gold_targets(entry, stop, targets)
+        if not held:
+            return _wait("RESPONSIVE", "The first target is more than $8 away, or it is under 1R. Not a trade.", "")
+        targets = held
     furthest = entry
     adverse = entry
     stopped = False
@@ -1999,6 +2088,16 @@ def _failed_test(
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
     if side == "SELL" and str(market).upper() == "BULLISH":
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still rising. The stop is the exit.").strip()
+    if ranging and symbol == "XAUUSD":
+        row["range_gold"] = True
+    if ranging and _m15_against(m15, side):
+        row["range_against"] = True
+        if side == "SELL":
+            row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still rising. The stop is the exit.").strip()
+        elif side == "BUY":
+            row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
+    if ranging and symbol == "XAUUSD" and row.get("tradeable"):
+        _mark_range_order(symbol, side, extreme)
     return row
 
 
@@ -4098,16 +4197,35 @@ def record(
             anchor = row.get("stop")
         if anchor is None:
             anchor = row.get("entry")
-        key = "|".join((
-            now[:10],
-            symbol,
-            str(row.get("chart")),
-            str(row.get("side")),
-            str(round(float(anchor), 2)),
-        ))
-        if key in if_open or key in seen:
-            continue
-        seen[key] = now
+        range_gold = (
+            str(row.get("chart")) == "RESPONSIVE"
+            and str(row.get("market") or "").upper() == "RANGE"
+            and symbol == "XAUUSD"
+        )
+        if range_gold:
+            try:
+                entry = float(row["entry"])
+            except (TypeError, ValueError):
+                continue
+            level_key = "|".join((now[:10], symbol, "RESPONSIVE", str(row.get("side"))))
+            prior = state.setdefault("range_levels", {}).get(level_key)
+            if isinstance(prior, (int, float)) and not isinstance(prior, bool) and abs(float(prior) - entry) <= 8.0:
+                continue
+            if level_key in if_open:
+                continue
+            state["range_levels"][level_key] = entry
+            key = level_key
+        else:
+            key = "|".join((
+                now[:10],
+                symbol,
+                str(row.get("chart")),
+                str(row.get("side")),
+                str(round(float(anchor), 2)),
+            ))
+            if key in if_open or key in seen:
+                continue
+            seen[key] = now
         if_open[key] = {**row, "symbol": symbol, "opened": now}
         if row.get("chart") in ("INTRADAY", "INTERDAY", "SCALP") and row.get("zone") is not None:
             zone_key = "|".join((symbol, str(row.get("chart")), str(row.get("side")), str(round(float(row["zone"]), 5))))
@@ -4477,6 +4595,8 @@ def _offer_missed(
         return
     side = str(row.get("side") or "")
     if side not in {"BUY", "SELL"}:
+        return
+    if row.get("range_gold"):
         return
     try:
         stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
