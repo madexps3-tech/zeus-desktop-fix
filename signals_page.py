@@ -174,6 +174,7 @@ tr.pick{outline:1px solid var(--warn)}
 </style></head><body>
 <header>
   <a href="/v19/auto">AUTO</a>
+  <a href="/v19/bank">BANK</a>
   <h1>SIGNALS</h1>
   <span class="muted" id="clock"></span>
 </header>
@@ -2724,6 +2725,127 @@ def _auto_view(host: Any) -> dict[str, Any]:
     }
 
 
+def _bank_live() -> list[dict[str, str]]:
+    """Paper rows from gold_bank.log. One trade, then what happened at $2."""
+    path = Path("gold_bank.log")
+    if not path.exists():
+        return []
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line in ("TAKEN", "AT $2", "STOP"):
+            if current:
+                blocks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append(current)
+    parsed = []
+    for block in blocks:
+        fields = {}
+        for line in block[1:]:
+            if " " not in line:
+                continue
+            name, value = line.split(" ", 1)
+            fields[name] = value
+        fields["kind"] = block[0]
+        parsed.append(fields)
+    taken = [row for row in parsed if row.get("kind") == "TAKEN"]
+    later = [row for row in parsed if row.get("kind") in ("AT $2", "STOP")]
+    out = []
+    for row in taken:
+        match = None
+        for item in later:
+            if item.get("entry") == row.get("entry") and item.get("side") == row.get("side") and item.get("time", "") >= row.get("time", ""):
+                match = item
+                break
+        out.append({
+            "time": row.get("time") or "",
+            "side": row.get("side") or "",
+            "entry": row.get("entry") or "",
+            "stop": row.get("stop") or "",
+            "move": (match or {}).get("move") or "",
+            "straight": (match or {}).get("straight") or "Open",
+            "flow": (match or {}).get("flow") or "Open",
+        })
+    return out
+
+
+def render_bank_page() -> str:
+    """The gold bank on its own page. It does not send an order."""
+    old = [
+        ("23 Nov 08:11", "Buy", "3604.19", "2.00", "2.02", "Bank $2", "+$200"),
+        ("23 Nov 08:31", "Buy", "3601.71", "2.00", "7.16", "Bank $2", "+$200"),
+        ("23 Nov 08:37", "Buy", "3608.11", "2.00", "1.38", "Stop", "-$200"),
+        ("24 Nov 22:43", "Buy", "3560.04", "6.61", "4.11", "Bank $2", "+$200"),
+        ("25 Nov 05:31", "Buy", "3536.21", "2.00", "5.49", "Bank $2", "+$200"),
+        ("25 Nov 12:14", "Buy", "3491.01", "6.42", "22.69", "Bank $2", "+$200"),
+        ("25 Nov 14:40", "Buy", "3462.69", "3.05", "10.75", "Bank $2", "+$200"),
+        ("25 Nov 18:48", "Sell", "3544.11", "3.26", "9.02", "Bank $2", "+$200"),
+        ("25 Nov 20:07", "Sell", "3554.04", "4.36", "18.08", "Bank $2", "+$200"),
+        ("25 Nov 23:03", "Buy", "3583.88", "2.00", "5.00", "Bank $2", "+$200"),
+        ("25 Nov 23:25", "Sell", "3580.06", "2.00", "3.20", "Bank $2", "+$200"),
+        ("26 Nov 00:11", "Sell", "3581.29", "5.32", "10.04", "Bank $2", "+$200"),
+        ("27 Nov 04:13", "Sell", "3627.66", "2.72", "0.68", "Stop", "-$272"),
+        ("27 Nov 05:30", "Sell", "3649.49", "2.69", "1.81", "Stop", "-$269"),
+    ]
+    old_rows = []
+    for when, side, entry, stop, went, result, money in old:
+        tone = "good" if result.startswith("Bank") else "bad"
+        old_rows.append(
+            "<tr><td>" + when + "</td><td>" + side + "</td><td>" + entry + "</td><td>$" + stop
+            + "</td><td>$" + went + "</td><td class=\"" + tone + "\">" + result + "</td><td>" + money + "</td></tr>"
+        )
+    live_rows = []
+    for row in _bank_live():
+        live_rows.append(
+            "<tr><td>" + row["time"] + "</td><td>" + row["side"] + "</td><td>" + row["entry"]
+            + "</td><td>" + row["stop"] + "</td><td>" + row["move"] + "</td><td>" + row["straight"]
+            + "</td><td>" + row["flow"] + "</td></tr>"
+        )
+    if not live_rows:
+        live_rows.append("<tr><td colspan=\"7\" class=\"muted\">No live paper trade yet. The file is gold_bank.log in the ZEUS folder. It is written when a gold responsive trade has a stop from $2 to $8.</td></tr>")
+    return """<!doctype html><html><head><meta charset="utf-8"><title>ZEUS Bank</title>
+<style>
+:root{--bg:#071019;--panel:#0c1824;--line:#24384c;--text:#e7eef5;--muted:#8ea3b8;--good:#67d6a3;--bad:#ef7f88;--warn:#e9c66b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}
+header{display:flex;gap:14px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+a{color:#9fb3c8;text-decoration:none;font-size:12px;font-weight:800}
+h1{font-size:22px;margin:16px 0 8px}
+main{padding:16px 20px;max-width:1100px}
+.muted{color:var(--muted)} .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px 0}
+table{width:100%;border-collapse:collapse;font:12px Consolas,monospace}
+th{color:var(--muted);text-align:left;font-size:11px;padding:8px}
+td{padding:8px;border-top:1px solid #1a2c3c}
+</style></head><body>
+<header>
+  <a href="/v19/signals">SIGNALS</a>
+  <a href="/v19/auto">AUTO</a>
+  <h1 style="font-size:16px;margin:0">BANK</h1>
+  <span class="warn">Demo only. This page does not send an order.</span>
+</header>
+<main>
+  <h1>Gold bank</h1>
+  <p class="muted">Two comparisons. They are not the same trade.</p>
+  <div class="card">Straight. Close the lot at $2, whether the book is pushing or not.</div>
+  <div class="card">Order flow. At $2, if the 60-second book is still pushing, hold. The stop stays the original stop. It is not moved to $2. If the book is quiet, turned, or missing, close at $2.</div>
+  <h1>The old count. Straight $2 only.</h1>
+  <p class="muted">23 to 27 November. The 60-second book was not saved, so the hold is not on these rows. 1.00 lot. One dollar of gold is $100. 11 banked, 3 stopped, +$1,459.</p>
+  <table>
+    <tr><th>Time</th><th>Side</th><th>Entry</th><th>Stop</th><th>Went</th><th>Straight</th><th>1 lot</th></tr>
+    """ + "".join(old_rows) + """
+  </table>
+  <h1>Live. Both comparisons.</h1>
+  <p class="muted">Written from here. A hold is still open. The stop has not been moved.</p>
+  <table>
+    <tr><th>Time</th><th>Side</th><th>Entry</th><th>Stop</th><th>Went</th><th>Straight</th><th>Order flow</th></tr>
+    """ + "".join(live_rows) + """
+  </table>
+</main></body></html>"""
+
+
 def render_auto_page() -> str:
     return r"""<!doctype html><html><head><meta charset="utf-8"><title>ZEUS Auto</title>
 <style>
@@ -2745,6 +2867,7 @@ td{padding:6px;border-top:1px solid #1a2c3c}
 </style></head><body>
 <header>
   <a href="/v19/signals">SIGNALS</a>
+  <a href="/v19/bank">BANK</a>
   <h1>AUTO</h1><span class="muted" id="arm">OFF</span>
 </header>
 <main>

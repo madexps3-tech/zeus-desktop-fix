@@ -4311,10 +4311,46 @@ def _bank_watch(state: dict[str, Any], symbol: str, book: dict[str, Any] | None,
             ("entry", f"{float(plan.get('entry')):.2f}"),
             ("stop", f"{float(plan.get('stop')):.2f}"),
             ("move", f"{mfe:.2f}"),
+            ("straight", "Bank $2"),
+            ("flow", "Hold. The stop stays." if pushing else "Bank $2"),
             ("action", action),
             ("sent", "no"),
         ])
         plan["banked"] = True
+    open_entries = []
+    for open_row in (state.get("if_open") or {}).values():
+        if str(open_row.get("symbol")) != symbol or str(open_row.get("chart")) != "RESPONSIVE":
+            continue
+        try:
+            open_entries.append((str(open_row.get("side")), round(float(open_row.get("entry")), 5)))
+        except (TypeError, ValueError):
+            continue
+    for key, plan in list(pending.items()):
+        if plan.get("banked") or plan.get("stopped") or str(plan.get("symbol")) != symbol:
+            continue
+        try:
+            mark = (str(plan.get("side")), round(float(plan.get("entry")), 5))
+        except (TypeError, ValueError):
+            continue
+        if mark in open_entries:
+            continue
+        try:
+            mfe = float(plan.get("mfe") or 0.0)
+        except (TypeError, ValueError):
+            mfe = 0.0
+        if mfe + 1e-9 >= BANK_MIN:
+            continue
+        _bank_block("STOP", [
+            ("time", now),
+            ("side", str(plan.get("side"))),
+            ("entry", f"{float(plan.get('entry')):.2f}"),
+            ("stop", f"{float(plan.get('stop')):.2f}"),
+            ("move", f"{mfe:.2f}"),
+            ("straight", "Stop"),
+            ("flow", "Stop. It never reached $2."),
+            ("sent", "no"),
+        ])
+        plan["stopped"] = True
 
 
 def record(

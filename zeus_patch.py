@@ -293,6 +293,32 @@ if "/v19/auto" not in text:
     )
     print("Auto route added.", flush=True)
 
+if "def bank_page" not in text:
+    bank_method = (
+        "    async def bank_page(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import render_bank_page" + newline
+        + "        return web.Response(text=render_bank_page(), content_type='text/html')" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the bank page.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, bank_method + marker, 1)
+    print("Bank handler added.", flush=True)
+
+if "/v19/bank" not in text:
+    old_auto = 'app.router.add_get("/v19/auto", self.auto_page)'
+    if old_auto not in text:
+        print("Could not find the auto route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_auto,
+        old_auto + newline + '        app.router.add_get("/v19/bank", self.bank_page)',
+        1,
+    )
+    print("Bank route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
 
 shell = Path("src") / "zeus3" / "v19" / "shell.py"
@@ -326,6 +352,19 @@ if "/v19/auto" not in nav:
         )
         shell.write_bytes(nav.encode("utf-8"))
         print("Auto tab added.", flush=True)
+
+if "/v19/bank" not in nav:
+    old_nav = '("AUTO", "/v19/auto"),'
+    if old_nav not in nav:
+        old_nav = '("SIGNALS", "/v19/signals"),'
+    if old_nav in nav:
+        nav = nav.replace(
+            old_nav,
+            old_nav + ("\r\n" if "\r\n" in nav else "\n") + '    ("BANK", "/v19/bank"),',
+            1,
+        )
+        shell.write_bytes(nav.encode("utf-8"))
+        print("Bank tab added.", flush=True)
 
 resolver = Path("src") / "zeus3" / "instruments" / "resolver.py"
 mapping = resolver.read_text(encoding="utf-8")
