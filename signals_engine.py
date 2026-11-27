@@ -78,6 +78,8 @@ ICE_TICK = {
 WING = 2
 LOG = Path("signal_research_v2.jsonl")
 BANK_LOG = Path("gold_bank.log")
+SCAN_LOG = Path("scan_bank.log")
+SCAN_PAIRS = ("WTI", "EURUSD", "USDJPY")
 BITCOIN_LOG = Path("bitcoin_scalp.log")
 STATE = Path("signal_research_state_v2.json")
 AUCTION = Path("auction_state.json")
@@ -4137,6 +4139,17 @@ def _finish(state: dict[str, Any], store: str, summary_name: str, bars_by_chart:
             except (TypeError, ValueError):
                 continue
             plan["mfe"] = mfe
+        for plan in (state.get("scan_open") or {}).values():
+            if plan.get("done"):
+                continue
+            if str(plan.get("symbol")) != symbol or plan.get("side") != row.get("side"):
+                continue
+            try:
+                if abs(float(plan.get("entry")) - float(row.get("entry"))) > 1e-6:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            plan["mfe"] = mfe
         if not result:
             row["mfe"] = mfe
             continue
@@ -4522,6 +4535,138 @@ def _bank_watch(state: dict[str, Any], symbol: str, book: dict[str, Any] | None,
         plan["stopped"] = True
 
 
+def _scan_px(symbol: str, price: float) -> str:
+    if symbol == "EURUSD":
+        return f"{float(price):.5f}"
+    if symbol == "USDJPY":
+        return f"{float(price):.3f}"
+    return f"{float(price):.3f}"
+
+
+def _scan_block(title: str, rows: list[tuple[str, str]]) -> None:
+    lines = [title]
+    for name, value in rows:
+        lines.append(f"{name} {value}")
+    lines.append("")
+    with SCAN_LOG.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
+def _scan_spread(bid: float | None, ask: float | None) -> float | None:
+    if isinstance(bid, bool) or isinstance(ask, bool):
+        return None
+    if not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)):
+        return None
+    if float(ask) < float(bid) or float(bid) <= 0:
+        return None
+    return float(ask) - float(bid)
+
+
+def scan_plan(symbol: str, row: dict[str, Any], bid: float | None, ask: float | None, book: dict[str, Any] | None) -> dict[str, Any] | None:
+    """One combined paper trade. Not gold. Not an R target."""
+    if symbol not in SCAN_PAIRS or str(row.get("chart")) != "RESPONSIVE":
+        return None
+    if row.get("side") not in ("BUY", "SELL") or not row.get("tradeable"):
+        return None
+    try:
+        entry = float(row["entry"])
+        stop = float(row["risk_stop"] if row.get("risk_stop") is not None else row["stop"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if abs(entry - stop) <= 0:
+        return None
+    spread = _scan_spread(bid, ask)
+    if spread is None and isinstance(book, dict):
+        spread = _scan_spread(book.get("bid"), book.get("ask"))
+    return {
+        "send": False,
+        "symbol": symbol,
+        "side": row["side"],
+        "entry": entry,
+        "stop": stop,
+        "spread": 0.0 if spread is None else spread,
+    }
+
+
+def scan_take(state: dict[str, Any], symbol: str, row: dict[str, Any], bid: float | None, ask: float | None, book: dict[str, Any] | None, now: str) -> None:
+    if symbol not in SCAN_PAIRS:
+        return
+    plan = scan_plan(symbol, row, bid, ask, book)
+    if plan is None:
+        return
+    pending = state.setdefault("scan_open", {})
+    if any(not item.get("done") for item in pending.values()):
+        return
+    try:
+        entry = float(plan["entry"])
+    except (TypeError, ValueError):
+        return
+    key = "|".join((now[:10], symbol, str(plan["side"]), str(round(entry, 5))))
+    if key in pending or key in state.setdefault("scan_seen", {}):
+        return
+    state["scan_seen"][key] = now
+    plan["opened"] = now
+    pending[key] = plan
+    _scan_block("TAKEN", [
+        ("symbol", symbol),
+        ("time", now),
+        ("side", str(plan["side"])),
+        ("entry", _scan_px(symbol, entry)),
+        ("stop", _scan_px(symbol, float(plan["stop"]))),
+        ("spread", _scan_px(symbol, float(plan["spread"]))),
+        ("sent", "no"),
+    ])
+
+
+def scan_watch(state: dict[str, Any], symbol: str, bid: float | None, ask: float | None, now: str) -> None:
+    """Bank the profit that is there, if it is bigger than the spread. Then get out."""
+    if symbol not in SCAN_PAIRS:
+        return
+    spread = _scan_spread(bid, ask)
+    for key, plan in list(state.setdefault("scan_open", {}).items()):
+        if plan.get("done") or str(plan.get("symbol")) != symbol:
+            continue
+        try:
+            entry = float(plan["entry"])
+            stop = float(plan["stop"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        buy = plan.get("side") == "BUY"
+        if spread is None:
+            live = None
+            hit_stop = False
+        elif buy:
+            live = float(bid) - entry
+            hit_stop = float(bid) <= stop
+        else:
+            live = entry - float(ask)
+            hit_stop = float(ask) >= stop
+        if live is not None and live > spread + 1e-12:
+            _scan_block("BANK", [
+                ("symbol", symbol),
+                ("time", now),
+                ("side", str(plan.get("side"))),
+                ("entry", _scan_px(symbol, entry)),
+                ("move", _scan_px(symbol, live)),
+                ("spread", _scan_px(symbol, spread)),
+                ("why", "In profit by more than the spread. Bank it and get out."),
+                ("sent", "no"),
+            ])
+            plan["done"] = True
+            continue
+        if hit_stop:
+            _scan_block("STOP", [
+                ("symbol", symbol),
+                ("time", now),
+                ("side", str(plan.get("side"))),
+                ("entry", _scan_px(symbol, entry)),
+                ("stop", _scan_px(symbol, stop)),
+                ("why", "No profit bigger than the spread. The stop was the exit."),
+                ("sent", "no"),
+            ])
+            plan["done"] = True
+
+
 def record(
     symbol: str,
     rows: list[dict[str, Any]],
@@ -4645,9 +4790,11 @@ def record(
                 ("risk", f"{float(plan['risk']):.2f}"),
                 ("sent", "no"),
             ])
+        scan_take(state, symbol, row, bid, ask, book, now)
     _finish(state, "if_open", "if_taken", bars_by_chart, symbol, now)
     _finish(state, "taken_open", "taken", bars_by_chart, symbol, now)
     _bank_watch(state, symbol, book, now)
+    scan_watch(state, symbol, bid, ask, now)
     _note_manage(state, symbol, bid, ask, book, now)
     bitcoin_scalp(state, symbol, bars_by_chart, book, now)
     _save_state(state)

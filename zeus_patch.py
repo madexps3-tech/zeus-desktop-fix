@@ -319,6 +319,32 @@ if "/v19/bank" not in text:
     )
     print("Bank route added.", flush=True)
 
+if "def scan_page" not in text:
+    scan_method = (
+        "    async def scan_page(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import render_scan_page" + newline
+        + "        return web.Response(text=render_scan_page(), content_type='text/html')" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the scan page.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, scan_method + marker, 1)
+    print("Scan handler added.", flush=True)
+
+if 'add_get("/v19/scan"' not in text:
+    old_bank = 'app.router.add_get("/v19/bank", self.bank_page)'
+    if old_bank not in text:
+        print("Could not find the bank route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_bank,
+        old_bank + newline + '        app.router.add_get("/v19/scan", self.scan_page)',
+        1,
+    )
+    print("Scan route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
 
 shell = Path("src") / "zeus3" / "v19" / "shell.py"
@@ -365,6 +391,19 @@ if "/v19/bank" not in nav:
         )
         shell.write_bytes(nav.encode("utf-8"))
         print("Bank tab added.", flush=True)
+
+if "/v19/scan" not in nav:
+    old_nav = '("BANK", "/v19/bank"),'
+    if old_nav not in nav:
+        old_nav = '("AUTO", "/v19/auto"),'
+    if old_nav in nav:
+        nav = nav.replace(
+            old_nav,
+            old_nav + ("\r\n" if "\r\n" in nav else "\n") + '    ("SCAN", "/v19/scan"),',
+            1,
+        )
+        shell.write_bytes(nav.encode("utf-8"))
+        print("Scan tab added.", flush=True)
 
 resolver = Path("src") / "zeus3" / "instruments" / "resolver.py"
 mapping = resolver.read_text(encoding="utf-8")

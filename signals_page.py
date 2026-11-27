@@ -175,6 +175,7 @@ tr.pick{outline:1px solid var(--warn)}
 <header>
   <a href="/v19/auto">AUTO</a>
   <a href="/v19/bank">BANK</a>
+  <a href="/v19/scan">SCAN</a>
   <h1>SIGNALS</h1>
   <span class="muted" id="clock"></span>
 </header>
@@ -2772,6 +2773,65 @@ def _bank_live() -> list[dict[str, str]]:
     return out
 
 
+def _scan_live() -> str:
+    path = Path("scan_bank.log")
+    if not path.exists():
+        return "<tr><td colspan=\"4\" class=\"muted\">No paper trade yet. The file is scan_bank.log in the ZEUS folder. It is written when oil, euro, or dollar-yen has a responsive row and nothing else in this bot is open.</td></tr>"
+    rows = []
+    title = ""
+    fields: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line in ("TAKEN", "BANK", "STOP"):
+            if title:
+                rows.append((title, fields))
+            title = line
+            fields = []
+        elif title and line:
+            fields.append(line)
+    if title:
+        rows.append((title, fields))
+    if not rows:
+        return "<tr><td colspan=\"4\" class=\"muted\">No paper trade yet.</td></tr>"
+    html = []
+    for name, fields in rows[-40:]:
+        html.append("<tr><td>" + name + "</td><td colspan=\"3\">" + " · ".join(fields) + "</td></tr>")
+    return "".join(html)
+
+
+def render_scan_page() -> str:
+    """Oil, euro, and dollar-yen. One paper trade. Not an R target. Does not send."""
+    return """<!doctype html><html><head><meta charset="utf-8"><title>ZEUS Scan</title>
+<style>
+:root{--bg:#071019;--panel:#0c1824;--line:#24384c;--text:#e7eef5;--muted:#8ea3b8;--warn:#e9c66b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}
+header{display:flex;gap:14px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+a{color:#9fb3c8;text-decoration:none;font-size:12px;font-weight:800}
+h1{font-size:22px;margin:16px 0 8px}
+main{padding:16px 20px;max-width:1100px}
+.muted{color:var(--muted)} .warn{color:var(--warn)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px 0}
+table{width:100%;border-collapse:collapse;font:12px Consolas,monospace}
+td{padding:8px;border-top:1px solid #1a2c3c}
+</style></head><body>
+<header>
+  <a href="/v19/signals">SIGNALS</a>
+  <a href="/v19/auto">AUTO</a>
+  <a href="/v19/bank">BANK</a>
+  <h1 style="font-size:16px;margin:0">SCAN</h1>
+  <span class="warn">Paper only. This page does not send an order.</span>
+</header>
+<main>
+  <h1>Oil, euro, dollar-yen</h1>
+  <p class="muted">One combined bot. Gold is not in it. Gold stays on the BANK page.</p>
+  <div class="card">It looks for the next responsive row on oil, euro, or dollar-yen. Only one trade is open. It is not waiting for 1R or 2R.</div>
+  <div class="card">If the open profit is bigger than the spread, bank that move and get out. Then it looks again. If the profit never clears the spread, the stop is the exit.</div>
+  <div class="card">Dollar-yen is included. The old log had no dollar-yen trades, so there is no past result to show. This page does not invent one.</div>
+  <table>
+    """ + _scan_live() + """
+  </table>
+</main></body></html>"""
+
+
 def render_bank_page() -> str:
     """The gold bank on its own page. It does not send an order."""
     old = [
@@ -2823,6 +2883,7 @@ td{padding:8px;border-top:1px solid #1a2c3c}
 <header>
   <a href="/v19/signals">SIGNALS</a>
   <a href="/v19/auto">AUTO</a>
+  <a href="/v19/scan">SCAN</a>
   <h1 style="font-size:16px;margin:0">BANK</h1>
   <span class="warn">Demo only. This page does not send an order.</span>
 </header>
@@ -2870,6 +2931,7 @@ td{padding:6px;border-top:1px solid #1a2c3c}
 <header>
   <a href="/v19/signals">SIGNALS</a>
   <a href="/v19/bank">BANK</a>
+  <a href="/v19/scan">SCAN</a>
   <h1>AUTO</h1><span class="muted" id="arm">OFF</span>
 </header>
 <main>
