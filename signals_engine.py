@@ -4274,7 +4274,7 @@ def bitcoin_scalp(
         book_price = float(book.get("last"))
     except (TypeError, ValueError):
         book_price = (bid + ask) / 2.0
-    if abs(book_price - _num(last, "close")) > max(spread * 5.0, 50.0):
+    if abs(book_price - _num(last, "close")) > float(MAX_BASIS["BTCUSD"]):
         return
     low_level = float(lows[-1]["price"])
     high_level = float(highs[-1]["price"])
@@ -4571,20 +4571,34 @@ def scan_plan(symbol: str, row: dict[str, Any], bid: float | None, ask: float | 
     try:
         entry = float(row["entry"])
         stop = float(row["risk_stop"] if row.get("risk_stop") is not None else row["stop"])
-        target = float(row["target"])
     except (TypeError, ValueError, KeyError):
         return None
     if abs(entry - stop) <= 0:
         return None
-    if row["side"] == "BUY" and target <= entry:
-        return None
-    if row["side"] == "SELL" and target >= entry:
-        return None
+    raw = row.get("targets") if isinstance(row.get("targets"), list) else []
+    areas = []
+    for price in list(raw) + [row.get("target")]:
+        try:
+            level = float(price)
+        except (TypeError, ValueError):
+            continue
+        if row["side"] == "BUY" and level <= entry:
+            continue
+        if row["side"] == "SELL" and level >= entry:
+            continue
+        if any(abs(level - kept) <= 1e-9 for kept in areas):
+            continue
+        areas.append(level)
+    if row["side"] == "SELL":
+        areas.sort(reverse=True)
+    else:
+        areas.sort()
     spread = _scan_spread(bid, ask)
     if spread is None and isinstance(book, dict):
         spread = _scan_spread(book.get("bid"), book.get("ask"))
     spread = 0.0 if spread is None else spread
-    if abs(target - entry) <= spread:
+    areas = [level for level in areas if abs(level - entry) > spread]
+    if not areas:
         return None
     return {
         "send": False,
@@ -4592,7 +4606,8 @@ def scan_plan(symbol: str, row: dict[str, Any], bid: float | None, ask: float | 
         "side": row["side"],
         "entry": entry,
         "stop": stop,
-        "target": target,
+        "target": areas[0],
+        "areas": areas,
         "spread": spread,
     }
 
@@ -4628,8 +4643,8 @@ def scan_take(state: dict[str, Any], symbol: str, row: dict[str, Any], bid: floa
     ])
 
 
-def scan_watch(state: dict[str, Any], symbol: str, bid: float | None, ask: float | None, now: str) -> None:
-    """Get out at the row's target. A profit that has not reached it is not a bank."""
+def scan_watch(state: dict[str, Any], symbol: str, bid: float | None, ask: float | None, book: dict[str, Any] | None, now: str) -> None:
+    """Two results at a value level. Bank there, or hold for the next level while the book is pushing."""
     if symbol not in SCAN_PAIRS:
         return
     spread = _scan_spread(bid, ask)
@@ -4653,13 +4668,34 @@ def scan_watch(state: dict[str, Any], symbol: str, bid: float | None, ask: float
             hit_stop = float(ask) >= stop
             hit_target = float(ask) <= target
         if hit_target and not hit_stop:
+            areas = [float(price) for price in (plan.get("areas") or [])]
+            later = [price for price in areas if (price > target + 1e-9 if buy else price < target - 1e-9)]
+            delta = book.get("delta_60s") if isinstance(book, dict) else None
+            pushing = isinstance(delta, (int, float)) and not isinstance(delta, bool) and (
+                (buy and float(delta) > 0) or ((not buy) and float(delta) < 0)
+            )
+            if pushing and later:
+                _scan_block("AT AREA", [
+                    ("symbol", symbol),
+                    ("time", now),
+                    ("side", str(plan.get("side"))),
+                    ("entry", _scan_px(symbol, entry)),
+                    ("area", _scan_px(symbol, target)),
+                    ("set_area", "Bank " + _scan_px(symbol, target)),
+                    ("flow", "Hold. Next " + _scan_px(symbol, later[0]) + ". The stop stays."),
+                    ("sent", "no"),
+                ])
+                plan["target"] = later[0]
+                continue
             _scan_block("BANK", [
                 ("symbol", symbol),
                 ("time", now),
                 ("side", str(plan.get("side"))),
                 ("entry", _scan_px(symbol, entry)),
-                ("target", _scan_px(symbol, target)),
-                ("why", "The target was reached. Bank it and get out."),
+                ("area", _scan_px(symbol, target)),
+                ("set_area", "Bank " + _scan_px(symbol, target)),
+                ("flow", "Bank " + _scan_px(symbol, target)),
+                ("why", "The book is quiet, turned, or missing. Bank the area and get out."),
                 ("sent", "no"),
             ])
             plan["done"] = True
@@ -4671,7 +4707,8 @@ def scan_watch(state: dict[str, Any], symbol: str, bid: float | None, ask: float
                 ("side", str(plan.get("side"))),
                 ("entry", _scan_px(symbol, entry)),
                 ("stop", _scan_px(symbol, stop)),
-                ("why", "The target was not reached. The stop was the exit."),
+                ("set_area", "Stop"),
+                ("flow", "Stop. The area was not reached."),
                 ("sent", "no"),
             ])
             plan["done"] = True
@@ -4804,7 +4841,7 @@ def record(
     _finish(state, "if_open", "if_taken", bars_by_chart, symbol, now)
     _finish(state, "taken_open", "taken", bars_by_chart, symbol, now)
     _bank_watch(state, symbol, book, now)
-    scan_watch(state, symbol, bid, ask, now)
+    scan_watch(state, symbol, bid, ask, book, now)
     _note_manage(state, symbol, bid, ask, book, now)
     bitcoin_scalp(state, symbol, bars_by_chart, book, now)
     _save_state(state)
