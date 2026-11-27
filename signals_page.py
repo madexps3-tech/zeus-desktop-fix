@@ -2773,28 +2773,133 @@ def _bank_live() -> list[dict[str, str]]:
     return out
 
 
-def _scan_live() -> str:
-    path = Path("scan_bank.log")
+def _log_blocks(path: Path, titles: tuple[str, ...]) -> list[dict[str, str]]:
     if not path.exists():
-        return "<tr><td colspan=\"4\" class=\"muted\">No paper trade yet. The file is scan_bank.log in the ZEUS folder. It is written when oil, euro, or dollar-yen has a responsive row and nothing else in this bot is open.</td></tr>"
-    rows = []
-    title = ""
-    fields: list[str] = []
+        return []
+    blocks: list[list[str]] = []
+    current: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line in ("TAKEN", "BANK", "STOP"):
-            if title:
-                rows.append((title, fields))
-            title = line
-            fields = []
-        elif title and line:
-            fields.append(line)
-    if title:
-        rows.append((title, fields))
+        if line in titles:
+            if current:
+                blocks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append(current)
+    parsed = []
+    for block in blocks:
+        fields = {"kind": block[0]}
+        for line in block[1:]:
+            if " " not in line:
+                continue
+            name, value = line.split(" ", 1)
+            fields[name] = value
+        parsed.append(fields)
+    return parsed
+
+
+def _scan_rows() -> list[dict[str, str]]:
+    parsed = _log_blocks(Path("scan_bank.log"), ("TAKEN", "AT AREA", "BANK", "STOP"))
+    taken = [row for row in parsed if row.get("kind") == "TAKEN"]
+    later = [row for row in parsed if row.get("kind") in ("AT AREA", "BANK", "STOP")]
+    out = []
+    for row in taken:
+        match = None
+        for item in later:
+            if item.get("symbol") == row.get("symbol") and item.get("side") == row.get("side") and item.get("entry") == row.get("entry") and item.get("time", "") >= row.get("time", ""):
+                match = item
+        result = match or {}
+        kind = result.get("kind") or ""
+        out.append({
+            "time": row.get("time") or "",
+            "symbol": row.get("symbol") or "",
+            "side": row.get("side") or "",
+            "entry": row.get("entry") or "",
+            "stop": row.get("stop") or "",
+            "area": result.get("area") or row.get("target") or "",
+            "set_area": result.get("set_area") or "Open",
+            "flow": result.get("flow") or "Open",
+            "exit": "Open" if kind in ("", "AT AREA") else kind.title(),
+        })
+    return out
+
+
+def _scan_table() -> str:
+    rows = _scan_rows()
     if not rows:
-        return "<tr><td colspan=\"4\" class=\"muted\">No paper trade yet.</td></tr>"
+        return "<tr><td colspan=\"9\" class=\"muted\">No paper trade yet. A row is written when oil, euro, or dollar-yen has a responsive entry and nothing else in this bot is open.</td></tr>"
     html = []
-    for name, fields in rows[-40:]:
-        html.append("<tr><td>" + name + "</td><td colspan=\"3\">" + " · ".join(fields) + "</td></tr>")
+    for row in rows:
+        html.append(
+            "<tr><td>" + row["time"] + "</td><td>" + row["symbol"] + "</td><td>" + row["side"]
+            + "</td><td>" + row["entry"] + "</td><td>" + row["stop"] + "</td><td>" + row["area"]
+            + "</td><td>" + row["set_area"] + "</td><td>" + row["flow"] + "</td><td>" + row["exit"] + "</td></tr>"
+        )
+    return "".join(html)
+
+
+def _bitcoin_rows() -> list[dict[str, str]]:
+    parsed = _log_blocks(Path("bitcoin_scalp.log"), ("DIRECTION", "TAKEN", "HOLD", "BANK", "STOP"))
+    out = []
+    taken = []
+    for row in parsed:
+        if row.get("kind") == "DIRECTION":
+            out.append({
+                "time": row.get("time") or "",
+                "side": "No trade",
+                "entry": "",
+                "stop": "",
+                "target": row.get("level") or "",
+                "result": "Not taken",
+                "flow": row.get("why") or "",
+            })
+            continue
+        if row.get("kind") == "TAKEN":
+            taken.append(row)
+            continue
+        match = None
+        for item in taken:
+            if item.get("side") == row.get("side") and item.get("entry") == row.get("entry") and item.get("time", "") <= row.get("time", ""):
+                match = item
+        base = match or {}
+        kind = row.get("kind") or ""
+        out.append({
+            "time": base.get("time") or row.get("time") or "",
+            "side": row.get("side") or "",
+            "entry": row.get("entry") or "",
+            "stop": base.get("stop") or row.get("stop") or "",
+            "target": row.get("next") or row.get("target") or base.get("target") or "",
+            "result": "Open" if kind == "HOLD" else kind.title(),
+            "flow": row.get("why") or ("Hold. The stop stays." if kind == "HOLD" else ""),
+        })
+    for row in taken:
+        closed = any(item.get("entry") == row.get("entry") and item.get("side") == row.get("side") and item.get("result") != "Not taken" for item in out)
+        if closed:
+            continue
+        out.append({
+            "time": row.get("time") or "",
+            "side": row.get("side") or "",
+            "entry": row.get("entry") or "",
+            "stop": row.get("stop") or "",
+            "target": row.get("target") or "",
+            "result": "Open",
+            "flow": "Open",
+        })
+    return out
+
+
+def _bitcoin_table() -> str:
+    rows = _bitcoin_rows()
+    if not rows:
+        return "<tr><td colspan=\"7\" class=\"muted\">No paper scalp yet. A row is written when the Binance book and the account candle qualify. Nothing is sent.</td></tr>"
+    html = []
+    for row in rows:
+        html.append(
+            "<tr><td>" + row["time"] + "</td><td>" + row["side"] + "</td><td>" + row["entry"]
+            + "</td><td>" + row["stop"] + "</td><td>" + row["target"] + "</td><td>" + row["result"]
+            + "</td><td>" + row["flow"] + "</td></tr>"
+        )
     return "".join(html)
 
 
@@ -2811,6 +2916,7 @@ main{padding:16px 20px;max-width:1100px}
 .muted{color:var(--muted)} .warn{color:var(--warn)}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px 0}
 table{width:100%;border-collapse:collapse;font:12px Consolas,monospace}
+th{color:var(--muted);text-align:left;font-size:11px;padding:8px}
 td{padding:8px;border-top:1px solid #1a2c3c}
 </style></head><body>
 <header>
@@ -2827,7 +2933,8 @@ td{padding:8px;border-top:1px solid #1a2c3c}
   <div class="card">Two results at the first area. Set area: bank there and get out. Order flow: if the 60-second book is still pushing, hold for the next value level. The stop stays where it was. If the book is quiet, turned, or missing, bank the area.</div>
   <div class="card">Dollar-yen is included. The old log had no dollar-yen trades, so there is no past result to show. This page does not invent one.</div>
   <table>
-    """ + _scan_live() + """
+    <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Stop</th><th>Area</th><th>Set area</th><th>Order flow</th><th>Exit</th></tr>
+    """ + _scan_table() + """
   </table>
 </main></body></html>"""
 
@@ -2905,7 +3012,11 @@ td{padding:8px;border-top:1px solid #1a2c3c}
     """ + "".join(live_rows) + """
   </table>
   <h1>Bitcoin. Not the gold bank.</h1>
-  <p class="muted">Paper only. The study has to be on the Binance perpetual, the chart that is open on the weekend. If the 60-second book is still selling through a low, there is no buy. That buy would be their bid. If the 60-second book is still buying through a high, there is no sell. The target is the next swing that pays at least the stop. If the book is still going when price gets there, hold. The stop is not moved. If the book is quiet or it has turned, bank. A spread wider than the stop is not a trade. Nothing is sent.</p>
+  <p class="muted">Paper only. Nothing is sent. A buy is not taken while the 60-second book is still selling. A sell is not taken while it is still buying. At the swing, a pushing book holds and the stop stays. A quiet or turned book banks.</p>
+  <table>
+    <tr><th>Time</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Result</th><th>Order flow</th></tr>
+    """ + _bitcoin_table() + """
+  </table>
 </main></body></html>"""
 
 
