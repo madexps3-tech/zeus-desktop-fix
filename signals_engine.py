@@ -4563,7 +4563,7 @@ def _scan_spread(bid: float | None, ask: float | None) -> float | None:
 
 
 def scan_plan(symbol: str, row: dict[str, Any], bid: float | None, ask: float | None, book: dict[str, Any] | None) -> dict[str, Any] | None:
-    """One combined paper trade. Not gold. Not an R target."""
+    """One combined paper trade. The exit is the row's own target, not a $5 scratch."""
     if symbol not in SCAN_PAIRS or str(row.get("chart")) != "RESPONSIVE":
         return None
     if row.get("side") not in ("BUY", "SELL") or not row.get("tradeable"):
@@ -4571,20 +4571,29 @@ def scan_plan(symbol: str, row: dict[str, Any], bid: float | None, ask: float | 
     try:
         entry = float(row["entry"])
         stop = float(row["risk_stop"] if row.get("risk_stop") is not None else row["stop"])
+        target = float(row["target"])
     except (TypeError, ValueError, KeyError):
         return None
     if abs(entry - stop) <= 0:
         return None
+    if row["side"] == "BUY" and target <= entry:
+        return None
+    if row["side"] == "SELL" and target >= entry:
+        return None
     spread = _scan_spread(bid, ask)
     if spread is None and isinstance(book, dict):
         spread = _scan_spread(book.get("bid"), book.get("ask"))
+    spread = 0.0 if spread is None else spread
+    if abs(target - entry) <= spread:
+        return None
     return {
         "send": False,
         "symbol": symbol,
         "side": row["side"],
         "entry": entry,
         "stop": stop,
-        "spread": 0.0 if spread is None else spread,
+        "target": target,
+        "spread": spread,
     }
 
 
@@ -4613,13 +4622,14 @@ def scan_take(state: dict[str, Any], symbol: str, row: dict[str, Any], bid: floa
         ("side", str(plan["side"])),
         ("entry", _scan_px(symbol, entry)),
         ("stop", _scan_px(symbol, float(plan["stop"]))),
+        ("target", _scan_px(symbol, float(plan["target"]))),
         ("spread", _scan_px(symbol, float(plan["spread"]))),
         ("sent", "no"),
     ])
 
 
 def scan_watch(state: dict[str, Any], symbol: str, bid: float | None, ask: float | None, now: str) -> None:
-    """Bank the profit that is there, if it is bigger than the spread. Then get out."""
+    """Get out at the row's target. A profit that has not reached it is not a bank."""
     if symbol not in SCAN_PAIRS:
         return
     spread = _scan_spread(bid, ask)
@@ -4629,27 +4639,27 @@ def scan_watch(state: dict[str, Any], symbol: str, bid: float | None, ask: float
         try:
             entry = float(plan["entry"])
             stop = float(plan["stop"])
+            target = float(plan["target"])
         except (TypeError, ValueError, KeyError):
             continue
         buy = plan.get("side") == "BUY"
         if spread is None:
-            live = None
             hit_stop = False
+            hit_target = False
         elif buy:
-            live = float(bid) - entry
             hit_stop = float(bid) <= stop
+            hit_target = float(bid) >= target
         else:
-            live = entry - float(ask)
             hit_stop = float(ask) >= stop
-        if live is not None and live > spread + 1e-12:
+            hit_target = float(ask) <= target
+        if hit_target and not hit_stop:
             _scan_block("BANK", [
                 ("symbol", symbol),
                 ("time", now),
                 ("side", str(plan.get("side"))),
                 ("entry", _scan_px(symbol, entry)),
-                ("move", _scan_px(symbol, live)),
-                ("spread", _scan_px(symbol, spread)),
-                ("why", "In profit by more than the spread. Bank it and get out."),
+                ("target", _scan_px(symbol, target)),
+                ("why", "The target was reached. Bank it and get out."),
                 ("sent", "no"),
             ])
             plan["done"] = True
@@ -4661,7 +4671,7 @@ def scan_watch(state: dict[str, Any], symbol: str, bid: float | None, ask: float
                 ("side", str(plan.get("side"))),
                 ("entry", _scan_px(symbol, entry)),
                 ("stop", _scan_px(symbol, stop)),
-                ("why", "No profit bigger than the spread. The stop was the exit."),
+                ("why", "The target was not reached. The stop was the exit."),
                 ("sent", "no"),
             ])
             plan["done"] = True

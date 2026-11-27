@@ -2823,8 +2823,8 @@ td{padding:8px;border-top:1px solid #1a2c3c}
 <main>
   <h1>Oil, euro, dollar-yen</h1>
   <p class="muted">One combined bot. Gold is not in it. Gold stays on the BANK page.</p>
-  <div class="card">It looks for the next responsive row on oil, euro, or dollar-yen. Only one trade is open. It is not waiting for 1R or 2R.</div>
-  <div class="card">If the open profit is bigger than the spread, bank that move and get out. Then it looks again. If the profit never clears the spread, the stop is the exit.</div>
+  <div class="card">It looks for the next responsive row on oil, euro, or dollar-yen. Only one trade is open. It does not bank a small profit.</div>
+  <div class="card">The exit is the target already on that row. If the target is inside the spread, it is not a trade. When the price reaches the target, bank it and get out. If the target is not reached, the stop is the exit.</div>
   <div class="card">Dollar-yen is included. The old log had no dollar-yen trades, so there is no past result to show. This page does not invent one.</div>
   <table>
     """ + _scan_live() + """
