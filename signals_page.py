@@ -38,7 +38,6 @@ from zeus3.v19.signals_engine import (
     session_levels,
     settle_rows,
     quiet_walk,
-    _append,
     _band,
     _closed,
     _time,
@@ -450,6 +449,33 @@ function draw(){
     [row.stop,row.target,row.entry].forEach(v=>{const n=priceOf(v); if(n!=null){lo=Math.min(lo,n);hi=Math.max(hi,n)}});
   }
   const levels=(data.pools)||[];
+  const flowEarly=data.flow||{};
+  function saved(kind){
+    const out=[];
+    levels.forEach(level=>{
+      if(level.kind==="RANGE"){
+        const high=Number(level.high), lowP=Number(level.low);
+        if(kind==="HIGH"&&isFinite(high)&&high>0) out.push(high);
+        if(kind==="LOW"&&isFinite(lowP)&&lowP>0) out.push(lowP);
+      }else if(level.kind===kind){
+        const price=Number(level.price);
+        if(isFinite(price)&&price>0) out.push(price);
+      }
+    });
+    return out;
+  }
+  const uHigh=flowEarly.unfinished_high==null?NaN:Number(flowEarly.unfinished_high);
+  const uLow=flowEarly.unfinished_low==null?NaN:Number(flowEarly.unfinished_low);
+  if(isFinite(uHigh)&&uHigh>0){
+    hi=Math.max(hi, uHigh);
+    const above=saved("HIGH").filter(price=>price>uHigh);
+    if(above.length) hi=Math.max(hi, Math.min.apply(null, above));
+  }
+  if(isFinite(uLow)&&uLow>0){
+    lo=Math.min(lo, uLow);
+    const below=saved("LOW").filter(price=>price<uLow);
+    if(below.length) lo=Math.min(lo, Math.max.apply(null, below));
+  }
   const pad=(hi-lo)*0.08||span*0.08; lo-=pad; hi+=pad;
   const y=p=>plotT+((hi-p)/(hi-lo))*(plotB-plotT);
   const step=(plotR-plotL)/Math.max(1,rows.length);
@@ -521,10 +547,23 @@ function draw(){
   ctx.font="700 14px Arial,sans-serif";
   [[magnetHigh,"UNFINISHED HIGH"],[magnetLow,"UNFINISHED LOW"]].forEach(line=>{
     const price=line[0];
-    if(!isFinite(price)||price<lo||price>hi) return;
+    if(!isFinite(price)||price<=0||price<lo||price>hi) return;
     ctx.setLineDash([8,4]); ctx.strokeStyle="#f4e8ff"; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
     ctx.setLineDash([]); ctx.fillStyle="#ffe38a"; ctx.fillText(line[1]+" "+price, plotL+4, y(price)+14);
   });
+  function paintNext(price, name){
+    if(!isFinite(price)||price<=0||price<lo||price>hi) return;
+    ctx.setLineDash([2,3]); ctx.strokeStyle="#8ea3b8"; ctx.beginPath(); ctx.moveTo(plotL,y(price)); ctx.lineTo(plotR,y(price)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle="#8ea3b8"; ctx.fillText(name+" "+price, plotL+4, y(price)-4);
+  }
+  if(isFinite(uHigh)&&uHigh>0){
+    const above=saved("HIGH").filter(price=>price>uHigh);
+    if(above.length) paintNext(Math.min.apply(null, above), "NEXT HIGH");
+  }
+  if(isFinite(uLow)&&uLow>0){
+    const below=saved("LOW").filter(price=>price<uLow);
+    if(below.length) paintNext(Math.max.apply(null, below), "NEXT LOW");
+  }
   ctx.restore();
   if(row){
     ctx.setLineDash([4,4]);
@@ -770,11 +809,6 @@ function boardLine(payload){
     const tps=coming.coming.tps?coming.coming.tps+" · ":"";
     return {kind:"INCOMING", side:coming.coming.side, text:coming.chart+" "+coming.coming.side+" into "+px(coming.coming.zone), sub:tps+"not a trade yet"};
   }
-  const shown=ranked[0];
-  if(shown){
-    const late=!!(shown.late||shown.missed||shown.state==="LATE");
-    return {kind:late?"LATE":"SHOWN", side:shown.side, text:shown.chart+" "+shown.side+" "+px(shown.entry), sub:late?"late · not an order":"shown · not an order"};
-  }
   return {kind:"QUIET", text:"quiet", sub:""};
 }
 function paintBoard(){
@@ -782,7 +816,7 @@ function paintBoard(){
   if(!box) return;
   box.innerHTML=PAIRS.map(p=>{
     const item=board[p[0]]||{kind:"QUIET", text:"reading", sub:""};
-    const tone=item.kind==="LATE"?"late":(item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"||item.kind==="SWEEP"||item.kind==="SHOWN"?"warn":"muted"));
+    const tone=item.kind==="LATE"?"late":(item.kind==="SIGNAL"?(item.side==="BUY"?"good":"bad"):(item.kind==="INCOMING"||item.kind==="PUSH"||item.kind==="SWEEP"?"warn":"muted"));
     return `<div class="pairq" onclick="setPair('${p[0]}')"><b class="${tone}">${p[1]} · ${item.text}</b>${item.sub?`<span class="sub">${item.sub}</span>`:""}</div>`;
   }).join("");
 }
@@ -1074,7 +1108,7 @@ async function watchOthers(){
   }catch(e){}
   finally{ scanning=false; }
 }
-setInterval(watchOthers, 4000);
+setInterval(watchOthers, 12000);
 let positionHtml="", manageNote="";
 function showManageNote(){
   const box=$("positions");
@@ -1799,16 +1833,6 @@ def _run_manage(
         if warn and warn != saved["told"]:
             _announce_manage(symbol, warn, int(pos["ticket"]), entry)
             saved["told"] = warn
-            _append({
-                "event": "MANAGE",
-                "book": "ticket",
-                "symbol": symbol,
-                "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "ticket": int(pos["ticket"]),
-                "side": side,
-                "entry": entry,
-                "line": warn,
-            })
         trades[key] = saved
         if saved["line"] and close:
             pos["manage_line"] = saved["line"]
@@ -2132,16 +2156,11 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
         dom_day["idle"] = dom_reason["text"]
     _broker_protection(rows, positions)
     _run_manage(host, symbol, rows, positions, bars_by_chart, book, bid, ask)
-    hot = any(
-        isinstance(row, dict) and row.get("tradeable") and row.get("side") and row.get("entry") is not None
-        for row in rows
-    )
-    due = scan or hot or monotonic() - _FILLED.get(symbol, 0.0) >= 15.0
-    if not due:
+    if scan or monotonic() - _FILLED.get(symbol, 0.0) < 15.0:
         research = {"taken": {}, "if_taken": {}}
     else:
         try:
-            research = record(symbol, rows, bars_by_chart, bid, ask, book)
+            research = record(symbol, rows, bars_by_chart, book)
         except Exception:
             research = {"taken": {}, "if_taken": {}}
         else:
