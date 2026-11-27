@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ DOM_COOL = {
 }
 DOM_COOL_SECONDS = 300
 GOLD_MIN_STOP = 2.0
+# The gold bank is a separate rule. It is not armed, so it never sends an order.
 BANK_ARMED = False
 BANK_MIN = 2.0
 BANK_MAX = 8.0
@@ -77,6 +79,9 @@ WING = 2
 LOG = Path("signal_research_v2.jsonl")
 BANK_LOG = Path("gold_bank.log")
 STATE = Path("signal_research_state_v2.json")
+AUCTION = Path("auction_state.json")
+NY = ZoneInfo("America/New_York")
+PROFILE_PAIRS = {"XAUUSD", "XAGUSD", "NAS100", "WTI"}
 FLOW_PAIRS = set(PAIRS)
 # How far a zone may sit past the value edge and still be that edge. Not five pips on every pair.
 EDGE = {
@@ -1851,10 +1856,10 @@ def _spent(symbol: str, chart: str, side: str, zone: float) -> bool:
 
 
 def _limits(row: dict[str, Any], symbol: str, spread: float) -> None:
-    """A zero spread, a one-pip euro stop, and a gold stop inside $2 are not buttons."""
+    """A missing quote, a one-pip euro stop, and a gold stop inside $2 are not buttons. A raw quote can have no spread."""
     if not row.get("side") or row.get("entry") is None or row.get("stop") is None or not row.get("tradeable"):
         return
-    if spread is None or float(spread) <= 0:
+    if spread is None or float(spread) < 0:
         _silence(row, "The spread is not on the quote, so this is not an order.")
         return
     risk = abs(float(row["entry"]) - float(row["stop"]))
@@ -1925,6 +1930,85 @@ def _probe(bars: list[dict[str, Any]], val: float, vah: float) -> dict[str, Any]
     return found
 
 
+def _m15_against(m15: list[dict[str, Any]], side: str) -> bool:
+    """The last two 15-minute swings are still moving against this side. No extra rule."""
+    points = swings(m15)
+    if side == "SELL":
+        highs = [point for point in points if point["kind"] == "HIGH"][-2:]
+        return len(highs) == 2 and highs[1]["price"] > highs[0]["price"]
+    if side == "BUY":
+        lows = [point for point in points if point["kind"] == "LOW"][-2:]
+        return len(lows) == 2 and lows[1]["price"] < lows[0]["price"]
+    return False
+
+
+def _range_gold_targets(entry: float, stop: float, targets: list[float]) -> list[float] | None:
+    """The first target has to be within $8 and at least 1R. A farther level can stay behind it."""
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    near: list[float] = []
+    far: list[float] = []
+    for price in targets:
+        distance = abs(float(price) - entry)
+        if distance + 1e-9 < risk:
+            continue
+        if distance <= 8.0 + 1e-9:
+            near.append(float(price))
+        else:
+            far.append(float(price))
+    if not near:
+        return None
+    return near + far
+
+
+def _range_level_open(symbol: str, side: str, extreme: float, entry: float, band: float = 8.0) -> bool:
+    """One responsive order per level. The same excess may keep updating."""
+    try:
+        saved = json.loads(TEST_STATE.read_text(encoding="utf-8")) if TEST_STATE.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(saved, dict):
+        return False
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for item in saved.values():
+        if not isinstance(item, dict) or not item.get("ordered"):
+            continue
+        if item.get("symbol") != symbol or str(item.get("side") or "") != side:
+            continue
+        opened = str(item.get("opened") or item.get("candle") or "")
+        if not opened.startswith(today):
+            continue
+        try:
+            prior_entry = float(item.get("entry"))
+            prior_extreme = float(item.get("extreme"))
+        except (TypeError, ValueError):
+            continue
+        if abs(prior_extreme - extreme) <= 1e-9:
+            continue
+        if abs(prior_entry - entry) <= float(band):
+            return True
+    return False
+
+
+def _mark_range_order(symbol: str, side: str, extreme: float) -> None:
+    key = "|".join((str(symbol), str(side), str(round(float(extreme), 5))))
+    try:
+        saved = json.loads(TEST_STATE.read_text(encoding="utf-8")) if TEST_STATE.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(saved, dict):
+        return
+    item = saved.get(key)
+    if not isinstance(item, dict):
+        return
+    item["ordered"] = True
+    try:
+        TEST_STATE.write_text(json.dumps(saved), encoding="utf-8")
+    except OSError:
+        return
+
+
 def _failed_test(
     symbol: str,
     m1: list[dict[str, Any]],
@@ -1956,13 +2040,23 @@ def _failed_test(
     if side == "SELL" and not entry > vah:
         return _wait("RESPONSIVE", "TESTING. The close is already through the value high. Not a trade.", "")
     pad = max(float(spread), _band(symbol))
-    stop = extreme - pad if side == "BUY" else extreme + pad
+    natural = extreme - pad if side == "BUY" else extreme + pad
+    if symbol == "XAGUSD" and abs(entry - natural) + 1e-9 < float(BE_MOVE["XAGUSD"]):
+        return _wait("RESPONSIVE", "The stop is inside 0.20. Not a trade.", "")
+    if symbol == "XAGUSD" and _range_level_open(symbol, side, extreme, entry, float(BE_MOVE["XAGUSD"])):
+        return _wait("RESPONSIVE", "A responsive order is already at this level. Not a new trade.", "")
+    stop = natural
     floor = float(BE_MOVE.get(symbol, 0.0) or 0.0)
     if floor > 0:
         stop = min(stop, entry - floor) if side == "BUY" else max(stop, entry + floor)
     risk = abs(entry - stop)
     if risk <= 0:
         return _wait("RESPONSIVE", "TESTING. The stop is not beyond the extreme. Not a trade.", "")
+    ranging = str(market).upper() == "RANGE"
+    if ranging and symbol == "XAUUSD" and risk + 1e-9 < GOLD_MIN_STOP:
+        return _wait("RESPONSIVE", "The stop is inside $2. Not a trade.", "")
+    if ranging and symbol == "XAUUSD" and _range_level_open(symbol, side, extreme, entry):
+        return _wait("RESPONSIVE", "A responsive order is already at this level. Not a new trade.", "")
     ladder = [val, poc, vah] if side == "BUY" else [vah, poc, val]
     targets = [price for price in ladder if (price > entry if side == "BUY" else price < entry)]
     if not targets:
@@ -1974,6 +2068,11 @@ def _failed_test(
     ]
     if not deciding:
         return _wait("RESPONSIVE", "TESTING. The point of control and the far side are not further than the stop. Not a trade.", "")
+    if ranging and symbol == "XAUUSD":
+        held = _range_gold_targets(entry, stop, targets)
+        if not held:
+            return _wait("RESPONSIVE", "The first target is more than $8 away, or it is under 1R. Not a trade.", "")
+        targets = held
     furthest = entry
     adverse = entry
     stopped = False
@@ -2044,6 +2143,19 @@ def _failed_test(
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
     if side == "SELL" and str(market).upper() == "BULLISH":
         row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still rising. The stop is the exit.").strip()
+    if ranging and symbol == "XAUUSD":
+        row["range_gold"] = True
+    if ranging and _m15_against(m15, side):
+        row["range_against"] = True
+        if side == "SELL":
+            row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still rising. The stop is the exit.").strip()
+        elif side == "BUY":
+            row["note"] = (str(row.get("note") or "") + " Higher risk. The price is still falling. The stop is the exit.").strip()
+    if ranging and symbol == "XAUUSD" and row.get("tradeable"):
+        _mark_range_order(symbol, side, extreme)
+    if symbol == "XAGUSD" and row.get("tradeable"):
+        row["min_stop"] = float(BE_MOVE["XAGUSD"])
+        _mark_range_order(symbol, side, extreme)
     return row
 
 
@@ -2098,6 +2210,356 @@ def _test_event(row: dict[str, Any]) -> None:
         return
 
 
+def _ny(moment: datetime | None = None) -> datetime:
+    now = moment or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(NY)
+
+
+def _load_auction() -> dict[str, Any]:
+    try:
+        state = json.loads(AUCTION.read_text(encoding="utf-8")) if AUCTION.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    return state if isinstance(state, dict) else {}
+
+
+def _save_auction(state: dict[str, Any]) -> None:
+    try:
+        AUCTION.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _bar_ny(bar: dict[str, Any]) -> datetime | None:
+    text = str(_time(bar) or "")
+    if not text:
+        return None
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(NY)
+
+
+def _cash_start(now: datetime) -> datetime:
+    """The latest 9:30 New York that has already started. Weekends roll back to Friday."""
+    day = now
+    if day.weekday() >= 5:
+        day = day - timedelta(days=day.weekday() - 4)
+    start = day.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now < start:
+        prev = day - timedelta(days=1)
+        while prev.weekday() >= 5:
+            prev = prev - timedelta(days=1)
+        start = prev.replace(hour=9, minute=30, second=0, microsecond=0)
+    return start
+
+
+def _remember_prior(symbol: str, area: tuple[float, float, float] | None) -> None:
+    """One snapshot per New York date, taken at or after 16:00. Today's snapshot is not yesterday."""
+    if symbol not in PROFILE_PAIRS or area is None:
+        return
+    now = _ny()
+    if (now.hour, now.minute) < (16, 0) or now.weekday() >= 5:
+        return
+    day = now.date().isoformat()
+    state = _load_auction()
+    book = state.setdefault("prior", {})
+    rows = book.get(symbol) if isinstance(book.get(symbol), list) else []
+    if any(isinstance(item, dict) and item.get("day") == day for item in rows):
+        return
+    val, poc, vah = area
+    rows.append({"day": day, "val": float(val), "poc": float(poc), "vah": float(vah)})
+    book[symbol] = rows[-6:]
+    _save_auction(state)
+
+
+def _prior_area(symbol: str, session: datetime) -> tuple[float, float, float] | None:
+    rows = (_load_auction().get("prior") or {}).get(symbol)
+    if not isinstance(rows, list):
+        return None
+    day = session.date().isoformat()
+    older = [item for item in rows if isinstance(item, dict) and str(item.get("day") or "") < day]
+    if not older:
+        return None
+    saved = older[-1]
+    try:
+        val, poc, vah = float(saved["val"]), float(saved["poc"]), float(saved["vah"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (val <= poc <= vah) or vah <= val:
+        return None
+    return val, poc, vah
+
+
+def _freeze(symbol: str, chart: str, side: str, level: float, day: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """The first prices for this level stand. A later tick does not become a new entry."""
+    state = _load_auction()
+    fired = state.setdefault("fired", {})
+    key = "|".join((symbol, chart, side, str(round(float(level), 2)), day))
+    saved = fired.get(key) if isinstance(fired.get(key), dict) else None
+    if saved is not None:
+        return saved
+    fired[key] = fields
+    if len(fired) > 400:
+        for old in list(fired)[:-400]:
+            fired.pop(old, None)
+    _save_auction(state)
+    return fields
+
+
+def _auction_order(
+    chart: str,
+    side: str,
+    reason: str,
+    entry: float,
+    stop: float,
+    targets: list[float],
+    when: str,
+    note: str,
+    trend: str,
+) -> dict[str, Any]:
+    risk = abs(entry - stop)
+    ahead = [price for price in targets if (price > entry if side == "BUY" else price < entry)]
+    row = _wait(chart, note, trend)
+    row["button"] = False
+    if risk <= 0 or not ahead:
+        row["note"] = note + " Nothing is ahead of the close. Not an order."
+        return row
+    first = ahead[0]
+    multiple = abs(first - entry) / risk
+    row.update({
+        "side": side,
+        "reason": reason,
+        "entry": round(entry, 5),
+        "stop": round(stop, 5),
+        "risk_stop": round(stop, 5),
+        "target": round(first, 5),
+        "targets": [round(price, 5) for price in ahead],
+        "r": round(multiple, 2),
+        "time": when,
+        "state": "READY" if multiple + 1e-9 >= BUTTON_R else "SHOWN",
+        "tradeable": multiple + 1e-9 >= BUTTON_R,
+        "button": multiple + 1e-9 >= BUTTON_R,
+        "note": note,
+    })
+    if not row["tradeable"]:
+        row["note"] = note + f" {row['r']}R. Under 1.5R. Not an order."
+    return row
+
+
+def _prior_row(symbol: str, bars: list[dict[str, Any]], spread: float, trend: str) -> dict[str, Any]:
+    if symbol not in PROFILE_PAIRS:
+        return _wait("PRIOR", "This market has no futures value in the file. Not a trade.", trend)
+    session = _cash_start(_ny())
+    area = _prior_area(symbol, session)
+    if area is None:
+        return _wait("PRIOR", "Yesterday's value is not saved yet. It is written at 16:00 New York.", trend)
+    val, poc, vah = area
+    start = session
+    end = start + timedelta(hours=6, minutes=30)
+    chosen = None
+    outside = ""
+    extreme = 0.0
+    counted = 0
+    for bar in _closed(bars):
+        stamp = _bar_ny(bar)
+        if stamp is None or stamp < start or stamp >= end:
+            continue
+        close = _num(bar, "close")
+        high = _num(bar, "high")
+        low = _num(bar, "low")
+        if outside == "LOW":
+            extreme = min(extreme, low)
+            counted += 1
+            if close > val:
+                chosen = ("FAIL", "BUY", val, extreme, bar)
+                outside = ""
+                continue
+            if counted >= 2 and close < val:
+                chosen = ("ACCEPT", "SELL", val, extreme, bar)
+                outside = ""
+                continue
+        elif outside == "HIGH":
+            extreme = max(extreme, high)
+            counted += 1
+            if close < vah:
+                chosen = ("FAIL", "SELL", vah, extreme, bar)
+                outside = ""
+                continue
+            if counted >= 2 and close > vah:
+                chosen = ("ACCEPT", "BUY", vah, extreme, bar)
+                outside = ""
+                continue
+        if close < val:
+            if outside != "LOW":
+                outside, extreme, counted = "LOW", low, 1
+        elif close > vah:
+            if outside != "HIGH":
+                outside, extreme, counted = "HIGH", high, 1
+    if chosen is None:
+        return _wait("PRIOR", f"Prior value {round(val, 5)} to {round(vah, 5)}. No close back in, and no two closes still outside.", trend)
+    kind, side, level, extreme, bar = chosen
+    pad = max(float(spread or 0.0), float(PIP.get(symbol, 0.0) or 0.0))
+    entry = _num(bar, "close")
+    width = vah - val
+    if kind == "FAIL":
+        stop = extreme - pad if side == "BUY" else extreme + pad
+        targets = [poc, vah] if side == "BUY" else [poc, val]
+        text = f"Prior {round(val, 5)} to {round(vah, 5)}. Close back inside. Failed auction."
+    else:
+        stop = level + pad if side == "SELL" else level - pad
+        targets = [level + width] if side == "BUY" else [level - width]
+        text = f"Prior {round(val, 5)} to {round(vah, 5)}. Two closes still outside. Accepted."
+    frozen = _freeze(symbol, "PRIOR", side, level, start.date().isoformat(), {
+        "entry": entry, "stop": stop, "targets": targets, "time": _time(bar), "note": text, "reason": kind,
+    })
+    return _auction_order("PRIOR", side, str(frozen.get("reason") or kind), float(frozen["entry"]), float(frozen["stop"]), list(frozen["targets"]), str(frozen.get("time") or ""), str(frozen.get("note") or text), trend)
+
+
+def _balance_row(symbol: str, bars: list[dict[str, Any]], spread: float, trend: str) -> dict[str, Any]:
+    if symbol != "NAS100":
+        return _wait("BALANCE", "The initial balance is the first hour after 9:30 New York. That is Nasdaq, not this market.", trend)
+    start = _cash_start(_ny())
+    hour = start + timedelta(hours=1)
+    now = _ny()
+    if now < hour:
+        return _wait("BALANCE", "The first hour after 9:30 New York is still forming. Not a trade.", trend)
+    highs = []
+    lows = []
+    later = []
+    for bar in _closed(bars):
+        stamp = _bar_ny(bar)
+        if stamp is None or stamp < start:
+            continue
+        if stamp < hour:
+            highs.append(_num(bar, "high"))
+            lows.append(_num(bar, "low"))
+        else:
+            later.append(bar)
+    if not highs or not lows:
+        return _wait("BALANCE", "The first hour has no candles yet. Not a trade.", trend)
+    top, bottom = max(highs), min(lows)
+    if top <= bottom:
+        return _wait("BALANCE", "The first hour has no range. Not a trade.", trend)
+    chosen = None
+    outside = ""
+    extreme = 0.0
+    counted = 0
+    for bar in later:
+        close = _num(bar, "close")
+        high = _num(bar, "high")
+        low = _num(bar, "low")
+        if outside == "HIGH":
+            extreme = max(extreme, high)
+            counted += 1
+            if close < top:
+                chosen = ("FAIL", "SELL", top, extreme, bar)
+                outside = ""
+                continue
+            if counted >= 2 and close > top:
+                chosen = ("DRIVE", "BUY", top, extreme, bar)
+                outside = ""
+                continue
+        elif outside == "LOW":
+            extreme = min(extreme, low)
+            counted += 1
+            if close > bottom:
+                chosen = ("FAIL", "BUY", bottom, extreme, bar)
+                outside = ""
+                continue
+            if counted >= 2 and close < bottom:
+                chosen = ("DRIVE", "SELL", bottom, extreme, bar)
+                outside = ""
+                continue
+        if close > top:
+            if outside != "HIGH":
+                outside, extreme, counted = "HIGH", high, 1
+        elif close < bottom:
+            if outside != "LOW":
+                outside, extreme, counted = "LOW", low, 1
+    if chosen is None:
+        return _wait("BALANCE", f"Initial balance {round(bottom, 5)} to {round(top, 5)}. No two closes outside, and no close back in.", trend)
+    kind, side, level, extreme, bar = chosen
+    pad = max(float(spread or 0.0), 1.0)
+    entry = _num(bar, "close")
+    height = top - bottom
+    if kind == "FAIL":
+        stop = extreme + pad if side == "SELL" else extreme - pad
+        targets = [bottom if side == "SELL" else top, bottom if side == "BUY" else top]
+        text = f"Initial balance {round(bottom, 5)} to {round(top, 5)}. Close back inside. The break failed."
+    else:
+        stop = (top - pad) if side == "BUY" else (bottom + pad)
+        targets = [top + height] if side == "BUY" else [bottom - height]
+        text = f"Initial balance {round(bottom, 5)} to {round(top, 5)}. Two closes still outside. Initiative."
+    frozen = _freeze(symbol, "BALANCE", side, level, start.date().isoformat(), {
+        "entry": entry, "stop": stop, "targets": targets, "time": _time(bar), "note": text, "reason": kind,
+    })
+    return _auction_order("BALANCE", side, str(frozen.get("reason") or kind), float(frozen["entry"]), float(frozen["stop"]), list(frozen["targets"]), str(frozen.get("time") or ""), str(frozen.get("note") or text), trend)
+
+
+def _unfinished_row(symbol: str, bars: list[dict[str, Any]], book: dict[str, Any] | None, spread: float, area: tuple[float, float, float] | None, trend: str) -> dict[str, Any]:
+    if symbol not in LADDER_PAIRS:
+        return _wait("UNFINISHED", "No unfinished price in the file. Not a trade.", trend)
+    low = _price_field(book, "unfinished_low")
+    high = _price_field(book, "unfinished_high")
+    if low is None and high is None:
+        return _wait("UNFINISHED", "No unfinished price in the file. Not a trade.", trend)
+    hits = []
+    start = _cash_start(_ny())
+    for level, side in ((low, "BUY"), (high, "SELL")):
+        if level is None:
+            continue
+        seen = False
+        extreme = float(level)
+        for bar in _closed(bars):
+            stamp = _bar_ny(bar)
+            if stamp is None or stamp < start:
+                continue
+            price_low = _num(bar, "low")
+            price_high = _num(bar, "high")
+            close = _num(bar, "close")
+            if side == "BUY" and price_low <= float(level):
+                seen = True
+                extreme = min(extreme, price_low)
+            if side == "SELL" and price_high >= float(level):
+                seen = True
+                extreme = max(extreme, price_high)
+            if not seen:
+                continue
+            back = close > float(level) if side == "BUY" else close < float(level)
+            if back:
+                hits.append((side, float(level), extreme, bar))
+                break
+    if not hits:
+        shown = []
+        if low is not None:
+            shown.append(f"low {round(low, 5)}")
+        if high is not None:
+            shown.append(f"high {round(high, 5)}")
+        return _wait("UNFINISHED", "Unfinished " + " and ".join(shown) + ". No close back through it.", trend)
+    side, level, extreme, bar = max(hits, key=lambda item: str(_time(item[3])))
+    pad = max(float(spread or 0.0), float(PIP.get(symbol, 0.0) or 0.0))
+    entry = _num(bar, "close")
+    stop = extreme - pad if side == "BUY" else extreme + pad
+    targets: list[float] = []
+    if area is not None:
+        val, poc, vah = area
+        targets = [poc, vah] if side == "BUY" else [poc, val]
+    text = f"Unfinished {'low' if side == 'BUY' else 'high'} {round(level, 5)}. Price traded it and closed back through."
+    if not targets:
+        text += " Nothing in value is ahead."
+    day = _cash_start(_ny()).date().isoformat()
+    frozen = _freeze(symbol, "UNFINISHED", side, level, day, {
+        "entry": entry, "stop": stop, "targets": targets, "time": _time(bar), "note": text, "reason": "REVISIT",
+    })
+    return _auction_order("UNFINISHED", side, "REVISIT", float(frozen["entry"]), float(frozen["stop"]), list(frozen.get("targets") or []), str(frozen.get("time") or ""), str(frozen.get("note") or text), trend)
+
+
 def build_rows(
     symbol: str,
     bars_by_chart: dict[str, list[dict[str, Any]]],
@@ -2131,6 +2593,7 @@ def build_rows(
     if isinstance(bid, (int, float)) and isinstance(ask, (int, float)):
         mid = (float(bid) + float(ask)) / 2.0
     area = _value_area(book, mid if mid is not None else bid, symbol)
+    _remember_prior(symbol, area)
     intraday = _choose(symbol, "INTRADAY", state, closed, intraday_zones, spread, beyond)
     intraday_note = "No close back from the value low or the value high."
     if area is None:
@@ -2332,6 +2795,12 @@ def build_rows(
     for row in rows:
         if row.get("side") and row.get("entry") is not None and row.get("stop") is not None:
             _guide(row, book, closed, symbol, bid, ask)
+    for maker in (_prior_row(symbol, m1, spread, state), _balance_row(symbol, m1, spread, state), _unfinished_row(symbol, m1, book, spread, area, state)):
+        if maker.get("tradeable"):
+            _limits(maker, symbol, spread)
+            _arm_button(maker)
+        maker["market"] = state
+        rows.append(maker)
     sweep = _sweep_row(symbol, m1, area, book, spread, highs15, lows15)
     if sweep is not None:
         rows.append(sweep)
@@ -2575,6 +3044,47 @@ def _dom_bucket(summary: dict[str, Any], name: str) -> dict[str, int]:
     }
 
 
+def _dom_same(symbol: str, row: dict[str, Any], saved: dict[str, Any], step: float) -> bool:
+    try:
+        return (
+            str(saved.get("symbol")) == symbol
+            and str(saved.get("side")) == str(row.get("side"))
+            and abs(float(saved["stop"]) - float(row["stop"])) <= step
+            and abs(float(saved["target"]) - float(row["target"])) <= step
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _dom_row_note(
+    symbol: str,
+    row: dict[str, Any],
+    open_rows: dict[str, dict[str, Any]],
+    closed: list[dict[str, Any]],
+    allow: bool,
+    idle: str,
+    step: float,
+) -> str:
+    """The row says what happened to this level. Logged is not a result."""
+    for saved in closed:
+        if not _dom_same(symbol, row, saved, step):
+            continue
+        result = str(saved.get("result") or "")
+        if result == "target":
+            return "Logged. The target printed. The stop did not."
+        if result == "stop":
+            return "Logged. The stop printed. The target did not."
+        if result == "both":
+            return "Logged. The target and the stop both printed. Not counted as a win."
+        return "Logged. Neither printed. It expired."
+    for saved in open_rows.values():
+        if _dom_same(symbol, row, saved, step):
+            return "Logged. Open. Neither the target nor the stop has printed."
+    if not allow:
+        return idle or "Not logged."
+    return "Logged. Open. Neither the target nor the stop has printed."
+
+
 def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market: str = "") -> dict[str, Any] | None:
     """Keep each ladder scalp until a price prints. Both in one check is not called a win."""
     if symbol not in DOM_RANGE:
@@ -2689,13 +3199,13 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
             saved["mfe"] = round(max(float(saved.get("mfe") or 0.0), bid_f - entry), 5)
             if bid_f >= target:
                 saved["target_hit"] = True
-            if ask_f <= stop:
+            if bid_f <= stop:
                 saved["stop_hit"] = True
         elif side == "SELL" and ask_f > 0:
             saved["mfe"] = round(max(float(saved.get("mfe") or 0.0), entry - ask_f), 5)
             if ask_f <= target:
                 saved["target_hit"] = True
-            if bid_f >= stop:
+            if ask_f >= stop:
                 saved["stop_hit"] = True
         aged = (now - opened).total_seconds() >= 1800 and not saved.get("target_hit") and not saved.get("stop_hit")
         if not (saved.get("target_hit") or saved.get("stop_hit") or aged):
@@ -2727,9 +3237,12 @@ def note_dom(symbol: str, row: dict[str, Any] | None, bid: Any, ask: Any, market
             summary["expired"] = int(summary.get("expired") or 0) + 1
         saved["closed"] = now.strftime("%Y-%m-%d %H:%M:%S")
         _append({"event": "DOM_DONE", **saved})
-        done.append(key)
-    for key in done:
-        open_rows.pop(key, None)
+        done.append(saved)
+    for key in list(open_rows):
+        if any(saved is open_rows.get(key) for saved in done):
+            open_rows.pop(key, None)
+    if isinstance(row, dict) and row.get("side"):
+        row["note"] = _dom_row_note(symbol, row, open_rows, done, allow, idle, step)
     summary["open"] = sum(1 for saved in open_rows.values() if saved.get("symbol") == symbol)
     summary["idle"] = idle
     _save_state(state)
@@ -3649,6 +4162,65 @@ def _finish(state: dict[str, Any], store: str, summary_name: str, bars_by_chart:
         open_rows.pop(key, None)
 
 
+def _note_manage(
+    state: dict[str, Any],
+    symbol: str,
+    bid: float | None,
+    ask: float | None,
+    book: dict[str, Any] | None,
+    now: str,
+) -> None:
+    """One research line when an open row changes from hold, to break-even, to bank, or to hold the rest."""
+    if not isinstance(bid, (int, float)) or isinstance(bid, bool):
+        return
+    if not isinstance(ask, (int, float)) or isinstance(ask, bool):
+        return
+    for row in (state.get("if_open") or {}).values():
+        if str(row.get("symbol")) != symbol or row.get("entry") is None:
+            continue
+        try:
+            entry = float(row["entry"])
+            stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
+        except (TypeError, ValueError):
+            continue
+        targets = []
+        for price in row.get("targets") or []:
+            try:
+                targets.append(float(price))
+            except (TypeError, ValueError):
+                continue
+        if not targets and row.get("target") is not None:
+            try:
+                targets = [float(row["target"])]
+            except (TypeError, ValueError):
+                targets = []
+        decision = _open_guide(
+            side=str(row.get("side") or ""),
+            entry=entry,
+            stop=stop,
+            bid=float(bid),
+            ask=float(ask),
+            targets=targets,
+            book=book,
+            symbol=symbol,
+        )
+        line = str(decision.get("line") or "")
+        if not line or line == row.get("manage_line"):
+            continue
+        row["manage_line"] = line
+        _append({
+            "event": "MANAGE",
+            "book": "if_taken",
+            "symbol": symbol,
+            "at": now,
+            "chart": row.get("chart"),
+            "side": row.get("side"),
+            "entry": row.get("entry"),
+            "stop": stop,
+            "line": line,
+        })
+
+
 def gold_bank(symbol: str, row: dict[str, Any], book: dict[str, Any] | None) -> dict[str, Any] | None:
     """Gold responsive only. Not armed. Does not change the row and does not send."""
     if symbol != "XAUUSD" or str(row.get("chart")) != "RESPONSIVE":
@@ -3720,7 +4292,6 @@ def _bank_watch(state: dict[str, Any], symbol: str, book: dict[str, Any] | None,
         pushing = isinstance(delta, (int, float)) and not isinstance(delta, bool) and (
             (side == "BUY" and float(delta) > 0) or (side == "SELL" and float(delta) < 0)
         )
-        action = "HOLD" if pushing else "CLOSE"
         _append({
             "event": "BANK",
             "symbol": symbol,
@@ -3729,7 +4300,7 @@ def _bank_watch(state: dict[str, Any], symbol: str, book: dict[str, Any] | None,
             "entry": plan.get("entry"),
             "stop": plan.get("stop"),
             "mfe": round(mfe, 5),
-            "action": action,
+            "action": "HOLD" if pushing else "CLOSE",
             "armed": False,
             "send": False,
         })
@@ -3739,46 +4310,111 @@ def _bank_watch(state: dict[str, Any], symbol: str, book: dict[str, Any] | None,
             ("entry", f"{float(plan.get('entry')):.2f}"),
             ("stop", f"{float(plan.get('stop')):.2f}"),
             ("move", f"{mfe:.2f}"),
-            ("action", action),
+            ("action", "HOLD" if pushing else "CLOSE"),
             ("sent", "no"),
         ])
         plan["banked"] = True
 
 
-def record(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, list[dict[str, Any]]], book: dict[str, Any] | None = None) -> dict[str, Any]:
+def record(
+    symbol: str,
+    rows: list[dict[str, Any]],
+    bars_by_chart: dict[str, list[dict[str, Any]]],
+    bid: float | None = None,
+    ask: float | None = None,
+    book: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Score a sent trade for real. Score every other ready row only as IF TAKEN."""
     state = _load_state()
     if_open: dict[str, dict[str, Any]] = state.setdefault("if_open", {})
     if_summary: dict[str, dict[str, int]] = state.setdefault("if_taken", {})
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    seen = state.setdefault("seen_entries", {})
+    for row in rows:
+        coming = row.get("coming") if isinstance(row.get("coming"), dict) else None
+        if not coming or not coming.get("side") or coming.get("zone") is None:
+            continue
+        try:
+            zone = round(float(coming["zone"]), 5)
+        except (TypeError, ValueError):
+            continue
+        coming_key = "|".join(("COMING", now[:10], symbol, str(row.get("chart")), str(coming.get("side")), str(zone)))
+        if coming_key in seen:
+            continue
+        seen[coming_key] = now
+        _append({
+            "event": "COMING",
+            "symbol": symbol,
+            "at": now,
+            "chart": row.get("chart"),
+            "side": coming.get("side"),
+            "zone": zone,
+            "text": coming.get("text") or "",
+        })
     for row in rows:
         if not row.get("side") or not row.get("tradeable"):
             continue
         if row.get("entry") is None:
             continue
-        seen = state.setdefault("seen_entries", {})
         anchor = row.get("risk_stop")
         if anchor is None:
             anchor = row.get("stop")
         if anchor is None:
             anchor = row.get("entry")
-        try:
-            entry = float(row["entry"])
-        except (TypeError, ValueError):
-            continue
-        floor = float(BE_MOVE.get(symbol, 0.0) or 0.0)
-        book_key = "|".join((now[:10], symbol, str(row.get("chart")), str(row.get("side"))))
-        taken = state.setdefault("first_entries", {}).setdefault(book_key, [])
-        if any(
-            isinstance(price, (int, float)) and not isinstance(price, bool) and abs(float(price) - entry) <= floor
-            for price in taken
-        ):
-            continue
-        taken.append(entry)
-        key = "|".join((book_key, str(round(entry, 5))))
-        if key in if_open or key in seen:
-            continue
-        seen[key] = now
+        range_gold = (
+            str(row.get("chart")) == "RESPONSIVE"
+            and str(row.get("market") or "").upper() == "RANGE"
+            and symbol == "XAUUSD"
+        )
+        silver = str(row.get("chart")) == "RESPONSIVE" and symbol == "XAGUSD"
+        bitcoin = str(row.get("chart")) == "RESPONSIVE" and symbol == "BTCUSD"
+        if range_gold:
+            try:
+                entry = float(row["entry"])
+            except (TypeError, ValueError):
+                continue
+            level_key = "|".join((now[:10], symbol, "RESPONSIVE", str(row.get("side"))))
+            prior = state.setdefault("range_levels", {}).get(level_key)
+            if isinstance(prior, (int, float)) and not isinstance(prior, bool) and abs(float(prior) - entry) <= 8.0:
+                continue
+            if level_key in if_open:
+                continue
+            state["range_levels"][level_key] = entry
+            key = level_key
+        elif silver:
+            try:
+                entry = float(row["entry"])
+            except (TypeError, ValueError):
+                continue
+            book_key = "|".join((now[:10], symbol, str(row.get("side"))))
+            taken = state.setdefault("silver_levels", {}).setdefault(book_key, [])
+            if any(abs(float(price) - entry) <= float(BE_MOVE["XAGUSD"]) for price in taken if isinstance(price, (int, float)) and not isinstance(price, bool)):
+                continue
+            taken.append(entry)
+            key = "|".join((book_key, str(round(entry, 3))))
+            if key in if_open:
+                continue
+        elif bitcoin:
+            key = "|".join((now[:10], symbol, "RESPONSIVE", str(row.get("side"))))
+            if key in if_open:
+                continue
+        else:
+            try:
+                entry = float(row["entry"])
+            except (TypeError, ValueError):
+                continue
+            floor = float(BE_MOVE.get(symbol, 0.0) or 0.0)
+            book_key = "|".join((now[:10], symbol, str(row.get("chart")), str(row.get("side"))))
+            taken = state.setdefault("first_entries", {}).setdefault(book_key, [])
+            if any(
+                isinstance(price, (int, float)) and not isinstance(price, bool) and abs(float(price) - entry) <= floor
+                for price in taken
+            ):
+                continue
+            taken.append(entry)
+            key = "|".join((book_key, str(round(entry, 5))))
+            if key in if_open:
+                continue
         if_open[key] = {**row, "symbol": symbol, "opened": now}
         if row.get("chart") in ("INTRADAY", "INTERDAY", "SCALP") and row.get("zone") is not None:
             zone_key = "|".join((symbol, str(row.get("chart")), str(row.get("side")), str(round(float(row["zone"]), 5))))
@@ -3806,6 +4442,7 @@ def record(symbol: str, rows: list[dict[str, Any]], bars_by_chart: dict[str, lis
     _finish(state, "if_open", "if_taken", bars_by_chart, symbol, now)
     _finish(state, "taken_open", "taken", bars_by_chart, symbol, now)
     _bank_watch(state, symbol, book, now)
+    _note_manage(state, symbol, bid, ask, book, now)
     _save_state(state)
     open_detail = [
         {
@@ -4161,6 +4798,8 @@ def _offer_missed(
     side = str(row.get("side") or "")
     if side not in {"BUY", "SELL"}:
         return
+    if row.get("range_gold"):
+        return
     try:
         stop = float(row.get("risk_stop") if row.get("risk_stop") is not None else row.get("stop"))
     except (TypeError, ValueError):
@@ -4203,6 +4842,14 @@ def _offer_missed(
         row["note"] = "The first target is already reached. Not a new order."
         return
     risk = abs(live - stop)
+    floor = row.get("min_stop")
+    if isinstance(floor, (int, float)) and not isinstance(floor, bool) and risk + 1e-9 < float(floor):
+        row["late"] = True
+        row["state"] = "LATE"
+        row["tradeable"] = False
+        row["button"] = False
+        row["note"] = "The stop is inside 0.20. Not a trade."
+        return
     if risk <= abs(float(spread or 0.0)):
         row["late"] = True
         row["state"] = "LATE"
