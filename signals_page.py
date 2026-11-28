@@ -476,20 +476,18 @@ function draw(){
   }
   const dailyHighs=Array.isArray(flowEarly.daily_highs)?flowEarly.daily_highs:null;
   const dailyLows=Array.isArray(flowEarly.daily_lows)?flowEarly.daily_lows:null;
-  const nextHighs=(isFinite(uHigh)&&uHigh>0)?uniquePrices((dailyHighs!==null?dailyHighs:saved("HIGH")).map(Number).filter(price=>isFinite(price)&&price>uHigh)).sort((a,b)=>a-b).slice(0,2):[];
-  const nextLows=(isFinite(uLow)&&uLow>0)?uniquePrices((dailyLows!==null?dailyLows:saved("LOW")).map(Number).filter(price=>isFinite(price)&&price<uLow)).sort((a,b)=>b-a).slice(0,2):[];
+  const candleLo=lo, candleHi=hi, reach=Math.max(span, 0.00001);
+  const onScale=price=>isFinite(price)&&price>0&&price<=candleHi+reach&&price>=candleLo-reach;
+  const nextHighs=(isFinite(uHigh)&&uHigh>0)?uniquePrices((dailyHighs!==null?dailyHighs:saved("HIGH")).map(Number).filter(price=>isFinite(price)&&price>uHigh&&onScale(price))).sort((a,b)=>a-b).slice(0,2):[];
+  const nextLows=(isFinite(uLow)&&uLow>0)?uniquePrices((dailyLows!==null?dailyLows:saved("LOW")).map(Number).filter(price=>isFinite(price)&&price<uLow&&onScale(price))).sort((a,b)=>b-a).slice(0,2):[];
   [flowEarly.ask_wall, flowEarly.bid_wall].forEach(price=>{
     const wall=Number(price);
-    if(isFinite(wall)&&wall>0){lo=Math.min(lo, wall); hi=Math.max(hi, wall)}
+    if(onScale(wall)){lo=Math.min(lo, wall); hi=Math.max(hi, wall)}
   });
-  if(isFinite(uHigh)&&uHigh>0){
-    hi=Math.max(hi, uHigh);
-    nextHighs.forEach(price=>{ hi=Math.max(hi, price); });
-  }
-  if(isFinite(uLow)&&uLow>0){
-    lo=Math.min(lo, uLow);
-    nextLows.forEach(price=>{ lo=Math.min(lo, price); });
-  }
+  if(onScale(uHigh)) hi=Math.max(hi, uHigh);
+  nextHighs.forEach(price=>{ hi=Math.max(hi, price); });
+  if(onScale(uLow)) lo=Math.min(lo, uLow);
+  nextLows.forEach(price=>{ lo=Math.min(lo, price); });
   const pad=(hi-lo)*0.08||span*0.08; lo-=pad; hi+=pad;
   const y=p=>plotT+((hi-p)/(hi-lo))*(plotB-plotT);
   const step=(plotR-plotL)/Math.max(1,rows.length);
