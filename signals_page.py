@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import html
+import copy
 import threading
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -39,6 +40,17 @@ from zeus3.v19.signals_engine import (
     session_levels,
     settle_rows,
     quiet_walk,
+    swings,
+    place_marks,
+    _headline,
+    _m15_against,
+    _prior_area,
+    _cash_start,
+    _ny,
+    _bar_ny,
+    _num,
+    PROFILE_PAIRS,
+    MAX_BASIS,
     _append,
     _band,
     _closed,
@@ -2057,10 +2069,21 @@ def _plan_number(value: Any) -> float | None:
     return number if number > 0 else None
 
 
+def _direction_line(symbol: str, after: str) -> str:
+    """The printed lean is gold's. Another market does not inherit it."""
+    text = after.strip()
+    if not text:
+        return ""
+    if symbol == "XAUUSD" or "usual lean for gold" not in text:
+        return text
+    kept = text.split("The usual lean for gold", 1)[0].strip()
+    return f"{kept} The direction is not known for this market.".strip()
+
+
 def _plan_news(symbol: str) -> str:
     """Only the five releases. No other event becomes a reason."""
     news = _news(symbol)
-    after = str(news.get("after") or "").strip()
+    after = _direction_line(symbol, str(news.get("after") or ""))
     if after:
         return after
     kind = _news_kind(str(news.get("name") or ""))
@@ -2073,6 +2096,80 @@ def _plan_news(symbol: str) -> str:
     if seconds >= 0:
         return f"{kind} is due. The direction is not known."
     return "The figure is not in the file. The direction is not known."
+
+
+def _yesterday_line(symbol: str, bars: list[dict[str, Any]]) -> str:
+    """Yesterday's value, from the same closes as the prior row. Today's value is not used."""
+    if symbol not in PROFILE_PAIRS:
+        return "This market has no saved prior value."
+    session = _cash_start(_ny())
+    area = _prior_area(symbol, session)
+    if area is None:
+        return "Yesterday's value is not saved yet. It is written at 16:00 New York."
+    val, _poc, vah = area
+    start = session
+    end = start + timedelta(hours=6, minutes=30)
+    chosen = ""
+    outside = ""
+    counted = 0
+    for bar in _closed(bars):
+        stamp = _bar_ny(bar)
+        if stamp is None or stamp < start or stamp >= end:
+            continue
+        close = _num(bar, "close")
+        if outside == "LOW":
+            counted += 1
+            if close > val:
+                chosen = "FAIL"
+                outside = ""
+                continue
+            if counted >= 2 and close < val:
+                chosen = "ACCEPT"
+                outside = ""
+                continue
+        elif outside == "HIGH":
+            counted += 1
+            if close < vah:
+                chosen = "FAIL"
+                outside = ""
+                continue
+            if counted >= 2 and close > vah:
+                chosen = "ACCEPT"
+                outside = ""
+                continue
+        if close < val:
+            if outside != "LOW":
+                outside, counted = "LOW", 1
+        elif close > vah:
+            if outside != "HIGH":
+                outside, counted = "HIGH", 1
+    where = f"Yesterday's value is {round(val, 5)} to {round(vah, 5)}."
+    if chosen == "ACCEPT":
+        return where + " Two closes are still outside that value. Trade with the new auction. Do not fade yesterday's value."
+    if chosen == "FAIL":
+        return where + " Price closed back inside it. The trade is that fade."
+    return where + " No close back in, and no two closes still outside."
+
+
+def _today_line(val: float | None, vah: float | None, bid: float | None) -> str:
+    if val is None or vah is None:
+        return "Today's value is not on this chart."
+    where = f"Today's value is {round(val, 5)} to {round(vah, 5)}."
+    if bid is None:
+        return where + " Whether price is inside it is not known."
+    if val <= bid <= vah:
+        return where + " Price is inside it. The fade is only after a close back in."
+    return where + " Price is outside it. One close outside today's value is not acceptance."
+
+
+def _plan_small(market: str, m15: list[dict[str, Any]]) -> str:
+    """The bank line only on the side the market is still pushing against."""
+    lines = []
+    if market == "BULLISH" or (market == "RANGE" and _m15_against(m15, "SELL")):
+        lines.append("A higher-risk sell is the small one. Bank the profit it gives. The confirmed sell is a close back under the next high.")
+    if market == "BEARISH" or (market == "RANGE" and _m15_against(m15, "BUY")):
+        lines.append("A higher-risk buy is the small one. Bank the profit it gives. The confirmed buy is a close back through the next low.")
+    return " ".join(lines)
 
 
 def _plan_target(bid: float | None, flow: dict[str, Any], market: str) -> str:
@@ -2183,19 +2280,10 @@ def _plan_text(symbol: str, payload: dict[str, Any]) -> dict[str, Any]:
         market = "RANGE"
     sessions = payload.get("sessions") if isinstance(payload.get("sessions"), dict) else {}
     session = str(sessions.get("current") or "UNKNOWN")
-    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
-    prior = next((row for row in rows if isinstance(row, dict) and row.get("chart") == "PRIOR"), {})
-    prior_note = str(prior.get("note") or "")
+    prior_note = str(payload.get("yesterday") or "")
     val = _plan_number(flow.get("val"))
     vah = _plan_number(flow.get("vah"))
-    if val is None or vah is None:
-        value = "Value is not on this chart."
-    elif "Accepted" in prior_note:
-        value = f"Value is {round(val, 5)} to {round(vah, 5)}. Two closes are still outside. Trade with the new auction. Do not fade the old value."
-    elif bid is not None and val <= bid <= vah:
-        value = f"Value is {round(val, 5)} to {round(vah, 5)}. Price is inside it. The fade is only after a close back in."
-    else:
-        value = f"Value is {round(val, 5)} to {round(vah, 5)}. Price is outside it. One close outside is not acceptance."
+    value = (prior_note + " " + _today_line(val, vah, bid)).strip()
     open_lines = []
     high = _plan_number(flow.get("unfinished_high"))
     low = _plan_number(flow.get("unfinished_low"))
@@ -2207,7 +2295,7 @@ def _plan_text(symbol: str, payload: dict[str, Any]) -> dict[str, Any]:
         open_lines.append("No unfinished price is open.")
     target = _plan_target(bid, flow, market)
     news = _plan_news(symbol)
-    small = "A higher-risk sell is the small one. The confirmed sell is a close back under the next high. A higher-risk buy is the close back through the next low."
+    small = _plan_small(market, payload.get("m15") if isinstance(payload.get("m15"), list) else [])
     text = " ".join([value, *open_lines, target, small, news])
     levels = _plan_levels(bid, flow)
     signature = "|".join((
@@ -2240,15 +2328,74 @@ def _remember_plan(fresh: dict[str, Any]) -> dict[str, Any]:
     return fresh
 
 
-def _plan_symbol(host: Any, symbol: str) -> dict[str, Any]:
-    cached = _LAST.get(symbol + "|M15")
-    payload = cached if isinstance(cached, dict) and cached.get("rows") else None
-    if payload is None:
+def _plan_read(host: Any, symbol: str) -> dict[str, Any] | None:
+    """A fresh read. It does not build a row and it does not send."""
+    charts = {}
+    for name in ("M1", "M15", "H4", "D1"):
         try:
-            payload = _payload(symbol, "M15", host)
+            charts[name] = _bars(host, symbol, name, 50.0, 200)
         except Exception:
-            payload = None
-    if not isinstance(payload, dict):
+            charts[name] = []
+    m15 = charts.get("M15") or []
+    if not m15:
+        return None
+    bid = ask = None
+    try:
+        quote = host.runtime.projection.market_data.quote(symbol)
+        bid = float(quote.bid)
+        ask = float(quote.ask)
+    except Exception:
+        bid = ask = None
+    if bid is not None and bid <= 0:
+        bid = None
+    book = copy.deepcopy(_book(symbol))
+    if bid is not None and ask is not None:
+        if symbol == "USDJPY":
+            place_yen(book, bid, ask)
+        else:
+            place_value(book, symbol, bid, ask)
+        place_marks(book, symbol, bid, ask)
+        poc = book.get("poc")
+        try:
+            gap = abs(float(poc) - bid)
+        except (TypeError, ValueError):
+            gap = None
+        if gap is None or gap > float(MAX_BASIS.get(symbol, 0.0) or 0.0):
+            book["val"] = book["vah"] = book["poc"] = None
+    else:
+        book["val"] = book["vah"] = book["poc"] = None
+        book["unfinished_high"] = book["unfinished_low"] = None
+    flow = {
+        "poc": book.get("poc"),
+        "vah": book.get("vah"),
+        "val": book.get("val"),
+        "unfinished_high": book.get("unfinished_high"),
+        "unfinished_low": book.get("unfinished_low"),
+        "daily_highs": _near_bands(charts, book.get("unfinished_high"), True),
+        "daily_lows": _near_bands(charts, book.get("unfinished_low"), False),
+    }
+    sessions = session_levels(m15)
+    return _plan_text(symbol, {
+        "flow": flow,
+        "quote": {"bid": bid, "ask": ask},
+        "market": _headline(swings(m15)),
+        "sessions": sessions,
+        "yesterday": _yesterday_line(symbol, charts.get("M1") or []),
+        "m15": m15,
+        "candles": m15,
+    })
+
+
+def _plan_symbol(host: Any, symbol: str) -> dict[str, Any]:
+    if _ORDER_BUSY.is_set():
+        old = _PLAN.get(symbol)
+        if isinstance(old, dict) and old.get("text"):
+            return old
+    fresh = _plan_read(host, symbol)
+    if fresh is None:
+        old = _PLAN.get(symbol)
+        if isinstance(old, dict) and old.get("text"):
+            return old
         return _remember_plan({
             "symbol": symbol,
             "name": _PLAN_NAMES.get(symbol, symbol),
@@ -2259,7 +2406,7 @@ def _plan_symbol(host: Any, symbol: str) -> dict[str, Any]:
             "levels": [],
             "candles": [],
         })
-    return _remember_plan(_plan_text(symbol, payload))
+    return _remember_plan(fresh)
 
 
 def render_plan_page() -> str:
