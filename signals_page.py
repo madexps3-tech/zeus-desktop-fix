@@ -570,14 +570,14 @@ function draw(){
   }
   nextHighs.forEach((price, index)=>paintNext(price, index?"2ND HIGH":"NEXT HIGH"));
   nextLows.forEach((price, index)=>paintNext(price, index?"2ND LOW":"NEXT LOW"));
-  function paintWall(price, name){
+  function paintWall(price, name, color){
     const level=Number(price);
     if(!isFinite(level)||level<=0||level<lo||level>hi) return;
-    ctx.setLineDash([1,3]); ctx.strokeStyle="#d7b56d"; ctx.beginPath(); ctx.moveTo(plotL,y(level)); ctx.lineTo(plotR,y(level)); ctx.stroke();
-    ctx.setLineDash([]); ctx.fillStyle="#d7b56d"; ctx.fillText(name+" "+level, plotR-210, y(level)-4);
+    ctx.setLineDash([]); ctx.lineWidth=1; ctx.strokeStyle=color; ctx.beginPath(); ctx.moveTo(plotL,y(level)); ctx.lineTo(plotR,y(level)); ctx.stroke();
+    ctx.fillStyle=color; ctx.fillText(name+" "+level, plotR-210, y(level)-4);
   }
-  paintWall(flowNow.ask_wall, "OFFERS");
-  paintWall(flowNow.bid_wall, "BIDS");
+  paintWall(flowNow.ask_wall, "OFFERS", "#56a8ff");
+  paintWall(flowNow.bid_wall, "BIDS", "#c084fc");
   ctx.restore();
   if(row){
     ctx.setLineDash([4,4]);
