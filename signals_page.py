@@ -474,8 +474,10 @@ function draw(){
     prices.forEach(price=>{ if(!out.some(kept=>Math.abs(kept-price)<1e-8)) out.push(price); });
     return out;
   }
-  const nextHighs=(isFinite(uHigh)&&uHigh>0)?uniquePrices(saved("HIGH").filter(price=>price>uHigh)).sort((a,b)=>a-b).slice(0,2):[];
-  const nextLows=(isFinite(uLow)&&uLow>0)?uniquePrices(saved("LOW").filter(price=>price<uLow)).sort((a,b)=>b-a).slice(0,2):[];
+  const dailyHighs=Array.isArray(flowEarly.daily_highs)?flowEarly.daily_highs:null;
+  const dailyLows=Array.isArray(flowEarly.daily_lows)?flowEarly.daily_lows:null;
+  const nextHighs=(isFinite(uHigh)&&uHigh>0)?uniquePrices((dailyHighs!==null?dailyHighs:saved("HIGH")).map(Number).filter(price=>isFinite(price)&&price>uHigh)).sort((a,b)=>a-b).slice(0,2):[];
+  const nextLows=(isFinite(uLow)&&uLow>0)?uniquePrices((dailyLows!==null?dailyLows:saved("LOW")).map(Number).filter(price=>isFinite(price)&&price<uLow)).sort((a,b)=>b-a).slice(0,2):[];
   [flowEarly.ask_wall, flowEarly.bid_wall].forEach(price=>{
     const wall=Number(price);
     if(isFinite(wall)&&wall>0){lo=Math.min(lo, wall); hi=Math.max(hi, wall)}
@@ -2109,6 +2111,46 @@ def _drop_left(symbol: str, rows: list[dict[str, Any]], bid: float, ask: float, 
         rows[index] = _wait(str(row.get("chart") or ""), "Price has left that entry. Not a trade.", str(row.get("market") or ""))
 
 
+def _near_bands(bars_by_chart: dict[str, list[dict[str, Any]]], anchor: Any, above: bool) -> list[float]:
+    """The next two MT5 highs or lows. A far swing is not used."""
+    try:
+        level = float(anchor)
+    except (TypeError, ValueError):
+        return []
+    if level <= 0:
+        return []
+    ranges: list[float] = []
+    for bar in (bars_by_chart.get("D1") or [])[-20:]:
+        try:
+            span = abs(float(bar["high"]) - float(bar["low"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if span > 0:
+            ranges.append(span)
+    ranges.sort()
+    typical = ranges[len(ranges) // 2] if ranges else 0.0
+    cap = typical * 4.0 if typical else 0.0
+    found: list[float] = []
+    key = "high" if above else "low"
+    for name in ("H4", "D1"):
+        for bar in bars_by_chart.get(name) or []:
+            try:
+                price = float(bar[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            if above and (price <= level or (cap and price - level > cap)):
+                continue
+            if not above and (price >= level or (cap and level - price > cap)):
+                continue
+            if any(abs(price - kept) <= 1e-8 for kept in found):
+                continue
+            found.append(price)
+    found.sort(reverse=not above)
+    return [round(price, 5) for price in found[:2]]
+
+
 def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str, Any]:
     core = host.runtime.projection.market_data
     try:
@@ -2253,6 +2295,8 @@ def _payload(symbol: str, chart: str, host: Any, scan: bool = False) -> dict[str
             "bid_wall_qty": book.get("bid_wall_qty"),
             "ask_wall": book.get("ask_wall"),
             "ask_wall_qty": book.get("ask_wall_qty"),
+            "daily_highs": _near_bands(bars_by_chart, book.get("unfinished_high"), True),
+            "daily_lows": _near_bands(bars_by_chart, book.get("unfinished_low"), False),
             "stepping": stepping,
             "walk": walk,
             "dom_day": dom_day,
