@@ -2040,6 +2040,21 @@ def _saved_edges(levels: dict[str, Any], bars_by_chart: dict[str, list[dict[str,
     return highs, lows
 
 
+def _small_plan(side: str, price: float | None) -> str:
+    """The early fade is the small one. The confirmed trade is the close back through the next band."""
+    if side == "SELL":
+        named = f" at {round(price, 5)}" if price else ""
+        return (
+            "Bank the profit this one gives. Do not hold it for the far target. "
+            "The stop is still the exit. The confirmed sell is a close back under the next high" + named + "."
+        )
+    named = f" at {round(price, 5)}" if price else ""
+    return (
+        "Bank the profit this one gives. Do not hold it for the far target. "
+        "The stop is still the exit. The confirmed buy is a close back through the next low" + named + "."
+    )
+
+
 def _failed_test(
     symbol: str,
     m1: list[dict[str, Any]],
@@ -2226,6 +2241,28 @@ def _failed_test(
     if symbol == "XAGUSD" and row.get("tradeable"):
         row["min_stop"] = float(BE_MOVE["XAGUSD"])
         _mark_range_order(symbol, side, extreme)
+    higher = (side == "SELL" and str(market).upper() == "BULLISH") or (
+        side == "BUY" and str(market).upper() == "BEARISH"
+    ) or bool(row.get("range_against"))
+    if higher and row.get("tradeable"):
+        band = _band(symbol)
+        if side == "SELL":
+            prices = [price for price in (ahead_highs or []) if price > entry + band]
+            if still_high is not None:
+                prices.append(still_high)
+            unfinished = _unfinished("unfinished_high")
+            if unfinished > entry + band:
+                prices.append(unfinished)
+            named = min(prices) if prices else None
+        else:
+            prices = [price for price in (ahead_lows or []) if price < entry - band]
+            if still_low is not None:
+                prices.append(still_low)
+            unfinished = _unfinished("unfinished_low")
+            if unfinished and unfinished < entry - band:
+                prices.append(unfinished)
+            named = max(prices) if prices else None
+        row["note"] = (str(row.get("note") or "") + " " + _small_plan(side, named)).strip()
     return row
 
 

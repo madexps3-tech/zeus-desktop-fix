@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import html
 import threading
 import asyncio
 from datetime import datetime, timezone
@@ -176,6 +177,7 @@ tr.pick{outline:1px solid var(--warn)}
   <a href="/v19/auto">AUTO</a>
   <a href="/v19/bank">BANK</a>
   <a href="/v19/scan">SCAN</a>
+  <a href="/v19/plan">PLAN</a>
   <h1>SIGNALS</h1>
   <span class="muted" id="clock"></span>
 </header>
@@ -2038,6 +2040,292 @@ def _news(symbol: str) -> dict[str, Any]:
         "warn": warn,
         "after": _released_line(upcoming),
     }
+
+
+_PLAN: dict[str, dict[str, Any]] = {}
+_PLAN_NAMES = {
+    "XAUUSD": "GOLD", "XAGUSD": "SILVER", "NAS100": "NASDAQ", "BTCUSD": "BITCOIN",
+    "EURUSD": "EURO", "USDJPY": "USDJPY", "WTI": "OIL", "NG-C": "GAS", "GER40": "DAX",
+}
+
+
+def _plan_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _plan_news(symbol: str) -> str:
+    """Only the five releases. No other event becomes a reason."""
+    news = _news(symbol)
+    after = str(news.get("after") or "").strip()
+    if after:
+        return after
+    kind = _news_kind(str(news.get("name") or ""))
+    if not kind:
+        return "No CPI, PCE, jobs, GDP, or Fed release is changing this plan."
+    try:
+        seconds = float(news.get("seconds"))
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if seconds >= 0:
+        return f"{kind} is due. The direction is not known."
+    return "The figure is not in the file. The direction is not known."
+
+
+def _plan_target(bid: float | None, flow: dict[str, Any], market: str) -> str:
+    above: list[tuple[float, str]] = []
+    below: list[tuple[float, str]] = []
+
+    def add(price: Any, name: str) -> None:
+        number = _plan_number(price)
+        if number is None or bid is None:
+            return
+        if number > bid:
+            above.append((number, name))
+        elif number < bid:
+            below.append((number, name))
+
+    add(flow.get("unfinished_high"), "the unfinished high")
+    add(flow.get("vah"), "value high")
+    for price in flow.get("daily_highs") or []:
+        add(price, "the next high")
+    add(flow.get("unfinished_low"), "the unfinished low")
+    add(flow.get("val"), "value low")
+    for price in flow.get("daily_lows") or []:
+        add(price, "the next low")
+    up = min(above, key=lambda item: item[0]) if above else None
+    down = max(below, key=lambda item: item[0]) if below else None
+    if market == "BULLISH" and up:
+        return f"The next target is {up[1]} at {round(up[0], 5)}."
+    if market == "BEARISH" and down:
+        return f"The next target is {down[1]} at {round(down[0], 5)}."
+    parts = []
+    if up:
+        parts.append(f"Above is {up[1]} at {round(up[0], 5)}")
+    if down:
+        parts.append(f"below is {down[1]} at {round(down[0], 5)}")
+    if not parts:
+        return "No next target is on the chart."
+    return "Neither side is confirmed. " + ". ".join(parts) + "."
+
+
+def _plan_levels(bid: float | None, flow: dict[str, Any]) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+
+    def add(price: Any, name: str, color: str) -> None:
+        number = _plan_number(price)
+        if number is None:
+            return
+        if any(abs(number - float(item["price"])) <= 1e-8 for item in found):
+            return
+        found.append({"price": round(number, 5), "name": name, "color": color})
+
+    add(flow.get("vah"), "VALUE HIGH", "#8ea3b8")
+    add(flow.get("poc"), "POC", "#f0c956")
+    add(flow.get("val"), "VALUE LOW", "#8ea3b8")
+    add(flow.get("unfinished_high"), "UNFINISHED", "#ffe38a")
+    add(flow.get("unfinished_low"), "UNFINISHED", "#ffe38a")
+    highs = [float(price) for price in (flow.get("daily_highs") or []) if _plan_number(price)]
+    lows = [float(price) for price in (flow.get("daily_lows") or []) if _plan_number(price)]
+    if bid is not None and highs:
+        add(min(price for price in highs if price > bid), "NEXT HIGH", "#56a8ff") if any(price > bid for price in highs) else None
+    if bid is not None and lows:
+        add(max(price for price in lows if price < bid), "NEXT LOW", "#c084fc") if any(price < bid for price in lows) else None
+    return found
+
+
+def _plan_svg(candles: list[dict[str, Any]], levels: list[dict[str, Any]]) -> str:
+    bars = [bar for bar in candles[-48:] if isinstance(bar, dict)]
+    closes: list[float] = []
+    for bar in bars:
+        number = _plan_number(bar.get("close"))
+        if number is not None:
+            closes.append(number)
+    marks = [float(item["price"]) for item in levels]
+    span = closes + marks
+    if len(span) < 2:
+        return ""
+    lo, hi = min(span), max(span)
+    if hi <= lo:
+        hi = lo + 1.0
+    width, height = 360, 110
+
+    def xpos(index: int) -> float:
+        return 8 + (width - 16) * (index / max(len(closes) - 1, 1))
+
+    def ypos(price: float) -> float:
+        return 8 + (height - 16) * ((hi - price) / (hi - lo))
+
+    parts = [f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {width} {height}' width='100%' height='110'>"]
+    parts.append("<rect width='100%' height='100%' fill='#050b11'/>")
+    if len(closes) >= 2:
+        points = " ".join(f"{xpos(index):.1f},{ypos(price):.1f}" for index, price in enumerate(closes))
+        parts.append(f"<polyline fill='none' stroke='#9fb3c8' stroke-width='1.5' points='{points}'/>")
+    for item in levels:
+        y = ypos(float(item["price"]))
+        color = html.escape(str(item["color"]), quote=True)
+        label = html.escape(str(item["name"]))
+        parts.append(f"<line x1='8' y1='{y:.1f}' x2='{width - 8}' y2='{y:.1f}' stroke='{color}' stroke-width='1'/>")
+        parts.append(f"<text x='10' y='{max(12, y - 3):.1f}' fill='{color}' font-size='10' font-family='Arial'>{label}</text>")
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _plan_text(symbol: str, payload: dict[str, Any]) -> dict[str, Any]:
+    flow = payload.get("flow") if isinstance(payload.get("flow"), dict) else {}
+    quote = payload.get("quote") if isinstance(payload.get("quote"), dict) else {}
+    bid = _plan_number(quote.get("bid"))
+    market = str(payload.get("market") or "RANGE").upper()
+    if market not in {"BULLISH", "BEARISH", "RANGE"}:
+        market = "RANGE"
+    sessions = payload.get("sessions") if isinstance(payload.get("sessions"), dict) else {}
+    session = str(sessions.get("current") or "UNKNOWN")
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    prior = next((row for row in rows if isinstance(row, dict) and row.get("chart") == "PRIOR"), {})
+    prior_note = str(prior.get("note") or "")
+    val = _plan_number(flow.get("val"))
+    vah = _plan_number(flow.get("vah"))
+    if val is None or vah is None:
+        value = "Value is not on this chart."
+    elif "Accepted" in prior_note:
+        value = f"Value is {round(val, 5)} to {round(vah, 5)}. Two closes are still outside. Trade with the new auction. Do not fade the old value."
+    elif bid is not None and val <= bid <= vah:
+        value = f"Value is {round(val, 5)} to {round(vah, 5)}. Price is inside it. The fade is only after a close back in."
+    else:
+        value = f"Value is {round(val, 5)} to {round(vah, 5)}. Price is outside it. One close outside is not acceptance."
+    open_lines = []
+    high = _plan_number(flow.get("unfinished_high"))
+    low = _plan_number(flow.get("unfinished_low"))
+    if high is not None:
+        open_lines.append(f"The unfinished high at {round(high, 5)} is still open.")
+    if low is not None:
+        open_lines.append(f"The unfinished low at {round(low, 5)} is still open.")
+    if not open_lines:
+        open_lines.append("No unfinished price is open.")
+    target = _plan_target(bid, flow, market)
+    news = _plan_news(symbol)
+    small = "A higher-risk sell is the small one. The confirmed sell is a close back under the next high. A higher-risk buy is the close back through the next low."
+    text = " ".join([value, *open_lines, target, small, news])
+    levels = _plan_levels(bid, flow)
+    signature = "|".join((
+        market, session, value, " ".join(open_lines), target, news,
+        ",".join(f"{item['name']}:{item['price']}" for item in levels),
+    ))
+    candles = payload.get("candles") if isinstance(payload.get("candles"), list) else []
+    return {
+        "symbol": symbol,
+        "name": _PLAN_NAMES.get(symbol, symbol),
+        "market": market,
+        "session": session,
+        "text": text,
+        "signature": signature,
+        "levels": levels,
+        "candles": candles,
+    }
+
+
+def _remember_plan(fresh: dict[str, Any]) -> dict[str, Any]:
+    """The chart is replaced only when the plan itself changes."""
+    old = _PLAN.get(str(fresh["symbol"]))
+    if isinstance(old, dict) and old.get("signature") == fresh.get("signature") and old.get("chart"):
+        fresh["chart"] = old["chart"]
+        fresh["updated"] = old.get("updated")
+    else:
+        fresh["chart"] = _plan_svg(list(fresh.get("candles") or []), list(fresh.get("levels") or []))
+        fresh["updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    _PLAN[str(fresh["symbol"])] = fresh
+    return fresh
+
+
+def _plan_symbol(host: Any, symbol: str) -> dict[str, Any]:
+    cached = _LAST.get(symbol + "|M15")
+    payload = cached if isinstance(cached, dict) and cached.get("rows") else None
+    if payload is None:
+        try:
+            payload = _payload(symbol, "M15", host)
+        except Exception:
+            payload = None
+    if not isinstance(payload, dict):
+        return _remember_plan({
+            "symbol": symbol,
+            "name": _PLAN_NAMES.get(symbol, symbol),
+            "market": "RANGE",
+            "session": "UNKNOWN",
+            "text": "This symbol has no candles yet. Not a plan.",
+            "signature": "none",
+            "levels": [],
+            "candles": [],
+        })
+    return _remember_plan(_plan_text(symbol, payload))
+
+
+def render_plan_page() -> str:
+    return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZEUS PLAN</title><style>
+:root{--bg:#071019;--panel:#0c1824;--line:#24384c;--text:#e7eef5;--muted:#8ea3b8}
+body{margin:0;background:var(--bg);color:var(--text);font:14px Arial,sans-serif}
+header{display:flex;gap:14px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
+a{color:#9fb3c8;text-decoration:none;font-size:12px;font-weight:800}
+h1{margin:0;font-size:16px}
+main{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px;padding:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
+.k{color:var(--muted);font-size:11px;letter-spacing:.08em}
+p{line-height:1.45}
+.muted{color:var(--muted);font-size:12px}
+</style></head><body>
+<header><a href="/v19/signals">SIGNALS</a><h1>PLAN</h1><span class="muted">A snapshot. It changes when a close changes the plan, or when a session ends. No order is sent.</span></header>
+<main id="board"></main>
+<script>
+function paint(plans){
+  const board=document.getElementById("board");
+  board.replaceChildren();
+  (plans||[]).forEach(function(plan){
+    const card=document.createElement("section");
+    card.className="card";
+    const title=document.createElement("div");
+    title.className="k";
+    title.textContent=plan.name+" · "+plan.market+" · "+plan.session;
+    const words=document.createElement("p");
+    words.textContent=plan.text||"";
+    const when=document.createElement("div");
+    when.className="muted";
+    when.textContent=plan.updated?("Updated "+plan.updated):"";
+    card.appendChild(title);
+    if(plan.chart){
+      const frame=document.createElement("div");
+      frame.innerHTML=plan.chart;
+      card.appendChild(frame);
+    }
+    card.appendChild(words);
+    card.appendChild(when);
+    board.appendChild(card);
+  });
+}
+function load(){
+  fetch("/api/v19/plan").then(function(r){return r.json()}).then(function(body){paint(body.plans||[])}).catch(function(){});
+}
+load();
+setInterval(load, 60000);
+</script></body></html>"""
+
+
+async def plan_state(host: Any, request: web.Request) -> web.Response:
+    plans = [_plan_symbol(host, symbol) for symbol in PAIRS]
+    public = []
+    for plan in plans:
+        public.append({
+            "symbol": plan.get("symbol"),
+            "name": plan.get("name"),
+            "market": plan.get("market"),
+            "session": plan.get("session"),
+            "text": plan.get("text"),
+            "chart": plan.get("chart") or "",
+            "updated": plan.get("updated") or "",
+        })
+    return web.json_response({"ok": True, "plans": public})
 
 
 def _account(host: Any) -> dict[str, Any]:

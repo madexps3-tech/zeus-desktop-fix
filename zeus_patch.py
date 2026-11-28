@@ -345,6 +345,38 @@ if 'add_get("/v19/scan"' not in text:
     )
     print("Scan route added.", flush=True)
 
+if "def plan_page" not in text:
+    plan_method = (
+        "    async def plan_page(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import render_plan_page" + newline
+        + "        return web.Response(text=render_plan_page(), content_type='text/html')" + newline
+        + newline
+        + "    async def plan_api(self, request: web.Request) -> web.Response:" + newline
+        + "        from zeus3.v19.signals_page import plan_state" + newline
+        + "        return await plan_state(self, request)" + newline
+        + newline
+    )
+    marker = "    def application(self) -> web.Application:"
+    if marker not in text:
+        print("Could not add the plan page.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(marker, plan_method + marker, 1)
+    print("Plan handler added.", flush=True)
+
+if "/v19/plan" not in text:
+    old_scan = 'app.router.add_get("/v19/scan", self.scan_page)'
+    if old_scan not in text:
+        print("Could not find the scan route.", flush=True)
+        raise SystemExit(1)
+    text = text.replace(
+        old_scan,
+        old_scan + newline
+        + '        app.router.add_get("/v19/plan", self.plan_page)' + newline
+        + '        app.router.add_get("/api/v19/plan", self.plan_api)',
+        1,
+    )
+    print("Plan route added.", flush=True)
+
 path.write_bytes(text.encode("utf-8"))
 
 shell = Path("src") / "zeus3" / "v19" / "shell.py"
@@ -404,6 +436,19 @@ if "/v19/scan" not in nav:
         )
         shell.write_bytes(nav.encode("utf-8"))
         print("Scan tab added.", flush=True)
+
+if "/v19/plan" not in nav:
+    old_nav = '("SCAN", "/v19/scan"),'
+    if old_nav not in nav:
+        old_nav = '("SIGNALS", "/v19/signals"),'
+    if old_nav in nav:
+        nav = nav.replace(
+            old_nav,
+            old_nav + ("\r\n" if "\r\n" in nav else "\n") + '    ("PLAN", "/v19/plan"),',
+            1,
+        )
+        shell.write_bytes(nav.encode("utf-8"))
+        print("Plan tab added.", flush=True)
 
 resolver = Path("src") / "zeus3" / "instruments" / "resolver.py"
 mapping = resolver.read_text(encoding="utf-8")
